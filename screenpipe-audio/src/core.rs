@@ -87,11 +87,9 @@ fn get_device_and_config(
 ) -> Result<(cpal::Device, cpal::SupportedStreamConfig)> {
     let host = match audio_device.device_type {
         #[cfg(target_os = "macos")]
-        DeviceType::Output => cpal::default_host(),
+        DeviceType::Output => cpal::host_from_id(cpal::HostId::ScreenCaptureKit)?,
         _ => cpal::default_host(),
     };
-
-    info!("device: {:?}", audio_device.to_string());
 
     let audio_device = if audio_device.to_string() == "default" {
         match audio_device.device_type {
@@ -103,6 +101,9 @@ fn get_device_and_config(
             DeviceType::Input => host.input_devices()?,
             DeviceType::Output => host.output_devices()?,
         };
+        if cfg!(target_os = "macos") && audio_device.device_type == DeviceType::Output {
+            devices = host.input_devices()?;
+        }
 
         devices.find(|x| {
             x.name()
@@ -153,16 +154,6 @@ async fn run_ffmpeg(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    // ! tmp hack shouldnt be needed
-    // Explicitly set the library paths for the FFmpeg command
-    // if let Ok(ld_library_path) = std::env::var("LD_LIBRARY_PATH") {
-    //     command.env("LD_LIBRARY_PATH", ld_library_path);
-    // }
-    // #[cfg(target_os = "macos")]
-    // if let Ok(dyld_library_path) = std::env::var("DYLD_LIBRARY_PATH") {
-    //     command.env("DYLD_LIBRARY_PATH", dyld_library_path);
-    // }
 
     debug!("FFmpeg command: {:?}", command);
 
@@ -326,9 +317,9 @@ pub fn list_audio_devices() -> Result<Vec<AudioDevice>> {
     {
         // !HACK macos is suppoed to use special macos feature "display capture"
         // ! see https://github.com/RustAudio/cpal/pull/894
-        let host = cpal::default_host();
-        // let host = cpal::host_from_id(cpal::HostId::ScreenCaptureKit)?;
-        for device in host.output_devices()? {
+        // let host = cpal::default_host();
+        let host = cpal::host_from_id(cpal::HostId::ScreenCaptureKit)?;
+        for device in host.input_devices()? {
             if let Ok(name) = device.name() {
                 devices.push(AudioDevice::new(name, DeviceType::Output));
             }
@@ -359,10 +350,11 @@ pub fn default_output_device() -> Result<AudioDevice> {
     {
         // !HACK macos is suppoed to use special macos feature "display capture"
         // ! see https://github.com/RustAudio/cpal/pull/894
-        let host = cpal::default_host();
-        // let host = cpal::host_from_id(cpal::HostId::ScreenCaptureKit)?;
+        // let host = cpal::default_host();
+        let host = cpal::host_from_id(cpal::HostId::ScreenCaptureKit)?;
         let device = host
-            .default_output_device()
+            .default_input_device()
+            // .default_output_device()
             .ok_or_else(|| anyhow!("No default input device found"))?;
         info!("Using display capture device: {}", device.name()?);
         return Ok(AudioDevice::new(device.name()?, DeviceType::Output));

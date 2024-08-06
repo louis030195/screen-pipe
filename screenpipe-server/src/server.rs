@@ -516,12 +516,12 @@ impl Server {
                 // https://github.com/tokio-rs/axum/blob/main/examples/tracing-aka-logging/src/main.rs
                 TraceLayer::new_for_http()
                     .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                    .on_request(DefaultOnRequest::new().level(Level::INFO))
-                    .on_response(
-                        DefaultOnResponse::new()
-                            .level(Level::INFO)
-                            .latency_unit(LatencyUnit::Micros),
-                    ),
+                    // .on_request(DefaultOnRequest::new().level(Level::INFO))
+                    // .on_response(
+                    //     DefaultOnResponse::new()
+                    //         .level(Level::INFO)
+                    //         .latency_unit(LatencyUnit::Micros),
+                    // ),
             )
             .with_state(app_state);
 
