@@ -13,15 +13,7 @@ use log::{debug, error, info};
 use screenpipe_audio::{AudioDevice, DeviceControl};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tower_http::{cors::CorsLayer, trace::DefaultMakeSpan};
@@ -30,7 +22,6 @@ use crate::plugin::ApiPluginLayer;
 
 pub struct AppState {
     pub db: Arc<DatabaseManager>,
-    pub vision_control: Arc<AtomicBool>,
     pub audio_devices_control: Arc<SegQueue<(AudioDevice, DeviceControl)>>,
     pub devices_status: HashMap<AudioDevice, DeviceControl>,
     pub app_start_time: DateTime<Utc>,
@@ -132,17 +123,12 @@ pub(crate) struct DeviceStatus {
     is_running: bool,
 }
 
-#[derive(Serialize)]
-pub(crate) struct RecordingStatus {
-    is_running: bool,
-}
-
 // Helper functions
 fn default_limit() -> u32 {
     20
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct HealthCheckResponse {
     pub status: String,
     pub last_frame_timestamp: Option<DateTime<Utc>>,
@@ -289,27 +275,6 @@ pub(crate) async fn stop_device(
     }))
 }
 
-pub(crate) async fn start_recording(
-    State(state): State<Arc<AppState>>,
-) -> JsonResponse<RecordingStatus> {
-    state.vision_control.store(true, Ordering::SeqCst);
-    JsonResponse(RecordingStatus { is_running: true })
-}
-
-pub(crate) async fn stop_recording(
-    State(state): State<Arc<AppState>>,
-) -> JsonResponse<RecordingStatus> {
-    state.vision_control.store(false, Ordering::SeqCst);
-    JsonResponse(RecordingStatus { is_running: false })
-}
-
-pub(crate) async fn get_recording_status(
-    State(state): State<Arc<AppState>>,
-) -> JsonResponse<RecordingStatus> {
-    let is_running = state.vision_control.load(Ordering::SeqCst);
-    JsonResponse(RecordingStatus { is_running })
-}
-
 pub(crate) async fn get_device_status(
     State(state): State<Arc<AppState>>,
     JsonExt(payload): JsonExt<DeviceRequest>,
@@ -363,7 +328,7 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
     debug!("Last audio timestamp: {:?}", last_audio);
 
     let now = Utc::now();
-    let threshold = Duration::from_secs(60);
+    let threshold: Duration = Duration::from_secs(60);
     let loading_threshold = Duration::from_secs(120);
 
     let app_start_time = state.app_start_time;
@@ -458,7 +423,6 @@ fn into_content_item(result: SearchResult) -> ContentItem {
 pub struct Server {
     db: Arc<DatabaseManager>,
     addr: SocketAddr,
-    vision_control: Arc<AtomicBool>,
     audio_devices_control: Arc<SegQueue<(AudioDevice, DeviceControl)>>,
 }
 
@@ -466,13 +430,11 @@ impl Server {
     pub fn new(
         db: Arc<DatabaseManager>,
         addr: SocketAddr,
-        vision_control: Arc<AtomicBool>,
         audio_devices_control: Arc<SegQueue<(AudioDevice, DeviceControl)>>,
     ) -> Self {
         Server {
             db,
             addr,
-            vision_control,
             audio_devices_control,
         }
     }
@@ -488,7 +450,6 @@ impl Server {
         // TODO could init w audio devices
         let app_state = Arc::new(AppState {
             db: self.db,
-            vision_control: self.vision_control,
             audio_devices_control: self.audio_devices_control,
             devices_status: device_status,
             app_start_time: Utc::now(),
@@ -501,9 +462,6 @@ impl Server {
             .route("/audio/stop", post(stop_device))
             .route("/audio/status", post(get_device_status))
             .route("/audio/list", get(get_devices))
-            .route("/vision/start", post(start_recording))
-            .route("/vision/stop", post(stop_recording))
-            .route("/vision/status", get(get_recording_status))
             .route("/health", get(health_check))
             .layer(ApiPluginLayer::new(api_plugin))
             .layer(CorsLayer::permissive())

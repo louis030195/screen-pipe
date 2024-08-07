@@ -1,7 +1,6 @@
 use image::DynamicImage;
 use log::{debug, error};
 use serde_json;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -15,8 +14,7 @@ use xcap::{Monitor, Window};
 use crate::utils::perform_ocr_windows;
 use crate::utils::OcrEngine;
 use crate::utils::{
-    capture_screenshot, compare_with_previous_image, perform_ocr_tesseract,
-    save_text_files,
+    capture_screenshot, compare_with_previous_image, perform_ocr_tesseract, save_text_files,
 };
 use rusty_tesseract::{Data, DataOutput}; // Add this import
 use screenpipe_integrations::unstructured_ocr::perform_ocr_cloud;
@@ -41,6 +39,7 @@ impl DataOutputWrapper {
     }
 }
 
+#[derive(Debug)]
 pub struct CaptureResult {
     pub image: Arc<DynamicImage>,
     pub text: String,
@@ -105,10 +104,10 @@ pub async fn continuous_capture(
     save_text_files_flag: bool,
     ocr_engine: Arc<OcrEngine>,
     monitor: Monitor,
+    stop_signal: Arc<Mutex<bool>>,
 ) {
     debug!("continuous_capture: Starting using monitor: {:?}", monitor);
     let previous_text_json = Arc::new(Mutex::new(None));
-    let ocr_task_running = Arc::new(AtomicBool::new(false));
     let mut frame_counter: u64 = 0;
     // let start_time = Instant::now();
     let mut previous_image: Option<Arc<DynamicImage>> = None;
@@ -116,6 +115,10 @@ pub async fn continuous_capture(
     let mut max_avg_value = 0.0;
 
     loop {
+        if *stop_signal.lock().await {
+            debug!("Stopping continuous_capture loop");
+            break;
+        }
         let (image, image_hash, _capture_duration) = capture_screenshot(&monitor).await;
         let current_average = compare_with_previous_image(
             &previous_image,
@@ -135,7 +138,10 @@ pub async fn continuous_capture(
 
         // Skip the frame if the current average difference is less than 0.006
         if current_average < 0.006 {
-            debug!("Skipping frame {} due to low average difference: {:.3}", frame_counter, current_average);
+            debug!(
+                "Skipping frame {} due to low average difference: {:.3}",
+                frame_counter, current_average
+            );
             frame_counter += 1;
             tokio::time::sleep(interval).await;
             continue;
@@ -156,47 +162,39 @@ pub async fn continuous_capture(
         previous_image = Some(Arc::new(image.clone()));
         // debug!("ocr_task_running {} BEFORE if if !ocr_task_running.load(Ordering::SeqCst)", ocr_task_running.load(Ordering::SeqCst));
 
-        if !ocr_task_running.load(Ordering::SeqCst) {
-            // debug!("max_avg_frame {} before if let Some(", max_avg_value);
-            if let Some(max_avg_frame) = max_average.take() {
-                // Use take() to move out the value
-                let ocr_task_data = OcrTaskData {
-                    image: max_avg_frame.image.clone(),
-                    frame_number: max_avg_frame.frame_number,
-                    timestamp: max_avg_frame.timestamp,
-                    result_tx: result_tx.clone(),
-                };
+        // debug!("max_avg_frame {} before if let Some(", max_avg_value);
+        if let Some(max_avg_frame) = max_average.take() {
+            // Use take() to move out the value
+            let ocr_task_data = OcrTaskData {
+                image: max_avg_frame.image.clone(),
+                frame_number: max_avg_frame.frame_number,
+                timestamp: max_avg_frame.timestamp,
+                result_tx: result_tx.clone(),
+            };
 
-                let previous_text_json_clone = previous_text_json.clone();
-                let ocr_task_running_clone = ocr_task_running.clone();
+            let previous_text_json_clone = previous_text_json.clone();
 
-                ocr_task_running.store(true, Ordering::SeqCst);
-                // debug!("ocr_task_running {}", ocr_task_running.load(Ordering::SeqCst));
-                let ocr_engine_clone = ocr_engine.clone();
-                tokio::spawn(async move {
-                    let w = Window::all().unwrap().first().unwrap().clone();
-                    let app_name = w.app_name();
-                    if let Err(e) = process_ocr_task(
-                        ocr_task_data.image,
-                        ocr_task_data.frame_number,
-                        ocr_task_data.timestamp,
-                        ocr_task_data.result_tx,
-                        &previous_text_json_clone,
-                        save_text_files_flag, // Pass the flag here
-                        ocr_engine_clone,     // Pass the cloud_ocr flag here
-                        app_name.to_string().to_lowercase(),
-                    )
-                    .await
-                    {
-                        error!("Error processing OCR task: {}", e);
-                    }
-                    ocr_task_running_clone.store(false, Ordering::SeqCst);
-                });
-
-                frame_counter = 0; // Reset frame_counter after OCR task is processed
-                // Reset max_average and max_avg_value after spawning the OCR task
-                max_avg_value = 0.0;
+            let ocr_engine_clone = ocr_engine.clone();
+            let w = Window::all().unwrap().first().unwrap().clone();
+            let app_name = w.app_name();
+            if let Err(e) = process_ocr_task(
+                ocr_task_data.image,
+                ocr_task_data.frame_number,
+                ocr_task_data.timestamp,
+                ocr_task_data.result_tx,
+                &previous_text_json_clone,
+                save_text_files_flag, // Pass the flag here
+                ocr_engine_clone,     // Pass the cloud_ocr flag here
+                app_name.to_string().to_lowercase(),
+            )
+            .await
+            {
+                error!("Error processing OCR task: {}", e);
             }
+
+            frame_counter = 0; // Reset frame_counter after OCR task is processed
+                               // Reset max_average and max_avg_value after spawning the OCR task
+            max_avg_value = 0.0;
         }
 
         frame_counter += 1;
@@ -232,16 +230,13 @@ pub async fn process_ocr_task(
     );
     let (text, data_output, json_output) = match &*ocr_engine {
         OcrEngine::Unstructured => {
-            debug!("Cloud Unstructured OCR");
             perform_ocr_cloud(&image_arc).await
         }
         OcrEngine::Tesseract => {
-            debug!("Local Tesseract OCR");
             perform_ocr_tesseract(&image_arc)
         }
         #[cfg(target_os = "windows")]
         OcrEngine::WindowsNative => {
-            debug!("Windows Native OCR");
             perform_ocr_windows(&image_arc).await
         }
         _ => {

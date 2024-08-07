@@ -1,7 +1,7 @@
 use clap::Parser;
 use screenpipe_vision::{continuous_capture, get_monitor, OcrEngine};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc::channel;
+use tokio::sync::{mpsc::channel, Mutex};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -22,6 +22,7 @@ async fn main() {
     let (result_tx, mut result_rx) = channel(512);
 
     let save_text_files = cli.save_text_files;
+    let stop_signal = Arc::new(Mutex::new(false));
 
     let capture_thread = tokio::spawn(async move {
         continuous_capture(
@@ -30,6 +31,7 @@ async fn main() {
             save_text_files,
             Arc::new(OcrEngine::Tesseract),
             get_monitor().await,
+            stop_signal.clone(),
         )
         .await
     });

@@ -6,7 +6,7 @@ mod resource_monitor;
 mod server;
 mod video;
 
-pub use core::{start_continuous_recording, RecorderControl};
+pub use core::{start_continuous_recording, RecordingState};
 pub use db::{ContentType, DatabaseManager, SearchResult};
 pub use logs::MultiWriter;
 pub use resource_monitor::{ResourceMonitor, RestartSignal};

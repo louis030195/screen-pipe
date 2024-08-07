@@ -6,6 +6,8 @@ use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 
+use crate::HealthCheckResponse;
+
 pub struct ResourceMonitor {
     start_time: Instant,
     self_healing_enabled: bool,
@@ -13,6 +15,9 @@ pub struct ResourceMonitor {
     health_check_failures: Mutex<u32>,
     max_health_check_failures: u32,
     restart_sender: Sender<RestartSignal>,
+    is_restarting: Arc<Mutex<bool>>,
+    last_restart_attempt: Mutex<Option<Instant>>,
+    restart_cooldown: Duration,
 }
 
 pub enum RestartSignal {
@@ -33,6 +38,9 @@ impl ResourceMonitor {
             health_check_failures: Mutex::new(0),
             max_health_check_failures,
             restart_sender,
+            is_restarting: Arc::new(Mutex::new(false)),
+            last_restart_attempt: Mutex::new(None),
+            restart_cooldown: health_check_interval * 10,
         })
     }
 
@@ -109,14 +117,40 @@ impl ResourceMonitor {
         let client = reqwest::Client::new();
         match client.get("http://localhost:3030/health").send().await {
             Ok(response) => {
-                debug!("Health check response: {:?}", response);
                 if response.status().is_success() {
-                    *self.health_check_failures.lock().await = 0;
+                    match response.json::<HealthCheckResponse>().await {
+                        Ok(health_data) => {
+                            match health_data.status.as_str() {
+                                "Healthy" => {
+                                    let mut failures = self.health_check_failures.lock().await;
+                                    *failures = 0; // Reset failure count on successful health check
+                                    debug!("Health check passed: {:?}", health_data);
+                                }
+                                "Loading" => {
+                                    debug!("System is still loading: {:?}", health_data);
+                                }
+                                _ => {
+                                    warn!("Health check returned unhealthy status");
+                                    debug!("Health data: {:?}", health_data);
+                                    self.handle_health_check_failure().await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to parse health check response: {}", e);
+                            self.handle_health_check_failure().await;
+                        }
+                    }
                 } else {
+                    warn!(
+                        "Health check returned non-200 status: {}",
+                        response.status()
+                    );
                     self.handle_health_check_failure().await;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                error!("Failed to perform health check: {}", e);
                 self.handle_health_check_failure().await;
             }
         }
@@ -132,15 +166,43 @@ impl ResourceMonitor {
         }
 
         if *failures >= self.max_health_check_failures {
-            warn!("Max health check failures reached. Restarting recording tasks...");
-            if let Err(e) = self
-                .restart_sender
-                .send(RestartSignal::RecordingTasks)
-                .await
-            {
-                error!("Failed to send restart signal: {}", e);
+            let mut is_restarting = self.is_restarting.lock().await;
+            if *is_restarting {
+                warn!("Restart already in progress. Skipping restart attempt.");
+                return;
             }
-            *self.health_check_failures.lock().await = 0;
+
+            let mut last_restart = self.last_restart_attempt.lock().await;
+            let now = Instant::now();
+
+            warn!("Last restart: {:?}", last_restart);
+
+            if last_restart.map_or(true, |t| now.duration_since(t) > self.restart_cooldown) {
+                *is_restarting = true;
+                warn!("Max health check failures reached. Restarting recording tasks...");
+                if let Err(e) = self
+                    .restart_sender
+                    .send(RestartSignal::RecordingTasks)
+                    .await
+                {
+                    error!("Failed to send restart signal: {}", e);
+                }
+                *failures = 0;
+                *last_restart = Some(now);
+
+                // Clone the necessary data for the spawned task
+                let is_restarting_clone = self.is_restarting.clone();
+                let restart_cooldown = self.restart_cooldown;
+
+                // Set a timer to reset the is_restarting flag after the cooldown period
+                tokio::spawn(async move {
+                    tokio::time::sleep(restart_cooldown).await;
+                    let mut is_restarting = is_restarting_clone.lock().await;
+                    *is_restarting = false;
+                });
+            } else {
+                warn!("Restart cooldown in effect. Skipping restart attempt.");
+            }
         }
     }
 
