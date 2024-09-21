@@ -87,6 +87,8 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 mkl = ["candle/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 
+
+
 [[bin]]
 name = "screenpipe-audio"
 path = "src/bin/screenpipe-audio.rs"

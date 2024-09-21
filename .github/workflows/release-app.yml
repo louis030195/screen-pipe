@@ -40,9 +40,11 @@ jobs:
             args: "--target x86_64-apple-darwin --features metal"
             target: x86_64-apple-darwin
           - platform: "ubuntu-22.04" # Ubuntu x86_64
-            args: "" # TODO CUDA, mkl
+            args: "--features mkl"
+            target: x86_64-unknown-linux-gnu
           - platform: "windows-latest" # Windows x86_64
-            args: "--target x86_64-pc-windows-msvc" # TODO CUDA, mkl?  --features "openblas"
+            args: "--target x86_64-pc-windows-msvc --features mkl"
+            target: x86_64-pc-windows-msvc
             pre-build-args: "" # --openblas
             # windows arm: https://github.com/ahqsoftwares/tauri-ahq-store/blob/2fbc2103c222662b3c6ee0cd71fcde664824f0ef/.github/workflows/publish.yml#L136
 
@@ -147,9 +149,16 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
+            # These settings are specific to macOS builds
             export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"
             export PKG_CONFIG_ALLOW_CROSS=1
             export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path/../Frameworks -C link-arg=-Wl,-rpath,@loader_path/../Frameworks -C link-arg=-Wl,-install_name,@rpath/libscreenpipe.dylib"
+          elif [[ "${{ matrix.platform }}" == "ubuntu-22.04" ]]; then
+            # Linux-specific settings (if any)
+            export RUSTFLAGS="-C target-cpu=native"
+          elif [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
+            # Windows-specific settings (if any)
+            export RUSTFLAGS="-C target-cpu=native"
           fi
           cargo build --release ${{ matrix.args }}
           ls -R target
