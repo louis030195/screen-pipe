@@ -34,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr libtesseract-dev libavformat-dev libavfilter-dev libavdevice-dev ffmpeg libasound2-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install -y tesseract-ocr libtesseract-dev libavformat-dev libavfilter-dev libavdevice-dev  libasound2-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev
 
       - name: Copy test image
         run: |

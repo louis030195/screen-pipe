@@ -172,15 +172,6 @@ if (platform == 'windows') {
 	}
 
 
-	// Setup FFMPEG
-	if (!(await fs.exists(config.ffmpegRealname))) {
-		await $`${wgetPath} -nc  --no-check-certificate --show-progress ${config.windows.ffmpegUrl} -O ${config.windows.ffmpegName}.7z`
-		await $`'C:\\Program Files\\7-Zip\\7z.exe' x ${config.windows.ffmpegName}.7z`
-		await $`mv ${config.windows.ffmpegName} ${config.ffmpegRealname}`
-		await $`rm -rf ${config.windows.ffmpegName}.7z`
-		await $`mv ${config.ffmpegRealname}/lib/x64/* ${config.ffmpegRealname}/lib/`
-	}
-
 	// Setup Tesseract
 	const tesseractName = 'tesseract-setup'
 	const tesseractUrl = 'https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe'
@@ -334,28 +325,6 @@ if (platform == 'macos') {
 
 		console.log(`screenpipe for ${arch} set up successfully.`);
 	}
-
-
-	// Setup FFMPEG
-	if (!(await fs.exists(config.ffmpegRealname))) {
-		await $`wget -nc ${config.macos.ffmpegUrl} -O ${config.macos.ffmpegName}.tar.xz`
-		await $`tar xf ${config.macos.ffmpegName}.tar.xz`
-		await $`mv ${config.macos.ffmpegName} ${config.ffmpegRealname}`
-		await $`rm ${config.macos.ffmpegName}.tar.xz`
-	} else {
-		console.log('FFMPEG already exists');
-	}
-
-	// Move and rename ffmpeg and ffprobe binaries
-	const ffmpegSrc = path.join(cwd, config.ffmpegRealname, 'bin', 'ffmpeg');
-
-	// For x86_64
-	await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-x86_64-apple-darwin'));
-
-	// For arm64
-	await fs.copyFile(ffmpegSrc, path.join(cwd, 'ffmpeg-aarch64-apple-darwin'));
-
-	console.log('Moved and renamed ffmpeg binary for externalBin');
 }
 
 // Nvidia

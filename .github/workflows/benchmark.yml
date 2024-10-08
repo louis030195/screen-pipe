@@ -12,11 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: |
-          brew install ffmpeg
-
+      
       - name: Run OCR benchmarks
         env:
           DYLD_LIBRARY_PATH: ${{ github.workspace }}/screenpipe-vision/lib:${{ env.DYLD_LIBRARY_PATH }}

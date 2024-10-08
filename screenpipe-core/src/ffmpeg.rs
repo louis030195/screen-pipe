@@ -1,7 +1,12 @@
 use log::{debug, error};
 use std::path::PathBuf;
 use which::which;
-
+use ffmpeg_sidecar::{
+    command::ffmpeg_is_installed,
+    download::{check_latest_version, download_ffmpeg_package, ffmpeg_download_url, unpack_ffmpeg},
+    paths::sidecar_dir,
+    version::ffmpeg_version,
+};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -82,6 +87,48 @@ pub fn find_ffmpeg_path() -> Option<PathBuf> {
         }
     }
 
-    error!("ffmpeg not found");
+    debug!("FFmpeg not found. Attempting to install...");
+
+    if let Err(error) = handle_ffmpeg_installation() {
+        error!("Failed to install FFmpeg: {}", error);
+        return None;
+    }
+
+    // Check again after installation
+    if let Ok(path) = which(EXECUTABLE_NAME) {
+        debug!("Found ffmpeg after installation in PATH: {:?}", path);
+        return Some(path);
+    }
+
+    error!("FFmpeg not found even after installation");
     None // Return None if ffmpeg is not found
+}
+
+fn handle_ffmpeg_installation() -> Result<(), String> {
+    if ffmpeg_is_installed() {
+        debug!("FFmpeg is already installed! 🎉");
+        return Ok(());
+    }
+
+    debug!("FFmpeg not found. Attempting to install...");
+    match check_latest_version() {
+        Ok(version) => debug!("Latest available version: {}", version),
+        Err(e) => debug!("Skipping version check due to error: {e}"),
+    }
+
+    let download_url = ffmpeg_download_url().map_err(|e| e.to_string())?;
+    let destination = sidecar_dir().map_err(|e| e.to_string())?;
+
+    debug!("Downloading from: {:?}", download_url);
+    let archive_path =
+        download_ffmpeg_package(download_url, &destination).map_err(|e| e.to_string())?;
+    debug!("Downloaded package: {:?}", archive_path);
+
+    debug!("Extracting...");
+    unpack_ffmpeg(&archive_path, &destination).map_err(|e| e.to_string())?;
+
+    let version = ffmpeg_version().map_err(|e| e.to_string())?;
+
+    debug!("Done! Installed FFmpeg version {} 🏁", version);
+    Ok(())
 }

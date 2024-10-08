@@ -75,7 +75,6 @@ jobs:
         with:
           path: |
             ~/Library/Caches/Homebrew
-            /usr/local/Cellar/ffmpeg
             /usr/local/Cellar/pkg-config
           key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/release-cli.yml') }}
           restore-keys: |
@@ -88,7 +87,6 @@ jobs:
           path: |
             screenpipe-app-tauri/src-tauri/openblas
             screenpipe-app-tauri/src-tauri/clblast
-            screenpipe-app-tauri/src-tauri/ffmpeg
             screenpipe-app-tauri/src-tauri/tesseract-*
           key: ${{ matrix.platform }}-${{ matrix.args }}-pre-build
 
@@ -113,7 +111,7 @@ jobs:
       - name: Install dependencies
         if: matrix.platform == 'macos-latest'
         run: |
-          brew install ffmpeg pkg-config
+          brew install  pkg-config
 
       - name: Install frontend dependencies
         shell: bash
@@ -146,7 +144,6 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.platform }}" == "macos-latest" ]]; then
-            export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"
             export PKG_CONFIG_ALLOW_CROSS=1
             export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path/../Frameworks -C link-arg=-Wl,-rpath,@loader_path/../Frameworks -C link-arg=-Wl,-install_name,@rpath/libscreenpipe.dylib"
             export V8_FLAGS="--max-old-space-size=8192" # https://github.com/denoland/deno_core/issues/916

@@ -36,7 +36,6 @@ jobs:
         with:
           path: |
             ~/Library/Caches/Homebrew
-            /usr/local/Cellar/ffmpeg
             /usr/local/Cellar/pkg-config
           key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/release-cli.yml') }}
           restore-keys: |
@@ -44,7 +43,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ffmpeg pkg-config
+          brew install  pkg-config
 
       - uses: actions/cache@v3
         with:
@@ -57,7 +56,6 @@ jobs:
 
       - name: Build with Metal feature
         run: |
-          export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"
           export PKG_CONFIG_ALLOW_CROSS=1
           export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path/../lib -C link-arg=-Wl,-rpath,@loader_path/../lib"
           cargo build --release --features pipes,metal --target ${{ matrix.target }}
