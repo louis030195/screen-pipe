@@ -35,15 +35,15 @@ const sendLog = async (level, ...args) => {
 const console = {
     log: (...args) => {
         core.print(`[pipe][${globalThis.metadata.id}][info]: ${argsToMessage(...args)}\n`, false);
-        // sendLog("info", ...args);
+        sendLog("info", ...args);
     },
     error: (...args) => {
         core.print(`[pipe][${globalThis.metadata.id}][error]: ${argsToMessage(...args)}\n`, true);
-        // sendLog("error", ...args);
+        sendLog("error", ...args);
     },
     warn: (...args) => {
         core.print(`[pipe][${globalThis.metadata.id}][warn]: ${argsToMessage(...args)}\n`, true);
-        // sendLog("warn", ...args);
+        sendLog("warn", ...args);
     }
 };
 

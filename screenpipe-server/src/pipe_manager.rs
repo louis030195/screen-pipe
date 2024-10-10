@@ -35,7 +35,21 @@ impl PipeManager {
             let pipe_id = id.to_string();
             let screenpipe_dir = self.screenpipe_dir.clone();
 
-            let future = run_pipe(pipe_id.clone(), screenpipe_dir);
+            let future = async move {
+                tokio::task::spawn_blocking(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    rt.block_on(
+                        async move { run_pipe(pipe_id.clone(), screenpipe_dir).await.unwrap() },
+                    )
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("pipe blocking task failed: {e}"))?;
+                Ok(())
+            };
 
             self.update_config(
                 id,
