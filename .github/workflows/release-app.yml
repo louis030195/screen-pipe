@@ -47,8 +47,12 @@ jobs:
           - platform: "windows-latest" # Windows x86_64
             args: "--target x86_64-pc-windows-msvc" # TODO CUDA, mkl?  --features "openblas"
             pre-build-args: "" # --openblas
+            target: x86_64-pc-windows-msvc
             tauri-args: "--target x86_64-pc-windows-msvc"
-          # windows arm: https://github.com/ahqsoftwares/tauri-ahq-store/blob/2fbc2103c222662b3c6ee0cd71fcde664824f0ef/.github/workflows/publish.yml#L136
+          - platform: "windows-latest"
+            args: "--target aarch64-pc-windows-msvc"
+            target: aarch64-pc-windows-msvc
+            tauri-args: "--target aarch64-pc-windows-msvc"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -119,6 +123,13 @@ jobs:
         run: |
           brew install ffmpeg pkg-config
 
+      - name: Install python
+        if: matrix.args == '--target aarch64-pc-windows-msvc'
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11.x
+          architecture: x64
+
       - name: Install frontend dependencies
         shell: bash
         working-directory: ./screenpipe-app-tauri
@@ -154,6 +165,21 @@ jobs:
             export PKG_CONFIG_ALLOW_CROSS=1
             export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path/../Frameworks -C link-arg=-Wl,-rpath,@loader_path/../Frameworks -C link-arg=-Wl,-install_name,@rpath/libscreenpipe.dylib"
             export V8_FLAGS="--max-old-space-size=8192" # https://github.com/denoland/deno_core/issues/916
+          fi
+          if [[ "${{ matrix.args }}" == "--target aarch64-pc-windows-msvc" ]]; then
+            export V8_FROM_SOURCE=true
+            export DEPOT_TOOLS_WIN_TOOLCHAIN=0
+            export GN_ARGS="v8_enable_i18n_support = false v8_win64_unwinding_info = false v8_depend_on_icu_data_file = false"
+            cargo fetch ${{ matrix.args }}
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git --single-branch --depth=1
+            export PATH=$(pwd)/depot_tools:$PATH
+            mkdir v8
+            cd v8
+            gclient
+            fetch v8
+            cd v8
+            git checkout 10.6.194
+            cp -r ./third_party/icu C:/Users/runneradmin/.cargo/registry/src/index.crates.io-6f17d22bba15001f/v8-0.106.0/third_party
           fi
           cargo build --release ${{ matrix.args }}
 
