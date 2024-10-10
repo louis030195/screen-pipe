@@ -1,0 +1,10 @@
+attribute values for Arc:
+(x:0,y:69,w:3456,h:2165) standard window
+(x:-164,y:77,w:16,h:16) close button
+(x:-144,y:77,w:16,h:16) minimize button
+(x:-124,y:77,w:16,h:16) this button also has an action to zoom the window
+(x:-124,y:77,w:16,h:16) full screen button
+(x:1688,y:77,w:79,h:16) linkedin.com
+(x:0,y:101,w:3456,h:2133) split group
+(x:-1,y:2211,w:354,h:24) search text field
+(x:-1,y:2228,w:362,h:7) search result
