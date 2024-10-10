@@ -1,0 +1,63 @@
+{
+  "name": "Screen Time Storyteller",
+  "version": "1.0.0",
+  "description": "Generates a narrative summary of your day based on your screen activities",
+  "author": "AI Assistant",
+  "fields": [
+    {
+      "name": "aiProvider",
+      "type": "string",
+      "default": "claude",
+      "description": "AI provider to use (ollama, openai, or claude)"
+    },
+    {
+      "name": "claudeModel",
+      "type": "string",
+      "default": "claude-3-sonnet-20240229",
+      "description": "Claude AI model to use"
+    },
+    {
+      "name": "openaiModel",
+      "type": "string",
+      "default": "gpt-4-turbo-preview",
+      "description": "OpenAI model to use"
+    },
+    {
+      "name": "ollamaModel",
+      "type": "string",
+      "default": "llama3.1",
+      "description": "Ollama model to use"
+    },
+    {
+      "name": "claudeApiKey",
+      "type": "string",
+      "default": "",
+      "description": "API key for Claude"
+    },
+    {
+      "name": "openaiApiKey",
+      "type": "string",
+      "default": "",
+      "description": "API key for OpenAI"
+    },
+    {
+      "name": "pageSize",
+      "type": "number",
+      "default": 1000,
+      "description": "Number of items to process per page"
+    },
+    {
+      "name": "contentType",
+      "type": "string",
+      "default": "ocr",
+      "description": "Type of content to process (ocr, audio, or all)"
+    },
+    {
+      "name": "githubToken",
+      "type": "string",
+      "default": "",
+      "description": "GitHub personal access token"
+    }
+  ],
+  "enabled": true
+}
