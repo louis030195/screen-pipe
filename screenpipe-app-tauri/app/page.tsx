@@ -23,6 +23,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SearchChat } from "@/components/search-chat";
 import { Separator } from "@/components/ui/separator";
+import Onboarding from "@/components/onboarding";
 export default function Home() {
   const { settings } = useSettings();
   const posthog = usePostHog();
@@ -41,6 +42,7 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center">
       <NotificationHandler />
+      <Onboarding />
       {/* <UpdateNotification checkIntervalHours={3} /> */}
       {/* <ScreenpipeInstanceChecker /> */}
       <Header />
