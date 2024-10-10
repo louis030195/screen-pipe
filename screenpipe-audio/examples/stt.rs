@@ -9,8 +9,8 @@ use strsim::levenshtein;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-#[tokio::test]
-async fn test_transcription_accuracy() {
+#[tokio::main]
+async fn main() {
     // Initialize tracing
     // tracing_subscriber::fmt()
     //     .with_max_level(tracing::Level::DEBUG)
@@ -93,8 +93,8 @@ async fn test_transcription_accuracy() {
                 &output_path,
                 true,
             )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
             drop(vad_engine_guard);
 
             let distance = levenshtein(expected_transcription, &transcription);

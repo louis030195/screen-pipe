@@ -34,6 +34,7 @@ pub enum VadEngineEnum {
 pub trait VadEngine: Send {
     fn is_voice_segment(&mut self, audio_chunk: &[f32]) -> anyhow::Result<bool>;
     fn set_sensitivity(&mut self, sensitivity: VadSensitivity);
+    fn audio_type(&mut self, audio_chunk: &[f32]) -> anyhow::Result<VadStatus>;
     fn get_min_speech_ratio(&self) -> f32;
 }
 
@@ -47,7 +48,7 @@ impl WebRtcVad {
         let vad = webrtc_vad::Vad::new();
         Self {
             vad,
-            sensitivity: VadSensitivity::High,
+            sensitivity: VadSensitivity::Medium,
         }
     }
 }
@@ -71,6 +72,29 @@ impl VadEngine for WebRtcVad {
             .map_err(|e| anyhow::anyhow!("WebRTC VAD error: {:?}", e))?;
 
         Ok(result)
+    }
+    fn audio_type(&mut self, audio_chunk: &[f32]) -> anyhow::Result<VadStatus> {
+        // Convert f32 to i16
+        let i16_chunk: Vec<i16> = audio_chunk.iter().map(|&x| (x * 32767.0) as i16).collect();
+
+        // Set VAD mode based on sensitivity
+        let mode = match self.sensitivity {
+            VadSensitivity::Low => webrtc_vad::VadMode::Quality,
+            VadSensitivity::Medium => webrtc_vad::VadMode::Aggressive,
+            VadSensitivity::High => webrtc_vad::VadMode::VeryAggressive,
+        };
+        self.vad.set_mode(mode);
+
+        let result = self
+            .vad
+            .is_voice_segment(&i16_chunk)
+            .map_err(|e| anyhow::anyhow!("WebRTC VAD error: {:?}", e))?;
+
+        if !result {
+            return Ok(VadStatus::Silence)
+        }
+
+        Ok(VadStatus::Speech)
     }
 
     fn set_sensitivity(&mut self, sensitivity: VadSensitivity) {
@@ -223,6 +247,34 @@ impl VadEngine for SileroVad {
         let status = self.update_status(result.prob);
 
         Ok(status == VadStatus::Speech && result.prob > threshold)
+    }
+
+    fn audio_type(&mut self, audio_chunk: &[f32]) -> anyhow::Result<VadStatus> {
+        const CHUNK_SIZE: usize = 1600; // 100 milliseconds
+
+        let threshold = self.get_threshold();
+
+        let mut chunk_data: Vec<f32> = audio_chunk.to_vec();
+        chunk_data.resize(CHUNK_SIZE, 0.0);
+
+        let result = self.vad.compute(&chunk_data).map_err(|e| {
+            debug!("SileroVad Error computing VAD: {}", e);
+            anyhow::anyhow!("Vad compute error: {}", e)
+        })?;
+
+        let status = self.update_status(result.prob);
+
+        if status == VadStatus::Speech && result.prob > threshold {
+            return Ok(VadStatus::Speech);
+        }
+
+        match status {
+            VadStatus::Unknown => {
+                Ok(VadStatus::Unknown)
+            },
+            // this is super misleading
+            _ => Ok(VadStatus::Silence),
+        }
     }
 
     fn set_sensitivity(&mut self, sensitivity: VadSensitivity) {

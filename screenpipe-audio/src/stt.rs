@@ -26,7 +26,6 @@ use crate::{
 
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
-
 use reqwest::Client;
 use serde_json::Value;
 
@@ -202,13 +201,22 @@ pub async fn stt(
     let mut total_frames = 0;
     let mut speech_frame_count = 0;
 
+    let mut  noise = 0.;
+
     for chunk in audio_data.chunks(frame_size) {
         total_frames += 1;
-        match vad_engine.is_voice_segment(chunk) {
-            Ok(is_voice) => {
-                if is_voice {
-                    speech_frames.extend_from_slice(chunk);
-                    speech_frame_count += 1;
+        match vad_engine.audio_type(chunk) {
+            Ok(status) => {
+                match status {
+                    VadStatus::Speech => {
+                        let processed_audio = spectral_subtraction(chunk, noise)?;
+                        speech_frames.extend(processed_audio);
+                        speech_frame_count += 1;
+                    },
+                    VadStatus::Unknown => {
+                        noise = average_noise_spectrum(chunk);
+                    },
+                    _  => {}
                 }
             }
             Err(e) => {
@@ -436,6 +444,8 @@ pub struct TranscriptionResult {
     pub error: Option<String>,
 }
 use std::sync::atomic::{AtomicBool, Ordering};
+use vad_rs::VadStatus;
+use crate::audio_processing::{average_noise_spectrum, spectral_subtraction};
 
 pub async fn create_whisper_channel(
     audio_transcription_engine: Arc<AudioTranscriptionEngine>,
