@@ -1,5 +1,5 @@
 use anyhow::Result;
-use screenpipe_core::{download_pipe, run_pipe};
+use screenpipe_core::download_pipe;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
@@ -35,7 +35,7 @@ impl PipeManager {
             let pipe_id = id.to_string();
             let screenpipe_dir = self.screenpipe_dir.clone();
 
-            let future = run_pipe(pipe_id.clone(), screenpipe_dir);
+            let future = async move { screenpipe_core::run_pipe(&pipe_id, screenpipe_dir).await };
 
             self.update_config(
                 id,

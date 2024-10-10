@@ -1,0 +1,10 @@
+{
+    "imports": {
+        "zod": "npm:zod",
+        "ai": "npm:ai",
+        "ollama-ai-provider": "npm:ollama-ai-provider"
+    },
+    "tasks": {
+        "start": "deno run --allow-read --allow-write --allow-net --allow-env pipe.ts"
+    }
+}

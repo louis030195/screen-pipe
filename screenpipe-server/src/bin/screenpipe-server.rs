@@ -132,23 +132,23 @@ async fn main() -> anyhow::Result<()> {
         env_filter
     };
 
+    // ignore mut warning 
+    #[allow(unused_mut)]
     let mut h: Option<Highlight> = None;
     if !cli.disable_telemetry {
-        // TODO crashes on init
+        // ! do not use yet - leaks too much privacy and does not catch errors properly 
         // h = Some(Highlight::init(HighlightConfig {
         //     project_id: "82688".to_string(),
-        //     logger: Box::new(NopLogger),
         //     ..Default::default()
         // }).expect("Failed to initialize Highlight.io"));
-    } 
-    
-    // Initialize tracing without OpenTelemetry if telemetry is disabled
+    }
+    // } else {
     tracing_subscriber::registry()
         .with(env_filter)
         .with(file_layer)
         .with(console_layer)
         .init();
-
+    // }
 
     let all_audio_devices = list_audio_devices().await?;
     let mut devices_status = HashMap::new();
