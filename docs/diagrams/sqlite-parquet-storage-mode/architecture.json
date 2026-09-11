@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Screenpipe storage modes \u2014 proposal",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "animation": "none",
+    "viewBox": [
+      1280,
+      660
+    ]
+  },
+  "components": [
+    {
+      "id": "callers",
+      "type": "frontend",
+      "label": "App and agents",
+      "sublabel": "Same public API results",
+      "pos": [
+        40,
+        270
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "mode",
+      "type": "backend",
+      "label": "Database opener",
+      "sublabel": "Resolve persisted format",
+      "pos": [
+        360,
+        270
+      ],
+      "size": [
+        210,
+        76
+      ]
+    },
+    {
+      "id": "legacy",
+      "type": "database",
+      "label": "Existing SQLite mode",
+      "sublabel": "Existing database path",
+      "pos": [
+        360,
+        55
+      ],
+      "size": [
+        210,
+        76
+      ]
+    },
+    {
+      "id": "writer",
+      "type": "backend",
+      "label": "Capture coordinator",
+      "sublabel": "One serialized SQLite writer",
+      "pos": [
+        680,
+        55
+      ],
+      "size": [
+        220,
+        76
+      ]
+    },
+    {
+      "id": "index",
+      "type": "database",
+      "label": "Hybrid SQLite",
+      "sublabel": "Indexes, IDs, vectors, staging",
+      "pos": [
+        680,
+        270
+      ],
+      "size": [
+        220,
+        76
+      ]
+    },
+    {
+      "id": "reader",
+      "type": "backend",
+      "label": "Payload reader",
+      "sublabel": "Version-aware, bounded cache",
+      "pos": [
+        1010,
+        270
+      ],
+      "size": [
+        230,
+        76
+      ]
+    },
+    {
+      "id": "sealer",
+      "type": "backend",
+      "label": "Sealer + file cleanup",
+      "sublabel": "Verify, publish, reclaim originals",
+      "pos": [
+        680,
+        515
+      ],
+      "size": [
+        220,
+        76
+      ]
+    },
+    {
+      "id": "parquet",
+      "type": "database",
+      "label": "Immutable Parquet",
+      "sublabel": "Small text blocks + bulk JSON",
+      "pos": [
+        1010,
+        515
+      ],
+      "size": [
+        230,
+        76
+      ]
+    },
+    {
+      "id": "redactor",
+      "type": "security",
+      "label": "PII redactor",
+      "sublabel": "Staged + archived text / JSON",
+      "pos": [
+        360,
+        515
+      ],
+      "size": [
+        210,
+        76
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "requests",
+      "from": "callers",
+      "to": "mode",
+      "label": "request",
+      "variant": "emphasis"
+    },
+    {
+      "id": "open-legacy",
+      "from": "mode",
+      "to": "legacy",
+      "label": "legacy format"
+    },
+    {
+      "id": "open-hybrid",
+      "from": "mode",
+      "to": "index",
+      "label": "hybrid format",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ingest",
+      "from": "writer",
+      "to": "index",
+      "label": "atomic ingest",
+      "labelDy": 24
+    },
+    {
+      "id": "fetch",
+      "from": "index",
+      "to": "reader",
+      "label": "matching IDs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "seal",
+      "from": "index",
+      "to": "sealer",
+      "label": "eligible generation",
+      "labelDy": 24
+    },
+    {
+      "id": "publish",
+      "from": "sealer",
+      "to": "parquet",
+      "label": "write / rewrite"
+    },
+    {
+      "id": "hydrate",
+      "from": "reader",
+      "to": "parquet",
+      "label": "read needed blocks",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "redaction-gate",
+      "from": "redactor",
+      "to": "sealer",
+      "label": "PII gate",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "slate",
+      "title": "Compatibility and durability",
+      "items": [
+        "New root only; existing SQLite mode stays unchanged.",
+        "Vectors and indexes stay in SQLite; staging lasts until verified publication."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "PII removal",
+      "items": [
+        "When enabled: redact before sealing; failures remain staged.",
+        "Archived changes: replace payload + index, invalidate caches, rewrite files.",
+        "Cleanup finishes only after obsolete files are removed and leases drain."
+      ]
+    }
+  ]
+}
