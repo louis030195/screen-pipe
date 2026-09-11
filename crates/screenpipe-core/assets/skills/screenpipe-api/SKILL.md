@@ -254,7 +254,7 @@ curl -X POST "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/raw_sql" \
 
 | Table | Key Columns | Time Column |
 |-------|-------------|-------------|
-| `frames` | `full_text`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused` | `timestamp` |
+| `frames` | `id`, `text_source`, `app_name`, `window_name`, `browser_url`, `focused` | `timestamp` |
 | `elements` | `source`, `role`, `text`, `bounds_*` | join via `frame_id` |
 | `audio_transcriptions` | `transcription`, `device`, `speaker_id`, `is_input_device` | `timestamp` |
 | `audio_chunks` | `file_path` | `timestamp` |
@@ -263,7 +263,7 @@ curl -X POST "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/raw_sql" \
 | `meetings` | `meeting_app`, `title`, `attendees`, `detection_source` | `meeting_start` |
 | `memories` | `content`, `source`, `tags`, `importance` | `created_at` |
 
-Current screen and accessibility text lives in `frames.full_text`; legacy `ocr_text` and `accessibility` tables are not current capture sources.
+Frame text and JSON are available through `/search`, frame detail, and frame context endpoints in both SQLite and hybrid storage. `/raw_sql` exposes resident metadata, indexes, and retained tables; discover that schema with `PRAGMA table_info(frames)`. Use the typed endpoints to retrieve payload fields.
 
 ```sql
 -- Capture volume by app for diagnostics only; never report this as time spent

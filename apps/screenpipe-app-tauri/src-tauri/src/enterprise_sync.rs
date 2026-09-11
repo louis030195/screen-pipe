@@ -194,8 +194,46 @@ mod imp {
         updated_at: String,
     }
 
+    struct StorageExport {
+        db: Arc<screenpipe_db::DatabaseManager>,
+        token: screenpipe_db::storage::StorageReadToken,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::enterprise::sync::ExportAdmission for StorageExport {
+        async fn admit(
+            &self,
+        ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, EnterpriseSyncError> {
+            self.token
+                .admit(&self.db.pool)
+                .await
+                .map_err(|error| EnterpriseSyncError::Configuration(error.to_string()))
+        }
+    }
+
     #[async_trait::async_trait]
     impl LocalApiClient for ScreenpipeLocalClient {
+        async fn begin_export(
+            &self,
+        ) -> Result<Option<Box<dyn crate::enterprise::sync::ExportAdmission>>, EnterpriseSyncError>
+        {
+            let state = self.app.state::<crate::recording::RecordingState>();
+            let db = state
+                .server
+                .lock()
+                .await
+                .as_ref()
+                .map(|server| Arc::clone(&server.db))
+                .ok_or_else(|| {
+                    EnterpriseSyncError::Configuration("recording database is not ready".into())
+                })?;
+            let token = db
+                .storage_read_token()
+                .await
+                .map_err(|error| EnterpriseSyncError::Configuration(error.to_string()))?;
+            Ok(Some(Box::new(StorageExport { db, token })))
+        }
+
         async fn initialized_upload_source_id(&self) -> Option<String> {
             let state = self.app.state::<crate::recording::RecordingState>();
             let server = state.server.lock().await;
@@ -854,8 +892,7 @@ mod imp {
     }
     const HIDDEN_UI_POLICY_POLL_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5 * 60);
-    const NATIVE_POLICY_RETRY_INTERVAL: std::time::Duration =
-        std::time::Duration::from_secs(30);
+    const NATIVE_POLICY_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
     const NATIVE_POLICY_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
     const RECORDING_DISABLED_BY_ADMIN_CODE: &str = "recording_disabled_by_admin";
 
@@ -1105,9 +1142,7 @@ mod imp {
         NoCredential,
     }
 
-    fn native_policy_poll_interval(
-        result: &NativeAuthorizationResult,
-    ) -> std::time::Duration {
+    fn native_policy_poll_interval(result: &NativeAuthorizationResult) -> std::time::Duration {
         if matches!(result, NativeAuthorizationResult::Unavailable(_)) {
             NATIVE_POLICY_RETRY_INTERVAL
         } else {
@@ -1345,9 +1380,7 @@ mod imp {
             NativeAuthorizationResult::RecordingDisabled => {
                 // The credential was accepted; recording authorization is a
                 // separate policy decision and deliberately remains closed.
-                info!(
-                    "enterprise: startup authenticated; recording is paused by workspace admin"
-                );
+                info!("enterprise: startup authenticated; recording is paused by workspace admin");
                 true
             }
             NativeAuthorizationResult::RequiresAccount => {
@@ -1863,8 +1896,8 @@ mod imp {
         use super::{
             choose_device_id, classify_failed_enterprise_response, credential_authorizes_policy,
             enterprise_license_hash, exact_frame_url, explicitly_rejects_authorization,
-            image_uploads_allowed, locked_setting_enforces_auto_start, native_policy_startup_delay,
-            native_policy_poll_interval, sibling_heartbeat_url, EnterprisePolicyCredentialKind,
+            image_uploads_allowed, locked_setting_enforces_auto_start, native_policy_poll_interval,
+            native_policy_startup_delay, sibling_heartbeat_url, EnterprisePolicyCredentialKind,
             HiddenUiPolicyResponse, NativeAuthorizationResult, NativePolicyFetchError,
             NativeSyncStreams, HIDDEN_UI_POLICY_POLL_INTERVAL, NATIVE_POLICY_RETRY_INTERVAL,
             NATIVE_POLICY_STARTUP_DELAY, RECORDING_DISABLED_BY_ADMIN_CODE,

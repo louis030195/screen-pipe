@@ -175,6 +175,17 @@ pub trait Redactor: Send + Sync {
     /// trait for logs and human triage.
     fn version(&self) -> u32;
 
+    /// Stable provenance used by generation-scoped storage completion.
+    fn policy_identity(&self) -> String {
+        format!("{}:{}", self.name(), self.version())
+    }
+
+    /// Completion-sensitive storage processing propagates detector failures.
+    /// Composite adapters override this when ordinary reads permit fallback.
+    async fn redact_complete(&self, text: &str) -> Result<RedactionOutput, RedactError> {
+        self.redact(text).await
+    }
+
     /// Preferred number of inputs for one backend inference call.
     ///
     /// The default preserves the historical one-input-at-a-time behavior for

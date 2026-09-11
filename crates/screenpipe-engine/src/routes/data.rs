@@ -440,7 +440,13 @@ pub(crate) async fn backup_handler(
     let dest = query.path.unwrap_or_else(|| {
         state
             .screenpipe_dir
-            .join("backup.sqlite")
+            .join(
+                if state.db.storage_mode() == screenpipe_db::storage::StorageMode::HybridParquetV1 {
+                    "backup.screenpipe"
+                } else {
+                    "backup.sqlite"
+                },
+            )
             .to_string_lossy()
             .into_owned()
     });
@@ -464,7 +470,7 @@ pub(crate) async fn backup_handler(
         )
     })?;
 
-    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    let size = screenpipe_db::storage::artifact_bytes(std::path::Path::new(&dest)).unwrap_or(0);
 
     info!("database backup complete: {} ({} bytes)", dest, size);
 
@@ -528,6 +534,14 @@ fn readable_bytes(bytes: u64) -> String {
 pub(crate) async fn compact_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<JsonResponse<CompactResponse>, (StatusCode, JsonResponse<Value>)> {
+    if state.db.storage_mode() == screenpipe_db::storage::StorageMode::HybridParquetV1 {
+        return Err((
+            StatusCode::CONFLICT,
+            JsonResponse(
+                json!({"error":"hybrid index reclamation requires offline screenpipe storage compact"}),
+            ),
+        ));
+    }
     let size_of = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let database_files = ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"];
     let bytes_before: u64 = database_files

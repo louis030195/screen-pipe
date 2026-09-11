@@ -22,7 +22,11 @@ static ACTIVE_DATABASE: OnceLock<RwLock<PathBuf>> = OnceLock::new();
 pub fn set_active_database(data_dir: &Path) {
     let database = ACTIVE_DATABASE.get_or_init(|| RwLock::new(data_dir.join("db.sqlite")));
     let mut current = database.write().unwrap_or_else(|error| error.into_inner());
-    let selected = data_dir.join("db.sqlite");
+    let selected = screenpipe_db::storage::resolve_database_path(&data_dir.join("db.sqlite"))
+        .unwrap_or_else(|error| {
+            warn!(%error,"storage descriptor unavailable; selected root remains paused");
+            data_dir.join("storage.json")
+        });
     if *current != selected {
         *current = selected;
         reset_db_boot_failures();
@@ -41,10 +45,20 @@ pub fn active_database_path() -> PathBuf {
 }
 
 pub fn active_data_dir() -> PathBuf {
-    active_database_path()
-        .parent()
-        .expect("database path has a data directory")
-        .to_path_buf()
+    let active = active_database_path();
+    let root = if active
+        .file_name()
+        .is_some_and(|name| name == "index.sqlite")
+    {
+        active
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new("."))
+    } else {
+        active.parent().expect("database path has a data directory")
+    };
+    root.to_path_buf()
 }
 
 /// Deduplicate the availability notification after repeated startup failures.
@@ -71,7 +85,8 @@ pub fn manual_recovery_required() -> bool {
 /// only schedules retries; verified marker evidence alone can require repair.
 pub fn is_db_shaped(err: &str) -> bool {
     let e = err.to_ascii_lowercase();
-    e.contains("initialize database")
+    e.contains("frame storage:")
+        || e.contains("initialize database")
         || e.contains("disk i/o error")
         || e.contains("database disk image is malformed")
         || e.contains("database unavailable")

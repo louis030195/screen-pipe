@@ -1104,11 +1104,25 @@ pub(crate) async fn search(
     );
 
     // Check cache first (only for queries without frame extraction)
-    let cache_key = compute_search_cache_key(&query);
+    let storage_read = state.db.storage_read_token().await.map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            JsonResponse(json!({"error":e.to_string()})),
+        )
+    })?;
+    let cache_key =
+        compute_search_cache_key(&query) ^ (storage_read.revision as u64).rotate_left(17);
+
     if !history_restricted && !query.include_frames && cacheable_render && !pipe_data_restricted {
         if let Some(cached) = state.search_cache.get(&cache_key).await {
             debug!("search cache hit for key {}", cache_key);
             capture_direct_api_search_value(&api_client, cached.result_count);
+            let _admission = storage_read.admit(&state.db.pool).await.map_err(|e| {
+                (
+                    StatusCode::CONFLICT,
+                    JsonResponse(json!({"error":e.to_string()})),
+                )
+            })?;
             return Ok(render_cached_search(&cached));
         }
     }
@@ -1511,21 +1525,30 @@ pub(crate) async fn search(
 
     capture_direct_api_search_value(&api_client, response.data.len());
 
-    // Cache the result (only for queries without frame extraction). Cache hits
-    // serve the pre-serialized JSON bytes directly for the common response
-    // shape, avoiding repeated deep clones of text-heavy search payloads.
-    if !history_restricted && !query.include_frames && cacheable_render && !pipe_data_restricted {
-        if let Some(cache_entry) = build_search_cache_entry(&response) {
-            let rendered = render_cached_search(&cache_entry);
-            state
-                .search_cache
-                .insert(cache_key, Arc::new(cache_entry))
-                .await;
-            return Ok(rendered);
-        }
+    let cache_entry = if !history_restricted
+        && !query.include_frames
+        && cacheable_render
+        && !pipe_data_restricted
+    {
+        build_search_cache_entry(&response)
+    } else {
+        None
+    };
+    let rendered = if let Some(entry) = &cache_entry {
+        render_cached_search(entry)
+    } else {
+        render_search(format, &fields, &response)
+    };
+    let _admission = storage_read.admit(&state.db.pool).await.map_err(|e| {
+        (
+            StatusCode::CONFLICT,
+            JsonResponse(json!({"error":e.to_string()})),
+        )
+    })?;
+    if let Some(entry) = cache_entry {
+        state.search_cache.insert(cache_key, Arc::new(entry)).await;
     }
-
-    Ok(render_search(format, &fields, &response))
+    Ok(rendered)
 }
 
 #[oasgen]

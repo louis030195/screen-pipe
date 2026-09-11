@@ -44,31 +44,37 @@ impl DatabaseManager {
         offset: u32,
         order: Order,
     ) -> Result<Vec<UiContent>, sqlx::Error> {
-        // Now queries frames_fts (consolidated) instead of accessibility_fts
-        let mut fts_parts = Vec::new();
-        if !query.is_empty() {
-            fts_parts.push(crate::text_normalizer::sanitize_fts5_query(query));
-        }
-        if let Some(app) = app_name {
-            if !app.is_empty() {
-                fts_parts.push(crate::text_normalizer::value_to_fts5_column_query(
-                    "app_name", app,
-                ));
+        self.consistent_read(|| async {
+            let accessibility_present = if self.storage.is_some() {
+                "AND f.payload_accessibility_length > 0"
+            } else {
+                "AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''"
+            };
+            // Now queries frames_fts (consolidated) instead of accessibility_fts
+            let mut fts_parts = Vec::new();
+            if !query.is_empty() {
+                fts_parts.push(crate::text_normalizer::sanitize_fts5_query(query));
             }
-        }
-        if let Some(window) = window_name {
-            if !window.is_empty() {
-                fts_parts.push(crate::text_normalizer::value_to_fts5_column_query(
-                    "window_name",
-                    window,
-                ));
+            if let Some(app) = app_name {
+                if !app.is_empty() {
+                    fts_parts.push(crate::text_normalizer::value_to_fts5_column_query(
+                        "app_name", app,
+                    ));
+                }
             }
-        }
-        let combined_query = fts_parts.join(" ");
-        let has_fts = !combined_query.trim().is_empty();
+            if let Some(window) = window_name {
+                if !window.is_empty() {
+                    fts_parts.push(crate::text_normalizer::value_to_fts5_column_query(
+                        "window_name",
+                        window,
+                    ));
+                }
+            }
+            let combined_query = fts_parts.join(" ");
+            let has_fts = !combined_query.trim().is_empty();
 
-        let sql = format!(
-            r#"
+            let sql = format!(
+                r#"
             WITH candidates AS MATERIALIZED (
                 SELECT f.id, f.timestamp
                 FROM frames f
@@ -77,7 +83,7 @@ impl DatabaseManager {
                     {fts_condition}
                     AND (?2 IS NULL OR f.timestamp >= ?2)
                     AND (?3 IS NULL OR f.timestamp <= ?3)
-                    AND f.accessibility_text IS NOT NULL AND f.accessibility_text != ''
+                    {accessibility_present}
                 ORDER BY f.timestamp {order_dir}, f.id {order_dir}
                 LIMIT ?4 OFFSET ?5
             )
@@ -98,35 +104,40 @@ impl DatabaseManager {
             LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
             ORDER BY c.timestamp {order_dir}, c.id {order_dir}
             "#,
-            fts_join = if has_fts {
-                "JOIN frames_fts ON f.id = frames_fts.rowid"
-            } else {
-                ""
-            },
-            fts_condition = if has_fts {
-                "AND frames_fts MATCH ?1"
-            } else {
-                ""
-            },
-            order_dir = match order {
-                Order::Ascending => "ASC",
-                Order::Descending => "DESC",
-            },
-        );
+                fts_join = if has_fts {
+                    "JOIN frames_fts ON f.id = frames_fts.rowid"
+                } else {
+                    ""
+                },
+                fts_condition = if has_fts {
+                    "AND frames_fts MATCH ?1"
+                } else {
+                    ""
+                },
+                order_dir = match order {
+                    Order::Ascending => "ASC",
+                    Order::Descending => "DESC",
+                },
+            );
 
-        let mut connection = self.acquire_search_read().await?;
-        sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .bind(if has_fts {
-                combined_query
-            } else {
-                "*".to_owned()
-            })
-            .bind(start_time)
-            .bind(end_time)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&mut *connection)
-            .await
+            let mut connection = self.acquire_search_read().await?;
+            let mut rows: Vec<UiContent> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(if has_fts {
+                    combined_query
+                } else {
+                    "*".to_owned()
+                })
+                .bind(start_time)
+                .bind(end_time)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&mut *connection)
+                .await?;
+            drop(connection);
+            self.hydrate_accessibility_rows(&mut rows).await?;
+            Ok(rows)
+        })
+        .await
     }
 
     /// Search accessibility text restricted to elements visually present on
@@ -185,13 +196,14 @@ impl DatabaseManager {
         offset: u32,
         order: Order,
     ) -> Result<Vec<UiContent>, sqlx::Error> {
-        let has_query = !query.trim().is_empty();
-        // Empty query is supported — drops the FTS join entirely so the
-        // filter is purely "show me on-screen accessibility elements in
-        // this time range / app." The window_name filter is LIKE-based
-        // because window titles aren't a stable enum.
-        let sql = format!(
-            r#"
+        self.consistent_read(|| async {
+            let has_query = !query.trim().is_empty();
+            // Empty query is supported — drops the FTS join entirely so the
+            // filter is purely "show me on-screen accessibility elements in
+            // this time range / app." The window_name filter is LIKE-based
+            // because window titles aren't a stable enum.
+            let sql = format!(
+                r#"
             WITH candidates AS MATERIALIZED (
                 SELECT f.id, f.timestamp
                 FROM elements e
@@ -225,36 +237,41 @@ impl DatabaseManager {
             LEFT JOIN video_chunks vc ON f.video_chunk_id = vc.id
             ORDER BY c.timestamp {order_dir}, c.id {order_dir}
             "#,
-            fts_join = if has_query {
-                "JOIN elements_fts ef ON ef.rowid = e.id"
-            } else {
-                ""
-            },
-            fts_match = if has_query {
-                "AND ef.text MATCH ?8"
-            } else {
-                ""
-            },
-            order_dir = match order {
-                Order::Ascending => "ASC",
-                Order::Descending => "DESC",
-            },
-        );
+                fts_join = if has_query {
+                    "JOIN elements_fts ef ON ef.rowid = e.id"
+                } else {
+                    ""
+                },
+                fts_match = if has_query {
+                    "AND ef.text MATCH ?8"
+                } else {
+                    ""
+                },
+                order_dir = match order {
+                    Order::Ascending => "ASC",
+                    Order::Descending => "DESC",
+                },
+            );
 
-        let on_screen_int: i64 = if on_screen { 1 } else { 0 };
-        let mut q = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-            .bind(on_screen_int)
-            .bind(start_time)
-            .bind(end_time)
-            .bind(app_name)
-            .bind(window_name)
-            .bind(limit)
-            .bind(offset);
-        if has_query {
-            q = q.bind(crate::text_normalizer::sanitize_fts5_query(query));
-        }
-        let mut connection = self.acquire_search_read().await?;
-        q.fetch_all(&mut *connection).await
+            let on_screen_int: i64 = if on_screen { 1 } else { 0 };
+            let mut q = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(on_screen_int)
+                .bind(start_time)
+                .bind(end_time)
+                .bind(app_name)
+                .bind(window_name)
+                .bind(limit)
+                .bind(offset);
+            if has_query {
+                q = q.bind(crate::text_normalizer::sanitize_fts5_query(query));
+            }
+            let mut connection = self.acquire_search_read().await?;
+            let mut rows = q.fetch_all(&mut *connection).await?;
+            drop(connection);
+            self.hydrate_accessibility_rows(&mut rows).await?;
+            Ok(rows)
+        })
+        .await
     }
 
     /// Count of distinct frames returned by `search_accessibility_visible`,

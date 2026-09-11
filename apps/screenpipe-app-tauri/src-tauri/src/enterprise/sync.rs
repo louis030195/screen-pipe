@@ -313,7 +313,16 @@ impl Cursor {
 /// inject a mock without spinning up the real server. Implemented in the
 /// desktop crate against `LocalApiContext`.
 #[async_trait::async_trait]
+pub trait ExportAdmission: Send + Sync {
+    async fn admit(&self) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, EnterpriseSyncError>;
+}
+
+#[async_trait::async_trait]
 pub trait LocalApiClient: Send + Sync {
+    async fn begin_export(&self) -> Result<Option<Box<dyn ExportAdmission>>, EnterpriseSyncError> {
+        Ok(None)
+    }
+
     async fn initialized_upload_source_id(&self) -> Option<String> {
         None
     }
@@ -561,7 +570,8 @@ async fn post_jsonl_with_identity(
     stable_device_id: Option<&str>,
     backfill: bool,
 ) -> Result<(), EnterpriseSyncError> {
-    let mut request = client.post(url)
+    let mut request = client
+        .post(url)
         .header("X-License-Key", license_key)
         .header("Content-Type", "application/x-ndjson");
     if backfill {
@@ -773,6 +783,7 @@ async fn run_one_sync_inner(
     }
 
     let prepared = prepare_upload_identity(cfg, local, http).await?;
+    let export = local.begin_export().await?;
     let cfg = &prepared;
     if cfg.stable_device_id.is_none()
         && cursor.source_id.is_some()
@@ -993,7 +1004,10 @@ async fn run_one_sync_inner(
         {
             Ok(rows) => rows,
             Err(error) => {
-                warn!("enterprise sync: activity fetch failed (skipping): {}", error);
+                warn!(
+                    "enterprise sync: activity fetch failed (skipping): {}",
+                    error
+                );
                 Vec::new()
             }
         }
@@ -1091,15 +1105,20 @@ async fn run_one_sync_inner(
     match &cfg.upload_mode {
         EnterpriseUploadMode::HostedIngest => {
             for request_body in split_jsonl_requests(body, HOSTED_INGEST_REQUEST_BYTES) {
-                post_jsonl_with_identity(
+                let admission = match &export {
+                    Some(token) => token.admit().await?,
+                    None => None,
+                };
+                let upload = post_jsonl_with_identity(
                     http,
                     &cfg.ingest_url,
                     &cfg.license_key,
                     request_body,
                     cfg.stable_device_id.as_deref(),
                     backfill.is_some(),
-                )
-                .await?;
+                );
+                drop(admission);
+                upload.await?;
             }
         }
         EnterpriseUploadMode::DirectWriteOnly(direct) => {
@@ -1113,15 +1132,20 @@ async fn run_one_sync_inner(
                 memories: memories.len(),
                 feedback: feedback.len(),
             };
-            upload_direct_write_only_batch(
+            let admission = match &export {
+                Some(token) => token.admit().await?,
+                None => None,
+            };
+            let upload = upload_direct_write_only_batch(
                 http,
                 cfg,
                 direct,
                 body,
                 counts,
                 enterprise_upload::direct_upload_cursors(&next_cursor),
-            )
-            .await?;
+            );
+            drop(admission);
+            upload.await?;
         }
         EnterpriseUploadMode::DirectReadable(direct) => {
             let counts = DirectUploadRecordCounts {
@@ -1134,15 +1158,20 @@ async fn run_one_sync_inner(
                 memories: memories.len(),
                 feedback: feedback.len(),
             };
-            upload_direct_readable_batch(
+            let admission = match &export {
+                Some(token) => token.admit().await?,
+                None => None,
+            };
+            let upload = upload_direct_readable_batch(
                 http,
                 cfg,
                 direct,
                 body,
                 counts,
                 enterprise_upload::direct_upload_cursors(&next_cursor),
-            )
-            .await?;
+            );
+            drop(admission);
+            upload.await?;
         }
         EnterpriseUploadMode::Blocked(reason) => {
             return Err(EnterpriseSyncError::Configuration(reason.clone()));
@@ -1150,8 +1179,8 @@ async fn run_one_sync_inner(
     }
 
     if backfill.is_some() {
-        let records = frames.len() + audio.len() + ui.len() + parsed.len()
-            + memories.len() + feedback.len();
+        let records =
+            frames.len() + audio.len() + ui.len() + parsed.len() + memories.len() + feedback.len();
         next_cursor.boundary.backfill_records =
             Some(cursor.boundary.backfill_records.unwrap_or(0) + records as u64);
     }
@@ -4392,10 +4421,9 @@ mod tests {
             "2026-09-02T18:15:00Z",
         )]]);
 
-        let disabled_report =
-            run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
-                .await
-                .unwrap();
+        let disabled_report = run_one_sync(&cfg, &mut cursor, &local, &reqwest::Client::new())
+            .await
+            .unwrap();
         assert_eq!(disabled_report.activities, 0);
         assert!(local.last_activity_since.lock().unwrap().is_none());
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -4411,7 +4439,10 @@ mod tests {
         );
         let requests = server.received_requests().await.unwrap();
         let batch = screenpipe_telemetry_wire::parse_jsonl(&requests[0].body);
-        assert!(matches!(batch.records.as_slice(), [TelemetryRecord::Activity { .. }]));
+        assert!(matches!(
+            batch.records.as_slice(),
+            [TelemetryRecord::Activity { .. }]
+        ));
     }
 
     #[tokio::test]

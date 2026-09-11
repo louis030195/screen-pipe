@@ -910,6 +910,14 @@ fn spawn_archive_loop(
             let mut upload_error = false;
 
             loop {
+                let storage_token = match db.storage_read_token().await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        warn!(%error, "archive: storage admission unavailable");
+                        upload_error = true;
+                        break;
+                    }
+                };
                 let chunk =
                     match get_archive_chunk(&db, &machine_id, current_watermark, cutoff, 500).await
                     {
@@ -940,16 +948,23 @@ fn spawn_archive_loop(
                     }
                 };
 
-                match manager
-                    .upload(
-                        &data,
-                        BlobType::Ocr, // Primary blob type for mixed archive data
-                        &chunk.time_start,
-                        &chunk.time_end,
-                        None,
-                    )
-                    .await
-                {
+                let admission = match storage_token.admit(&db.pool).await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        warn!(%error, "archive: source changed before export");
+                        upload_error = true;
+                        break;
+                    }
+                };
+                let upload = manager.upload(
+                    &data,
+                    BlobType::Ocr, // Primary blob type for mixed archive data
+                    &chunk.time_start,
+                    &chunk.time_end,
+                    None,
+                );
+                drop(admission);
+                match upload.await {
                     Ok(result) => {
                         info!(
                             "archive: uploaded chunk ({} bytes), blob_id={}",
@@ -1099,8 +1114,9 @@ async fn get_archive_chunk(
     .await?;
 
     // Accessibility data now lives in frames.full_text (text_source='accessibility')
-    let accessibility: Vec<(i64, String, String, String, String, Option<String>)> = sqlx::query_as(
-        r#"
+    let mut accessibility: Vec<(i64, String, String, String, String, Option<String>)> =
+        sqlx::query_as(
+            r#"
         SELECT id, timestamp,
                COALESCE(app_name, ''), COALESCE(window_name, ''),
                COALESCE(full_text, ''), browser_url
@@ -1109,12 +1125,25 @@ async fn get_archive_chunk(
         ORDER BY timestamp ASC
         LIMIT ?
         "#,
-    )
-    .bind(&start_str)
-    .bind(&end_str)
-    .bind(limit as i64)
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await?;
+
+    let ids: Vec<i64> = accessibility.iter().map(|row| row.0).collect();
+    let payloads = db
+        .frame_payloads(&ids, screenpipe_db::storage::Projection::Search)
+        .await?;
+    for row in &mut accessibility {
+        row.4 = payloads
+            .get(&row.0)
+            .ok_or_else(|| anyhow::anyhow!("archive frame payload missing"))?
+            .full_text
+            .clone()
+            .unwrap_or_default();
+    }
 
     // Get UI events in range
     #[allow(clippy::type_complexity)]
@@ -1197,17 +1226,32 @@ async fn get_archive_chunk(
     // Get OCR for frames (include app_name/window_name for cross-machine sync)
     let ocr_records = if !frame_ids.is_empty() {
         type OcrRow = (i64, String, bool, Option<String>, Option<String>);
-        let ocr_results: Vec<OcrRow> = sqlx::query_as(
+        let sql = if db.storage_mode() == screenpipe_db::storage::StorageMode::HybridParquetV1 {
+            "SELECT id, '', COALESCE(focused,0),app_name,window_name FROM frames WHERE id IN (SELECT value FROM json_each(?)) AND payload_full_text_present AND payload_full_text_length > 0"
+        } else {
             r#"
             SELECT id AS frame_id, full_text AS text, COALESCE(focused, 0) AS focused, app_name, window_name
             FROM frames
             WHERE id IN (SELECT value FROM json_each(?))
               AND full_text IS NOT NULL AND full_text != ''
-            "#,
-        )
-        .bind(serde_json::to_string(&frame_ids).unwrap())
-        .fetch_all(pool)
-        .await?;
+            "#
+        };
+        let mut ocr_results: Vec<OcrRow> = sqlx::query_as(sql)
+            .bind(serde_json::to_string(&frame_ids).unwrap())
+            .fetch_all(pool)
+            .await?;
+
+        let payloads = db
+            .frame_payloads(&frame_ids, screenpipe_db::storage::Projection::Search)
+            .await?;
+        for row in &mut ocr_results {
+            row.1 = payloads
+                .get(&row.0)
+                .ok_or_else(|| anyhow::anyhow!("archive frame payload missing"))?
+                .full_text
+                .clone()
+                .unwrap_or_default();
+        }
 
         ocr_results
             .into_iter()
@@ -1610,6 +1654,41 @@ async fn upload_single_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn archive_upload_keeps_sealed_frame_text() {
+        let root = tempfile::tempdir().unwrap();
+        let db = DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap();
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,offset_index,device_name,full_text,accessibility_text,text_source) VALUES(1,'2026-09-11T12:00:00+00:00',0,'test','archive search text','distinct tree text','accessibility')").await.unwrap();
+        db.seal_frame_payloads().await.unwrap();
+        let token = db.storage_read_token().await.unwrap();
+        let chunk = get_archive_chunk(
+            &db,
+            "test",
+            "2026-09-11T00:00:00Z".parse().unwrap(),
+            "2026-09-12T00:00:00Z".parse().unwrap(),
+            500,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(chunk.ocr_records.len(), 1);
+        assert_eq!(chunk.ocr_records[0].text, "archive search text");
+        assert_eq!(chunk.accessibility_records.len(), 1);
+        assert_eq!(
+            chunk.accessibility_records[0].text_content,
+            "archive search text"
+        );
+        drop(token.admit(&db.pool).await.unwrap());
+        db.execute_raw_sql_write("DELETE FROM frames WHERE id=1")
+            .await
+            .unwrap();
+        assert!(token.admit(&db.pool).await.is_err());
+        drop(token);
+        db.close().await;
+    }
 
     #[test]
     fn archive_password_is_stable_and_token_specific() {

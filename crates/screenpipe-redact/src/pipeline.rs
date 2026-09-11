@@ -407,6 +407,64 @@ impl Pipeline {
 
 #[async_trait]
 impl Redactor for Pipeline {
+    fn policy_identity(&self) -> String {
+        format!(
+            "{}:{}:{:?}:{}:{}:pseudonyms={}:ai={}",
+            self.name(),
+            self.version(),
+            self.cfg.policy,
+            self.cfg.ai_min_chars,
+            self.cfg.ai_skip_if_regex_spans,
+            self.pseudonyms.is_some(),
+            self.ai
+                .as_ref()
+                .map(|ai| ai.policy_identity())
+                .unwrap_or_default()
+        )
+    }
+
+    async fn redact_complete(&self, text: &str) -> Result<RedactionOutput, RedactError> {
+        let key = cache_key(
+            text,
+            &format!("complete:{}", self.policy_identity()),
+            self.version(),
+        );
+        if let Some(hit) = self.cache.get(&key).await {
+            return Ok((*hit).clone());
+        }
+        let mut current = apply_policy(
+            regex_adapter::redact_one(text),
+            &self.cfg.policy,
+            self.pseudonyms.as_deref(),
+        );
+        if let Some(ai) = self.ai.as_ref().filter(|_| {
+            current.input.chars().count() >= self.cfg.ai_min_chars
+                && current.spans.len() < self.cfg.ai_skip_if_regex_spans
+        }) {
+            let attempt = match &self.ai_failure_circuit {
+                Some(circuit) => Some(circuit.begin_attempt().await.ok_or_else(|| {
+                    RedactError::Unavailable("configured detector is backing off".into())
+                })?),
+                None => None,
+            };
+            let result = ai.redact_complete(&current.redacted).await;
+            if let (Some(circuit), Some(attempt)) = (&self.ai_failure_circuit, attempt) {
+                if result.is_ok() {
+                    circuit.record_success(attempt).await;
+                } else {
+                    circuit.record_failure(attempt).await;
+                }
+            }
+            let detected = result?;
+            current.redacted = if detected.spans.is_empty() {
+                detected.redacted
+            } else {
+                apply_policy(detected, &self.cfg.policy, self.pseudonyms.as_deref()).redacted
+            };
+        }
+        self.cache.insert(key, current.clone()).await;
+        Ok(current)
+    }
     fn name(&self) -> &str {
         // Match on the inner AI adapter's reported name. The onnx adapter
         // reports a versioned name (e.g. `v45_phase4_onnx`), so match on

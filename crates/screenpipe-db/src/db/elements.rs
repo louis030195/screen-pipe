@@ -23,6 +23,10 @@ impl DatabaseManager {
         app_names: Option<Vec<String>>,
         max_per_app: Option<u32>,
     ) -> Result<Vec<SearchMatch>, sqlx::Error> {
+        self.consistent_read(|| {
+        let app_names = app_names.clone();
+        async move {
+
         let mut conditions = Vec::new();
         let mut owned_conditions = Vec::new();
 
@@ -169,12 +173,14 @@ LIMIT ? OFFSET ?
         // Bind limit and offset
         query_builder = query_builder.bind(limit as i64).bind(offset as i64);
 
-        let rows = query_builder.fetch_all(&self.pool).await?;
+        let mut rows = query_builder.fetch_all(&self.pool).await?;
+        self.hydrate_frame_rows(&mut rows).await?;
 
         Ok(rows
             .iter()
             .filter_map(|row| search_match_from_row(row, query, fuzzy_match))
             .collect())
+        }}).await
     }
 
     // ========================================================================
@@ -368,6 +374,10 @@ LIMIT ? OFFSET ?
         order: Order,
         app_names: Option<Vec<String>>,
     ) -> Result<Vec<SearchMatchGroup>, sqlx::Error> {
+        self.consistent_read(|| {
+        let app_names = app_names.clone();
+        async move {
+
         let mut conditions = Vec::new();
         let mut owned_conditions = Vec::new();
 
@@ -502,7 +512,8 @@ WHERE f.id IN ({placeholders})
             hydration_query = hydration_query.bind(row.id);
         }
 
-        let hydrated = hydration_query.fetch_all(&self.pool).await?;
+        let mut hydrated = hydration_query.fetch_all(&self.pool).await?;
+        self.hydrate_frame_rows(&mut hydrated).await?;
         let mut matches_by_id: HashMap<i64, SearchMatch> = hydrated
             .iter()
             .filter_map(|row| search_match_from_row(row, query, fuzzy_match))
@@ -523,6 +534,7 @@ WHERE f.id IN ({placeholders})
                 }
             })
             .collect())
+        }}).await
     }
 }
 

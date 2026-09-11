@@ -734,10 +734,12 @@ impl DatabaseManager {
             // Fire-and-forget: spawn so we don't block the capture loop waiting
             // for element insertion. Errors are logged inside insert_*_elements.
             let queue = self.write_queue.clone();
+            let expected_generation = self.storage.as_ref().map(|_| 1);
             tokio::spawn(async move {
                 let _ = queue
                     .submit(WriteOp::InsertDeferredElements {
                         frame_id,
+                        expected_generation,
                         ocr_text_json: ocr_json_for_elements,
                         accessibility_tree_json: a11y_json_for_elements,
                     })
@@ -787,6 +789,35 @@ impl DatabaseManager {
         text_json: &str,
         ocr_engine: Arc<OcrEngine>,
     ) -> Result<(), sqlx::Error> {
+        if self.storage.is_some() {
+            for _ in 0..3 {
+                let Some(mut payload) = self
+                    .frame_payloads(&[frame_id], crate::storage::Projection::All)
+                    .await?
+                    .remove(&frame_id)
+                else {
+                    return Ok(());
+                };
+                if !text.is_empty() {
+                    payload.full_text = Some(text.to_owned());
+                }
+                if !text_json.is_empty() {
+                    payload.text_json = Some(text_json.to_owned());
+                }
+                let policy: String = sqlx::query_scalar("SELECT policy FROM storage_metadata")
+                    .fetch_one(&self.pool)
+                    .await?;
+                if self
+                    .replace_frame_payload(&payload, &policy, 0, None, None)
+                    .await?
+                {
+                    return Ok(());
+                }
+            }
+            return Err(crate::storage::storage_error(
+                "late OCR generation changed; retry",
+            ));
+        }
         let _ = ocr_engine;
         let mut tx = self.begin_immediate_with_retry().await?;
         sqlx::query(
@@ -818,6 +849,11 @@ impl DatabaseManager {
             .bind(frame_id)
             .execute(&mut **tx.conn())
             .await?;
+        if self.storage.is_some() {
+            sqlx::query("UPDATE storage_metadata SET revision=revision+1")
+                .execute(&mut **tx.conn())
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1054,33 +1090,34 @@ impl DatabaseManager {
         limit: usize,
         order: Order,
     ) -> Result<TimeSeriesChunk, SqlxError> {
-        // Acquire a heavy-read permit (max 2 concurrent). This prevents slow
-        // queries (60s+ on legacy data) from consuming all pool connections.
-        let _permit = self
-            .heavy_read_semaphore
-            .acquire()
-            .await
-            .map_err(|_| SqlxError::Protocol("heavy_read_semaphore closed".to_string()))?;
+        self.consistent_read(|| async {
+            // Acquire a heavy-read permit (max 2 concurrent). This prevents slow
+            // queries (60s+ on legacy data) from consuming all pool connections.
+            let _permit = self
+                .heavy_read_semaphore
+                .acquire()
+                .await
+                .map_err(|_| SqlxError::Protocol("heavy_read_semaphore closed".to_string()))?;
 
-        // Get frames with OCR data, grouped by minute to handle multiple monitors.
-        // OCR text is truncated to 200 chars for the timeline stream — full text
-        // is fetched on-demand via /frames/{id}/ocr when needed. This reduces
-        // data transfer from ~5MB to ~500KB for a full-day query (~2500 frames).
-        // OCR text/metadata now lives on the frame: the ocr_text table was
-        // retired in 2026-06 and the 2026-06-13 migration backfilled full_text,
-        // app_name, and window_name onto every legacy frame, so the old
-        // correlated-subquery fallbacks are no longer needed.
-        let frame_limit = Self::bounded_timeline_limit(limit);
-        // Audio/live transcript rows can be denser than frame rows during calls.
-        // Keep enough context to attach nearby audio while avoiding the old
-        // unconditional 10k + 10k + 10k row materialization for small timeline
-        // requests.
-        let aux_limit = Self::bounded_timeline_limit(limit.saturating_mul(4).max(250));
-        let is_ascending = order == Order::Ascending;
-        let order_sql = if is_ascending { "ASC" } else { "DESC" };
+            // Get frames with OCR data, grouped by minute to handle multiple monitors.
+            // OCR text is truncated to 200 chars for the timeline stream — full text
+            // is fetched on-demand via /frames/{id}/ocr when needed. This reduces
+            // data transfer from ~5MB to ~500KB for a full-day query (~2500 frames).
+            // OCR text/metadata now lives on the frame: the ocr_text table was
+            // retired in 2026-06 and the 2026-06-13 migration backfilled full_text,
+            // app_name, and window_name onto every legacy frame, so the old
+            // correlated-subquery fallbacks are no longer needed.
+            let frame_limit = Self::bounded_timeline_limit(limit);
+            // Audio/live transcript rows can be denser than frame rows during calls.
+            // Keep enough context to attach nearby audio while avoiding the old
+            // unconditional 10k + 10k + 10k row materialization for small timeline
+            // requests.
+            let aux_limit = Self::bounded_timeline_limit(limit.saturating_mul(4).max(250));
+            let is_ascending = order == Order::Ascending;
+            let order_sql = if is_ascending { "ASC" } else { "DESC" };
 
-        let frames_query = format!(
-            r#"
+            let frames_query = format!(
+                r#"
 	         SELECT
 	            f.id,
 	            f.timestamp,
@@ -1103,11 +1140,11 @@ impl DatabaseManager {
 	        ORDER BY f.timestamp {order_sql}, f.offset_index {order_sql}
 	        LIMIT ?3
 	    "#
-        );
+            );
 
-        // Get audio data with proper time windows for synchronization
-        let audio_query = format!(
-            r#"
+            // Get audio data with proper time windows for synchronization
+            let audio_query = format!(
+                r#"
 	        SELECT
 	            at.timestamp,
 	            at.transcription,
@@ -1130,19 +1167,19 @@ impl DatabaseManager {
 	        ORDER BY at.timestamp {order_sql}
 	        LIMIT ?3
 	        "#
-        );
+            );
 
-        // Live meeting transcripts live in a SEPARATE table (meeting_transcript_segments)
-        // and are NOT in audio_transcriptions: when a meeting is transcribed live,
-        // mark_chunks_covered_by_live() flags the underlying chunks 'transcribed' so the
-        // background reconciler skips them — leaving no audio_transcriptions row for that
-        // window. Without this query a fully-transcribed live meeting shows as a BLANK
-        // stretch on the timeline even though the in-app Meeting view (which already
-        // UNIONs both tables) shows it. Columns are aliased to match audio_query so the
-        // same row-processing path below handles both. There is no audio file / chunk for
-        // a live segment, so audio_path='' and audio_chunk_id=-1 (transcript-only entry).
-        let live_query = format!(
-            r#"
+            // Live meeting transcripts live in a SEPARATE table (meeting_transcript_segments)
+            // and are NOT in audio_transcriptions: when a meeting is transcribed live,
+            // mark_chunks_covered_by_live() flags the underlying chunks 'transcribed' so the
+            // background reconciler skips them — leaving no audio_transcriptions row for that
+            // window. Without this query a fully-transcribed live meeting shows as a BLANK
+            // stretch on the timeline even though the in-app Meeting view (which already
+            // UNIONs both tables) shows it. Columns are aliased to match audio_query so the
+            // same row-processing path below handles both. There is no audio file / chunk for
+            // a live segment, so audio_path='' and audio_chunk_id=-1 (transcript-only entry).
+            let live_query = format!(
+                r#"
 	        SELECT
 	            mts.captured_at AS timestamp,
 	            mts.transcript AS transcription,
@@ -1162,206 +1199,222 @@ impl DatabaseManager {
 	        ORDER BY julianday(mts.captured_at) {order_sql}
 	        LIMIT ?3
 	        "#
-        );
+            );
 
-        // Execute queries in parallel
-        let (frame_rows, audio_rows, live_rows) = tokio::try_join!(
-            sqlx::query(sqlx::AssertSqlSafe(frames_query))
-                .bind(start)
-                .bind(end)
-                .bind(frame_limit)
-                .fetch_all(&self.pool),
-            sqlx::query(sqlx::AssertSqlSafe(audio_query))
-                .bind(start)
-                .bind(end)
-                .bind(aux_limit)
-                .fetch_all(&self.pool),
-            sqlx::query(sqlx::AssertSqlSafe(live_query))
-                .bind(start)
-                .bind(end)
-                .bind(aux_limit)
-                .fetch_all(&self.pool)
-        )?;
+            // Execute queries in parallel
+            let (frame_rows, audio_rows, live_rows) = tokio::try_join!(
+                sqlx::query(sqlx::AssertSqlSafe(frames_query))
+                    .bind(start)
+                    .bind(end)
+                    .bind(frame_limit)
+                    .fetch_all(&self.pool),
+                sqlx::query(sqlx::AssertSqlSafe(audio_query))
+                    .bind(start)
+                    .bind(end)
+                    .bind(aux_limit)
+                    .fetch_all(&self.pool),
+                sqlx::query(sqlx::AssertSqlSafe(live_query))
+                    .bind(start)
+                    .bind(end)
+                    .bind(aux_limit)
+                    .fetch_all(&self.pool)
+            )?;
 
-        // Process into structured data with device-aware grouping
-        let mut frames_map: BTreeMap<(DateTime<Utc>, i64), FrameData> = BTreeMap::new();
+            // Process into structured data with device-aware grouping
+            let mut frames_map: BTreeMap<(DateTime<Utc>, i64), FrameData> = BTreeMap::new();
 
-        // Process frame/OCR data with device awareness
-        for row in frame_rows {
-            let timestamp: DateTime<Utc> = row.get("timestamp");
-            let offset_index: i64 = row.get("offset_index");
-            let key = (timestamp, offset_index);
+            let payloads = if self.storage.is_some() {
+                let ids: Vec<i64> = frame_rows.iter().map(|r| r.get("id")).collect();
+                self.frame_payloads(&ids, crate::storage::Projection::Search)
+                    .await?
+            } else {
+                Default::default()
+            };
 
-            let chunk_fps: f64 = row.try_get("chunk_fps").unwrap_or(0.5);
-            let frame_data = frames_map.entry(key).or_insert_with(|| FrameData {
-                frame_id: row.get("id"),
-                timestamp,
-                offset_index,
-                fps: chunk_fps,
-                machine_id: row.try_get("machine_id").ok(),
-                ocr_entries: Vec::new(),
-                audio_entries: Vec::new(),
-            });
+            // Process frame/OCR data with device awareness
+            for row in frame_rows {
+                let timestamp: DateTime<Utc> = row.get("timestamp");
+                let offset_index: i64 = row.get("offset_index");
+                let key = (timestamp, offset_index);
 
-            let text: String = row.try_get::<String, _>("text").unwrap_or_default();
-            let video_path: String = row.try_get::<String, _>("video_path").unwrap_or_default();
-            // Create an entry if we have text OR a file path (event-driven snapshots
-            // may have no OCR text but still need to appear on the timeline).
-            if !text.is_empty() || !video_path.is_empty() {
-                frame_data.ocr_entries.push(OCREntry {
-                    text,
-                    app_name: row.try_get::<String, _>("app_name").unwrap_or_default(),
-                    window_name: row.try_get::<String, _>("window_name").unwrap_or_default(),
-                    device_name: row
-                        .try_get::<String, _>("screen_device")
-                        .unwrap_or_default(),
-                    video_file_path: video_path,
-                    browser_url: row.try_get("browser_url").ok(),
+                let chunk_fps: f64 = row.try_get("chunk_fps").unwrap_or(0.5);
+                let frame_data = frames_map.entry(key).or_insert_with(|| FrameData {
+                    frame_id: row.get("id"),
+                    timestamp,
+                    offset_index,
+                    fps: chunk_fps,
+                    machine_id: row.try_get("machine_id").ok(),
+                    ocr_entries: Vec::new(),
+                    audio_entries: Vec::new(),
                 });
-            }
-        }
 
-        // Process audio data with proper synchronization
-        // Audio chunks can span multiple frames, so we assign audio to ALL frames
-        // that fall within the audio's time range (timestamp + start_time to timestamp + end_time)
-        //
-        // We pad the search window by 15s on each side because:
-        // - Frames can be 5-15s apart depending on capture rate
-        // - Audio offsets (start_time/end_time) are relative to the chunk timestamp,
-        //   so the actual speech window can be narrow (2-5s) and fall between frames
-        // - Without padding, audio with no frames in its exact window only gets assigned
-        //   to one fallback frame, making it invisible on most of the timeline
-        const AUDIO_FRAME_PAD_SECS: i64 = 15;
-
-        // Suppress live rows that duplicate a background transcription of the same
-        // moment (±15s). Normally the two paths are complementary — live-covered
-        // chunks get no audio_transcriptions row — so this only trims rare overlap
-        // (e.g. audio batch-transcribed before the meeting was detected).
-        const LIVE_DEDUP_WINDOW_MS: i64 = 15_000;
-        let mut background_ts_ms: Vec<i64> = audio_rows
-            .iter()
-            .filter_map(|r| r.try_get::<DateTime<Utc>, _>("timestamp").ok())
-            .map(|t| t.timestamp_millis())
-            .collect();
-        background_ts_ms.sort_unstable();
-        let live_rows: Vec<_> = live_rows
-            .into_iter()
-            .filter(|r| match r.try_get::<DateTime<Utc>, _>("timestamp") {
-                Ok(ts) => {
-                    let ts_ms = ts.timestamp_millis();
-                    let lo =
-                        background_ts_ms.partition_point(|&t| t < ts_ms - LIVE_DEDUP_WINDOW_MS);
-                    // keep the live row only if NO background row falls within ±window
-                    background_ts_ms
-                        .get(lo)
-                        .is_none_or(|&t| t > ts_ms + LIVE_DEDUP_WINDOW_MS)
+                let text: String = if let Some(payload) = payloads.get(&row.get::<i64, _>("id")) {
+                    payload.text().chars().take(200).collect()
+                } else {
+                    row.try_get::<String, _>("text").unwrap_or_default()
+                };
+                let video_path: String = row.try_get::<String, _>("video_path").unwrap_or_default();
+                // Create an entry if we have text OR a file path (event-driven snapshots
+                // may have no OCR text but still need to appear on the timeline).
+                if !text.is_empty() || !video_path.is_empty() {
+                    frame_data.ocr_entries.push(OCREntry {
+                        text,
+                        app_name: row.try_get::<String, _>("app_name").unwrap_or_default(),
+                        window_name: row.try_get::<String, _>("window_name").unwrap_or_default(),
+                        device_name: row
+                            .try_get::<String, _>("screen_device")
+                            .unwrap_or_default(),
+                        video_file_path: video_path,
+                        browser_url: row.try_get("browser_url").ok(),
+                    });
                 }
-                Err(_) => false,
-            })
-            .collect();
+            }
 
-        // Background (audio_transcriptions) and live (meeting_transcript_segments) rows
-        // share the same aliased columns, so a single loop attaches both to frames.
-        for row in audio_rows.into_iter().chain(live_rows) {
-            let audio_timestamp: DateTime<Utc> = row.get("timestamp");
-            let start_offset: Option<f64> = row.try_get("start_time").ok();
-            let end_offset: Option<f64> = row.try_get("end_time").ok();
+            // Process audio data with proper synchronization
+            // Audio chunks can span multiple frames, so we assign audio to ALL frames
+            // that fall within the audio's time range (timestamp + start_time to timestamp + end_time)
+            //
+            // We pad the search window by 15s on each side because:
+            // - Frames can be 5-15s apart depending on capture rate
+            // - Audio offsets (start_time/end_time) are relative to the chunk timestamp,
+            //   so the actual speech window can be narrow (2-5s) and fall between frames
+            // - Without padding, audio with no frames in its exact window only gets assigned
+            //   to one fallback frame, making it invisible on most of the timeline
+            const AUDIO_FRAME_PAD_SECS: i64 = 15;
 
-            // Calculate audio time range
-            // start_time and end_time are offsets in seconds from the audio timestamp
-            let audio_start = if let Some(start) = start_offset {
-                audio_timestamp + chrono::Duration::milliseconds((start * 1000.0) as i64)
-            } else {
-                audio_timestamp
-            };
-
-            let audio_end = if let Some(end) = end_offset {
-                audio_timestamp + chrono::Duration::milliseconds((end * 1000.0) as i64)
-            } else {
-                // If no end_time, use duration_secs to calculate end
-                let duration: f64 = row.try_get("duration_secs").unwrap_or(5.0);
-                audio_timestamp + chrono::Duration::milliseconds((duration * 1000.0) as i64)
-            };
-
-            // Pad the search range so nearby frames also get the audio indicator
-            let search_start = audio_start - chrono::Duration::seconds(AUDIO_FRAME_PAD_SECS);
-            let search_end = audio_end + chrono::Duration::seconds(AUDIO_FRAME_PAD_SECS);
-
-            // Create the audio entry once
-            let audio_entry = AudioEntry {
-                transcription: row.get("transcription"),
-                device_name: row.get("audio_device"),
-                is_input: row.get("is_input_device"),
-                audio_file_path: row.get("audio_path"),
-                duration_secs: row.get("duration_secs"),
-                audio_chunk_id: row.get("audio_chunk_id"),
-                speaker_id: row.try_get("speaker_id").ok(),
-                speaker_name: row.try_get("speaker_name").ok(),
-                start_time: start_offset,
-                end_time: end_offset,
-            };
-
-            // Find ALL frames within the padded audio time range
-            let matching_keys: Vec<(DateTime<Utc>, i64)> = frames_map
-                .range((search_start, i64::MIN)..=(search_end, i64::MAX))
-                .filter(|((frame_ts, _), _)| *frame_ts >= search_start && *frame_ts <= search_end)
-                .map(|(key, _)| *key)
+            // Suppress live rows that duplicate a background transcription of the same
+            // moment (±15s). Normally the two paths are complementary — live-covered
+            // chunks get no audio_transcriptions row — so this only trims rare overlap
+            // (e.g. audio batch-transcribed before the meeting was detected).
+            const LIVE_DEDUP_WINDOW_MS: i64 = 15_000;
+            let mut background_ts_ms: Vec<i64> = audio_rows
+                .iter()
+                .filter_map(|r| r.try_get::<DateTime<Utc>, _>("timestamp").ok())
+                .map(|t| t.timestamp_millis())
+                .collect();
+            background_ts_ms.sort_unstable();
+            let live_rows: Vec<_> = live_rows
+                .into_iter()
+                .filter(|r| match r.try_get::<DateTime<Utc>, _>("timestamp") {
+                    Ok(ts) => {
+                        let ts_ms = ts.timestamp_millis();
+                        let lo =
+                            background_ts_ms.partition_point(|&t| t < ts_ms - LIVE_DEDUP_WINDOW_MS);
+                        // keep the live row only if NO background row falls within ±window
+                        background_ts_ms
+                            .get(lo)
+                            .is_none_or(|&t| t > ts_ms + LIVE_DEDUP_WINDOW_MS)
+                    }
+                    Err(_) => false,
+                })
                 .collect();
 
-            // Add the audio entry to each matching frame
-            for key in &matching_keys {
-                if let Some(frame_data) = frames_map.get_mut(key) {
-                    frame_data.audio_entries.push(audio_entry.clone());
+            // Background (audio_transcriptions) and live (meeting_transcript_segments) rows
+            // share the same aliased columns, so a single loop attaches both to frames.
+            for row in audio_rows.into_iter().chain(live_rows) {
+                let audio_timestamp: DateTime<Utc> = row.get("timestamp");
+                let start_offset: Option<f64> = row.try_get("start_time").ok();
+                let end_offset: Option<f64> = row.try_get("end_time").ok();
+
+                // Calculate audio time range
+                // start_time and end_time are offsets in seconds from the audio timestamp
+                let audio_start = if let Some(start) = start_offset {
+                    audio_timestamp + chrono::Duration::milliseconds((start * 1000.0) as i64)
+                } else {
+                    audio_timestamp
+                };
+
+                let audio_end = if let Some(end) = end_offset {
+                    audio_timestamp + chrono::Duration::milliseconds((end * 1000.0) as i64)
+                } else {
+                    // If no end_time, use duration_secs to calculate end
+                    let duration: f64 = row.try_get("duration_secs").unwrap_or(5.0);
+                    audio_timestamp + chrono::Duration::milliseconds((duration * 1000.0) as i64)
+                };
+
+                // Pad the search range so nearby frames also get the audio indicator
+                let search_start = audio_start - chrono::Duration::seconds(AUDIO_FRAME_PAD_SECS);
+                let search_end = audio_end + chrono::Duration::seconds(AUDIO_FRAME_PAD_SECS);
+
+                // Create the audio entry once
+                let audio_entry = AudioEntry {
+                    transcription: row.get("transcription"),
+                    device_name: row.get("audio_device"),
+                    is_input: row.get("is_input_device"),
+                    audio_file_path: row.get("audio_path"),
+                    duration_secs: row.get("duration_secs"),
+                    audio_chunk_id: row.get("audio_chunk_id"),
+                    speaker_id: row.try_get("speaker_id").ok(),
+                    speaker_name: row.try_get("speaker_name").ok(),
+                    start_time: start_offset,
+                    end_time: end_offset,
+                };
+
+                // Find ALL frames within the padded audio time range
+                let matching_keys: Vec<(DateTime<Utc>, i64)> = frames_map
+                    .range((search_start, i64::MIN)..=(search_end, i64::MAX))
+                    .filter(|((frame_ts, _), _)| {
+                        *frame_ts >= search_start && *frame_ts <= search_end
+                    })
+                    .map(|(key, _)| *key)
+                    .collect();
+
+                // Add the audio entry to each matching frame
+                for key in &matching_keys {
+                    if let Some(frame_data) = frames_map.get_mut(key) {
+                        frame_data.audio_entries.push(audio_entry.clone());
+                    }
+                }
+
+                // Fallback: no frame within the padded window of this audio. This is the
+                // static-screen-meeting case — on a video call the screen barely changes,
+                // so screenshots are deduped away for minutes and the speech has no frame
+                // to ride on. The old fallback dumped the transcript onto the nearest
+                // DISTANT frame (so the audio's OWN moment stayed blank on the timeline and
+                // there was nothing to scrub to there), and dropped the audio ENTIRELY when
+                // the range had no frames at all (e.g. screen capture off / audio-only).
+                //
+                // Instead, synthesize an audio-only entry at the audio's own timestamp:
+                // create_time_series_frame turns a FrameData that has audio but no OCR into
+                // an "audio-only" device frame, so the stretch becomes a scrubbable,
+                // transcript-bearing segment instead of an invisible gap.
+                if matching_keys.is_empty() {
+                    // Sentinel offset_index so synthetic frames never collide with a real
+                    // frame's (timestamp, offset_index) key; rows that share an exact
+                    // timestamp merge into one entry. A later audio row whose ±pad window
+                    // covers this timestamp will match the synthetic frame above and
+                    // cluster onto it — the same behaviour as real frames, so a long gap
+                    // yields a bar roughly every pad-window rather than one per segment.
+                    // The negative frame_id keeps synthetic frames clear of real
+                    // (positive, autoincrement) frame ids for client-side dedup.
+                    const SYNTHETIC_AUDIO_OFFSET: i64 = i64::MIN;
+                    frames_map
+                        .entry((audio_timestamp, SYNTHETIC_AUDIO_OFFSET))
+                        .or_insert_with(|| FrameData {
+                            frame_id: -audio_timestamp.timestamp_millis(),
+                            timestamp: audio_timestamp,
+                            offset_index: SYNTHETIC_AUDIO_OFFSET,
+                            fps: 0.0,
+                            machine_id: None,
+                            ocr_entries: Vec::new(),
+                            audio_entries: Vec::new(),
+                        })
+                        .audio_entries
+                        .push(audio_entry);
                 }
             }
 
-            // Fallback: no frame within the padded window of this audio. This is the
-            // static-screen-meeting case — on a video call the screen barely changes,
-            // so screenshots are deduped away for minutes and the speech has no frame
-            // to ride on. The old fallback dumped the transcript onto the nearest
-            // DISTANT frame (so the audio's OWN moment stayed blank on the timeline and
-            // there was nothing to scrub to there), and dropped the audio ENTIRELY when
-            // the range had no frames at all (e.g. screen capture off / audio-only).
-            //
-            // Instead, synthesize an audio-only entry at the audio's own timestamp:
-            // create_time_series_frame turns a FrameData that has audio but no OCR into
-            // an "audio-only" device frame, so the stretch becomes a scrubbable,
-            // transcript-bearing segment instead of an invisible gap.
-            if matching_keys.is_empty() {
-                // Sentinel offset_index so synthetic frames never collide with a real
-                // frame's (timestamp, offset_index) key; rows that share an exact
-                // timestamp merge into one entry. A later audio row whose ±pad window
-                // covers this timestamp will match the synthetic frame above and
-                // cluster onto it — the same behaviour as real frames, so a long gap
-                // yields a bar roughly every pad-window rather than one per segment.
-                // The negative frame_id keeps synthetic frames clear of real
-                // (positive, autoincrement) frame ids for client-side dedup.
-                const SYNTHETIC_AUDIO_OFFSET: i64 = i64::MIN;
-                frames_map
-                    .entry((audio_timestamp, SYNTHETIC_AUDIO_OFFSET))
-                    .or_insert_with(|| FrameData {
-                        frame_id: -audio_timestamp.timestamp_millis(),
-                        timestamp: audio_timestamp,
-                        offset_index: SYNTHETIC_AUDIO_OFFSET,
-                        fps: 0.0,
-                        machine_id: None,
-                        ocr_entries: Vec::new(),
-                        audio_entries: Vec::new(),
-                    })
-                    .audio_entries
-                    .push(audio_entry);
-            }
-        }
-
-        Ok(TimeSeriesChunk {
-            frames: if is_ascending {
-                frames_map.into_values().collect()
-            } else {
-                frames_map.into_values().rev().collect()
-            },
-            start_time: start,
-            end_time: end,
+            Ok(TimeSeriesChunk {
+                frames: if is_ascending {
+                    frames_map.into_values().collect()
+                } else {
+                    frames_map.into_values().rev().collect()
+                },
+                start_time: start,
+                end_time: end,
+            })
         })
+        .await
     }
 
     pub async fn create_video_with_frames(

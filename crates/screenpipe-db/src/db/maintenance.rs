@@ -46,7 +46,13 @@ async fn run_guarded_routine_wal_checkpoint(
 impl DatabaseManager {
     /// Execute trusted, row-returning dynamic SQL on the query pool.
     pub async fn query_raw_sql(&self, query: &str) -> Result<serde_json::Value, sqlx::Error> {
-        Self::raw_sql_on_pool(&self.pool, query).await
+        if self.storage.is_some() {
+            crate::storage::sql::validate_resident_query(&self.pool, query).await?;
+        }
+        let token = self.storage_read_token().await?;
+        let result = Self::raw_sql_on_pool(&self.pool, query).await;
+        let _admission = token.admit(&self.pool).await?;
+        result
     }
 
     /// Execute trusted dynamic SQL that may mutate the database through the
@@ -685,6 +691,7 @@ impl DatabaseManager {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<StripTextResult, sqlx::Error> {
+        let archived_stripped = self.strip_archived_frame_details(start, end).await?;
         let mut tx = self.begin_immediate_with_retry().await?;
 
         let start_str = start.to_rfc3339();
@@ -763,7 +770,7 @@ impl DatabaseManager {
         .bind(&end_str)
         .execute(&mut **tx.conn())
         .await?;
-        let frames_stripped = frames_result.rows_affected();
+        let frames_stripped = frames_result.rows_affected() + archived_stripped;
 
         // Delete the UI event stream (its delete trigger keeps ui_events_fts in sync)
         let ui_events_result =
@@ -1536,6 +1543,9 @@ impl DatabaseManager {
     /// Create an atomic backup of the database using `VACUUM INTO`.
     /// The destination path must not already exist.
     pub async fn backup_to(&self, dest: &str) -> Result<(), sqlx::Error> {
+        if self.storage.is_some() {
+            return self.backup_hybrid(std::path::Path::new(dest)).await;
+        }
         let _write_guard = Arc::clone(&self.write_semaphore)
             .acquire_owned()
             .await

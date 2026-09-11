@@ -615,6 +615,7 @@ impl WritePoolRebuilder {
 /// thresholds and disables the rebuilder/hook (used by `spawn_write_drain` and the
 /// existing tests — behaviour unchanged).
 pub(crate) struct WriteDrainOpts {
+    pub admission_gate: Option<Arc<tokio::sync::Mutex<()>>>,
     pub rebuilder: Option<WritePoolRebuilder>,
     pub on_persistent_failure: PersistentFailureSlot,
     pub health: WriteQueueHealth,
@@ -642,6 +643,7 @@ pub(crate) struct WriteDrainOpts {
 impl Default for WriteDrainOpts {
     fn default() -> Self {
         Self {
+            admission_gate: None,
             rebuilder: None,
             on_persistent_failure: persistent_failure_slot(None),
             health: WriteQueueHealth::default(),
@@ -873,6 +875,7 @@ pub(crate) enum WriteOp {
     /// INSERT...RETURNING id queries that element insertion requires.
     InsertDeferredElements {
         frame_id: i64,
+        expected_generation: Option<i64>,
         ocr_text_json: Option<String>,
         accessibility_tree_json: Option<String>,
     },
@@ -1041,6 +1044,7 @@ async fn drain_loop(
     opts: WriteDrainOpts,
 ) {
     let WriteDrainOpts {
+        admission_gate,
         rebuilder,
         on_persistent_failure,
         health,
@@ -1108,13 +1112,14 @@ async fn drain_loop(
         }
 
         debug!("write_queue: draining batch of {} writes", batch.len());
-        let outcome = execute_batch(
+        let outcome = execute_batch_with_gate(
             &write_pool,
             &write_semaphore,
             &mut batch,
             &db_path,
             &health,
             batch_timeouts,
+            admission_gate.as_ref(),
         )
         .await;
         batch.clear();
@@ -1273,13 +1278,14 @@ async fn drain_loop(
             "write_queue: shutdown — flushing {} remaining writes",
             tail_batch.len()
         );
-        let _ = execute_batch(
+        let _ = execute_batch_with_gate(
             &write_pool,
             &write_semaphore,
             &mut tail_batch,
             &db_path,
             &health,
             batch_timeouts,
+            admission_gate.as_ref(),
         )
         .await;
         tail_batch.clear();
@@ -1287,6 +1293,7 @@ async fn drain_loop(
     debug!("write_queue: drain loop exited");
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 async fn execute_batch(
     write_pool: &Pool<Sqlite>,
     write_semaphore: &Arc<Semaphore>,
@@ -1294,6 +1301,27 @@ async fn execute_batch(
     db_path: &str,
     health: &WriteQueueHealth,
     timeouts: BatchTimeouts,
+) -> BatchOutcome {
+    execute_batch_with_gate(
+        write_pool,
+        write_semaphore,
+        batch,
+        db_path,
+        health,
+        timeouts,
+        None,
+    )
+    .await
+}
+
+async fn execute_batch_with_gate(
+    write_pool: &Pool<Sqlite>,
+    write_semaphore: &Arc<Semaphore>,
+    batch: &mut Vec<PendingWrite>,
+    db_path: &str,
+    health: &WriteQueueHealth,
+    timeouts: BatchTimeouts,
+    admission_gate: Option<&Arc<tokio::sync::Mutex<()>>>,
 ) -> BatchOutcome {
     // Acquire write semaphore once for the entire batch
     let _permit: OwnedSemaphorePermit = match tokio::time::timeout(
@@ -1322,6 +1350,11 @@ async fn execute_batch(
             // degradation and suppresses the sustained-contention signal.
             return BatchOutcome::Contention;
         }
+    };
+
+    let _admission = match admission_gate {
+        Some(gate) => Some(Arc::clone(gate).lock_owned().await),
+        None => None,
     };
 
     // Acquire connection and BEGIN IMMEDIATE with retry logic
@@ -1911,9 +1944,29 @@ async fn execute_single_write(
 
         WriteOp::InsertDeferredElements {
             frame_id,
+            expected_generation,
             ocr_text_json,
             accessibility_tree_json,
         } => {
+            let authoritative;
+            let (ocr_text_json, accessibility_tree_json) = if let Some(generation) =
+                expected_generation
+            {
+                authoritative = sqlx::query_as::<_,(String,Option<String>,Option<String>)>("SELECT p.state,f.text_json,f.accessibility_tree_json FROM frames f JOIN frame_payloads p ON p.frame_id=f.id WHERE f.id=? AND p.generation=?")
+                    .bind(frame_id).bind(generation).fetch_optional(&mut **conn).await?;
+                let Some((state, ocr, tree)) = authoritative.as_ref() else {
+                    return Ok(WriteResult::Unit);
+                };
+                // Sealing preserves this generation's bytes. Its queued
+                // inputs remain valid while the catalog names that generation.
+                if state == "sealed" {
+                    (ocr_text_json, accessibility_tree_json)
+                } else {
+                    (ocr, tree)
+                }
+            } else {
+                (ocr_text_json, accessibility_tree_json)
+            };
             if let Some(ref text_json) = ocr_text_json {
                 if !text_json.is_empty() {
                     crate::db::DatabaseManager::insert_ocr_elements(conn, *frame_id, text_json)
@@ -2701,6 +2754,60 @@ async fn ensure_db_openable(db_path: &str) -> bool {
 mod tests {
     use super::*;
     use sqlx::migrate::MigrateDatabase;
+
+    #[tokio::test]
+    async fn deferred_elements_survive_sealing_and_retire_after_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let db =
+            crate::DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default())
+                .await
+                .unwrap();
+        let json = serde_json::json!([{
+            "block_num":"0","conf":"95","page_num":"0","left":"0.2","height":"0.1",
+            "level":"0","text":"original word","par_num":"0","top":"0.3","word_num":"0","width":"0.4","line_num":"0"
+        }]).to_string();
+        for id in [1, 2] {
+            let mut tx = db.begin_immediate_with_retry().await.unwrap();
+            sqlx::query("INSERT INTO frames(id,timestamp,full_text,text_json) VALUES(?,'2026-09-11T12:00:00Z','original word',?)")
+                .bind(id).bind(&json).execute(&mut **tx.conn()).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        db.seal_frame_payloads().await.unwrap();
+        let mut replacement = db
+            .frame_payloads(&[2], crate::storage::Projection::All)
+            .await
+            .unwrap()
+            .remove(&2)
+            .unwrap();
+        replacement.full_text = Some("changed".into());
+        replacement.text_json = Some("[]".into());
+        assert!(db
+            .replace_frame_payload(&replacement, "", 0, None, None)
+            .await
+            .unwrap());
+        for id in [1, 2] {
+            let mut tx = db.begin_immediate_with_retry().await.unwrap();
+            execute_single_write(
+                &WriteOp::InsertDeferredElements {
+                    frame_id: id,
+                    expected_generation: Some(1),
+                    ocr_text_json: Some(json.clone()),
+                    accessibility_tree_json: None,
+                },
+                tx.conn(),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT frame_id,text FROM elements ORDER BY frame_id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(1, "original word".into())]);
+        db.close().await;
+    }
 
     #[test]
     fn capture_pool_connections_live_until_authoritative_shutdown() {

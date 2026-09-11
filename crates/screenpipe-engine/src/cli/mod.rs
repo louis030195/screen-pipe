@@ -376,6 +376,16 @@ pub enum Command {
         subcommand: DbCommand,
     },
 
+    /// Offline, opt-in frame storage lifecycle
+    Storage {
+        #[arg(value_parser = ["init", "migrate", "verify", "seal", "reclaim", "compact", "backup", "restore", "export-sqlite", "compare", "cancel", "status"])]
+        operation: String,
+        #[arg(value_hint = ValueHint::DirPath)]
+        root: std::path::PathBuf,
+        #[arg(value_hint = ValueHint::AnyPath)]
+        destination: Option<std::path::PathBuf>,
+    },
+
     /// Database backup & maintenance (checkpoint WAL, export snapshot)
     Backup {
         #[command(subcommand)]

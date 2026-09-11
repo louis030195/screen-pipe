@@ -89,9 +89,27 @@ impl DatabaseManager {
             self.write_pool.clone(),
             Arc::clone(&self.write_semaphore),
         )
+        .with_admission_gate(self.storage.as_ref().map(|s| Arc::clone(&s.gate)))
     }
 
     pub async fn new(database_path: &str, config: DbConfig) -> Result<Self, sqlx::Error> {
+        let resolved =
+            if database_path.contains(":memory:") || database_path.contains("mode=memory") {
+                std::path::PathBuf::from(database_path)
+            } else {
+                crate::storage::resolve_database_path(Path::new(database_path))?
+            };
+        let storage = crate::storage::HybridStorage::for_index(&resolved)?;
+        Self::new_with_storage(&resolved.to_string_lossy(), config, storage, false, true).await
+    }
+
+    pub(crate) async fn new_with_storage(
+        database_path: &str,
+        config: DbConfig,
+        storage: Option<Arc<crate::storage::HybridStorage>>,
+        bootstrap_storage: bool,
+        background: bool,
+    ) -> Result<Self, sqlx::Error> {
         screenpipe_sqlite_coordinator::verify_sqlite_runtime().map_err(SqlxError::Protocol)?;
         debug!(
             "Initializing DatabaseManager with database path: {} (mmap={}MB, cache={}KB, read_pool={})",
@@ -248,6 +266,9 @@ impl DatabaseManager {
         for (pragma, value) in screenpipe_config::WAL_SAFETY_PRAGMAS {
             connect_options = connect_options.pragma(pragma, value);
         }
+        if storage.is_some() {
+            connect_options = connect_options.pragma("synchronous", "FULL");
+        }
 
         // Fresh DB conversion to journal_mode=WAL requires an exclusive lock.
         // When the pool opens read_pool + write_pool connections concurrently,
@@ -350,10 +371,12 @@ impl DatabaseManager {
                 on_persistent_failure: persistent_failure_hook.clone(),
                 health: write_queue_health.clone(),
                 shutdown: close_token.clone(),
+                admission_gate: storage.as_ref().map(|s| Arc::clone(&s.gate)),
                 ..Default::default()
             },
         );
         let db_manager = DatabaseManager {
+            storage,
             upload_source_id: tokio::sync::OnceCell::new(),
             pool: read_pool,
             write_pool,
@@ -401,7 +424,36 @@ impl DatabaseManager {
         }
         // Migrations mutate schema and migration bookkeeping, so keep them on
         // the same serialized writer boundary as application writes.
-        if let Err(error) = Self::run_migrations(&db_manager.write_pool).await {
+        let schema_result = async {
+            if db_manager.storage.is_none() {
+                let hybrid: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM sqlite_master WHERE name='_hybrid_migrations'",
+                )
+                .fetch_one(&db_manager.pool)
+                .await?;
+                if hybrid != 0 {
+                    return Err(crate::storage::storage_error(
+                        "hybrid index requires its storage descriptor",
+                    ));
+                }
+            }
+            if db_manager.storage.is_none() || bootstrap_storage {
+                Self::run_migrations(&db_manager.write_pool).await?;
+            }
+            if let Some(storage) = &db_manager.storage {
+                let mut conn = db_manager.write_pool.acquire().await?;
+                if bootstrap_storage {
+                    let mut tx = conn.begin().await?;
+                    crate::storage::schema::bootstrap(&mut tx, &storage.descriptor).await?;
+                    tx.commit().await?;
+                }
+                crate::storage::schema::verify(&mut conn, &storage.descriptor).await?;
+                storage.verify_catalog(&db_manager.pool).await?;
+            }
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        if let Err(error) = schema_result {
             if crate::sqlite_error::is_sqlite_hard_fault(&error) {
                 db_manager.write_queue_health.latch_hard_fault(&error);
             }
@@ -416,7 +468,7 @@ impl DatabaseManager {
         // An in-memory database cannot carry corruption across startups, and a
         // quick_check on SQLite's shared in-memory cache takes table read locks
         // that can make concurrent writes fail immediately with SQLITE_LOCKED.
-        if !database_path.contains("mode=memory") && database_path != ":memory:" {
+        if background && !database_path.contains("mode=memory") && database_path != ":memory:" {
             db_manager.spawn_startup_integrity_check(Arc::from(database_path));
         }
 
@@ -428,7 +480,19 @@ impl DatabaseManager {
         // it: the desktop app runs the engine in-process and previously never
         // started it (only the standalone `screenpipe-engine` CLI did), so app
         // users got no periodic checkpointing at all.
-        db_manager.start_wal_maintenance();
+        if background {
+            db_manager.start_wal_maintenance();
+        }
+
+        if background && !bootstrap_storage {
+            if let Some(storage) = &db_manager.storage {
+                storage.spawn_maintenance(
+                    db_manager.pool.clone(),
+                    db_manager.coordinated_writer(),
+                    db_manager.close_token.clone(),
+                );
+            }
+        }
 
         Ok(db_manager)
     }
@@ -446,13 +510,27 @@ impl DatabaseManager {
     /// failure that kept recording down for hours on 2026-07-02.
     pub async fn close(&self) {
         self.close_token.cancel();
+        if let Some(storage) = &self.storage {
+            let _gate = storage.gate.lock().await;
+            storage.closing.cancel();
+        }
+        let drain_payloads = async {
+            let _file_job = match &self.storage {
+                Some(storage) => Some(storage.file_job.lock().await),
+                None => None,
+            };
+            let _payload_readers = match &self.storage {
+                Some(storage) => Some(storage.leases.write().await),
+                None => None,
+            };
+        };
         // Start closing both pools at the same time. `Pool::close()` marks a
         // pool closed immediately, then waits for checked-out connections to
         // return. Awaiting the write pool first meant one stuck writer kept the
         // read pool open indefinitely, so health/redaction work could continue
         // pinning the poisoned WAL-index while DB-wedge recovery was trying to
         // rebuild it.
-        tokio::join!(self.write_pool.close(), self.pool.close());
+        tokio::join!(self.write_pool.close(), self.pool.close(), drain_payloads);
         if let Some(lease) = self.manager_lease.as_ref() {
             lease.release();
         }
@@ -780,6 +858,11 @@ impl DatabaseManager {
             Err(_) => return Err(sqlx::Error::PoolTimedOut),
         };
 
+        let admission = match &self.storage {
+            Some(storage) => Some(Arc::clone(&storage.gate).lock_owned().await),
+            None => None,
+        };
+
         let max_retries = 3;
         let mut last_error = None;
         for attempt in 1..=max_retries {
@@ -812,6 +895,7 @@ impl DatabaseManager {
                         conn: Some(conn),
                         committed: false,
                         _write_permit: Some(permit),
+                        _admission: admission,
                         hard_fault_reporter: self.hard_fault_reporter(),
                     })
                 }

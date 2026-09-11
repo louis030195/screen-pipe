@@ -383,6 +383,23 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
 
 pub async fn handle_db_command(command: &DbCommand) -> Result<()> {
     let data_dir = screenpipe_core::paths::default_screenpipe_data_dir();
+    if data_dir.join("storage.json").exists() {
+        if matches!(command, DbCommand::Check) {
+            let db = screenpipe_db::DatabaseManager::new(
+                data_dir
+                    .join("db.sqlite")
+                    .to_str()
+                    .context("invalid database path")?,
+                Default::default(),
+            )
+            .await?;
+            let result = db.verify_storage().await;
+            db.close().await;
+            result?;
+            return Ok(());
+        }
+        bail!("hybrid storage lifecycle uses screenpipe-storage verify, restore, compact, or resume migration");
+    }
     match command {
         DbCommand::Check => integrity_check(&data_dir.join("db.sqlite")),
         DbCommand::Recover { force, resume } => recover(&data_dir, *force, *resume).await,
@@ -812,8 +829,11 @@ pub struct DatabaseStartupGuard {
 /// Unlike CLI maintenance, this guard never installs process-exit handlers.
 pub async fn prepare_database_startup(data_dir: &Path) -> Result<DatabaseStartupGuard> {
     let lock = DbLock::acquire_inner(data_dir, "database startup", false)?;
-    let live = data_dir.join("db.sqlite");
-    reconcile_interrupted_recovery(data_dir, &live).await?;
+    let legacy = data_dir.join("db.sqlite");
+    let live = screenpipe_db::storage::resolve_database_path(&legacy)?;
+    if live == legacy {
+        reconcile_interrupted_recovery(data_dir, &live).await?;
+    }
     Ok(DatabaseStartupGuard { _lock: lock })
 }
 
@@ -1002,6 +1022,10 @@ fn restore_interrupted_swap(data_dir: &Path, live: &Path) -> Result<()> {
 }
 
 async fn recover(data_dir: &Path, _force: bool, resume: bool) -> Result<()> {
+    if data_dir.join("storage.json").exists() || data_dir.join("storage-migration.json").exists() {
+        bail!("hybrid recovery preserves its descriptor and payload bundle; use storage verification or restore");
+    }
+
     // A recovery that races even one live SQLite connection cannot promise an
     // exact source generation. `--force` is retained for CLI compatibility but
     // deliberately cannot override this architectural boundary.
@@ -1124,6 +1148,10 @@ async fn resume_recovery_offline(data_dir: &Path) -> Result<()> {
 /// the server or capture. Requiring the durable marker keeps an accidental UI
 /// invocation from turning an ordinary healthy database into a recovery job.
 pub async fn recover_quarantined_database(data_dir: &Path) -> Result<()> {
+    if data_dir.join("storage.json").exists() || data_dir.join("storage-migration.json").exists() {
+        bail!("hybrid recovery preserves its descriptor and payload bundle; use storage verification or restore");
+    }
+
     let live = data_dir.join("db.sqlite");
     if !screenpipe_db::sqlite_quarantine_exists(&live) {
         bail!(

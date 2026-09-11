@@ -115,7 +115,9 @@ fn should_notify_openai_compatible_failure(
         && current_completed_count == previous_completed_count;
 
     (failed_request || repeated_empty_responses)
-        && last_notification.is_none_or(|last| now.duration_since(last) >= OPENAI_COMPATIBLE_FAILURE_NOTIFICATION_COOLDOWN)
+        && last_notification.is_none_or(|last| {
+            now.duration_since(last) >= OPENAI_COMPATIBLE_FAILURE_NOTIFICATION_COOLDOWN
+        })
 }
 
 fn monitor_openai_compatible_transcription_failures(
@@ -338,7 +340,8 @@ impl ServerCore {
         crate::db_relaunch::set_active_database(&local_data_dir);
         let data_path = local_data_dir.join("data");
         std::fs::create_dir_all(&data_path).map_err(|error| {
-            let message = format!("Failed to initialize database: cannot access data directory: {error}");
+            let message =
+                format!("Failed to initialize database: cannot access data directory: {error}");
             crate::health::set_boot_error(&message);
             message
         })?;
@@ -352,7 +355,11 @@ impl ServerCore {
                 crate::health::set_boot_error(&message);
                 message
             })?;
-        let db_path = format!("{}/db.sqlite", local_data_dir.to_string_lossy());
+        let db_path =
+            screenpipe_db::storage::resolve_database_path(&local_data_dir.join("db.sqlite"))
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned();
         crate::health::set_boot_phase(
             "migrating_database",
             Some("updating database — this may take several minutes on large installs"),
@@ -741,9 +748,8 @@ impl ServerCore {
             pipe_store,
             config.port,
         );
-        pipe_manager.set_scheduler_run_guard(Arc::new(|| {
-            crate::headless::scheduled_pipe_skip_reason()
-        }));
+        pipe_manager
+            .set_scheduler_run_guard(Arc::new(|| crate::headless::scheduled_pipe_skip_reason()));
         pipe_manager.set_max_non_template_pipes(config.max_non_template_pipes);
         let mcp_session_access =
             screenpipe_core::pipes::mcp_access::McpSessionAccessRegistry::new();
@@ -1138,10 +1144,15 @@ impl ServerCore {
                     placeholder,
                     cfg,
                 )
-                    .spawn_with_shutdown(redact_shutdown.clone());
+                .spawn_with_shutdown(redact_shutdown.clone());
             }
         }
 
+        if !config.async_pii_redaction {
+            db.set_frame_privacy_policy(&Default::default())
+                .await
+                .map_err(|error| format!("initialize frame privacy policy: {error}"))?;
+        }
         if config.async_pii_redaction {
             use screenpipe_redact::adapters::onnx::{OnnxConfig, OnnxRedactor};
             use screenpipe_redact::adapters::opf::{OpfAdapter, OpfConfig};
@@ -1219,14 +1230,16 @@ impl ServerCore {
                     pipeline_arc,
                     cfg,
                 )
-                    .with_database_error_hook(redact_database_error_hook.clone())
-                    .spawn_with_shutdown(redact_shutdown.clone());
+                .with_frame_storage(Arc::clone(&db))
+                .with_database_error_hook(redact_database_error_hook.clone())
+                .spawn_with_shutdown(redact_shutdown.clone());
             } else {
                 // Local mode: spawn the download+load off the boot path
                 // so a slow first-run HF pull doesn't block the app
                 // launch. The worker is created inside the spawned
                 // task once the model is ready.
                 let pool = db.pool.clone();
+                let frame_storage_db = Arc::clone(&db);
                 let writer = db.coordinated_writer();
                 let shutdown = redact_shutdown.clone();
                 let labels = pii_labels.clone();
@@ -1311,6 +1324,7 @@ impl ServerCore {
                         ..Default::default()
                     };
                     let _ = Worker::new_with_writer(pool, writer, pipeline_arc, cfg)
+                        .with_frame_storage(frame_storage_db)
                         .with_database_error_hook(database_error_hook)
                         .spawn_with_shutdown(shutdown);
                 });
@@ -1572,10 +1586,18 @@ mod tests {
     #[test]
     fn openai_compatible_failure_notifications_are_rate_limited() {
         let now = Instant::now();
-        assert!(should_notify_openai_compatible_failure(2, 3, 0, 0, 0, 0, None, now));
-        assert!(!should_notify_openai_compatible_failure(3, 3, 0, 0, 0, 0, None, now));
-        assert!(should_notify_openai_compatible_failure(3, 3, 1, 4, 10, 10, None, now));
-        assert!(!should_notify_openai_compatible_failure(3, 3, 1, 4, 10, 11, None, now));
+        assert!(should_notify_openai_compatible_failure(
+            2, 3, 0, 0, 0, 0, None, now
+        ));
+        assert!(!should_notify_openai_compatible_failure(
+            3, 3, 0, 0, 0, 0, None, now
+        ));
+        assert!(should_notify_openai_compatible_failure(
+            3, 3, 1, 4, 10, 10, None, now
+        ));
+        assert!(!should_notify_openai_compatible_failure(
+            3, 3, 1, 4, 10, 11, None, now
+        ));
         assert!(!should_notify_openai_compatible_failure(
             3,
             4,

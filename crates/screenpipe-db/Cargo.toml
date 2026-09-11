@@ -11,6 +11,9 @@ repository.workspace = true
 license-file.workspace = true
 edition.workspace = true
 
+[features]
+storage-fault-injection = []
+
 [dependencies]
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -41,11 +44,14 @@ oasgen = { workspace = true }
 tracing-subscriber = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
+parquet = { version = "59.0.0", default-features = false, features = ["zstd"] }
+sha2 = { workspace = true }
+fs2 = "0.4"
+tempfile = { workspace = true }
 
 [dev-dependencies]
 screenpipe-core = { path = "../screenpipe-core" }
 screenpipe-secrets = { path = "../screenpipe-secrets" }
-tempfile = { workspace = true }
 
 [[bench]]
 name = "db_benchmarks"
