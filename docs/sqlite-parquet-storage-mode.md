@@ -2,7 +2,7 @@
 
 > **Status: architecture proposal, not implemented.** Opt-in for a new database root. Existing databases retain their current storage path and behavior. This document does not authorize converting, replacing, or deleting an existing database.
 
-<!-- doc-covers: crates/screenpipe-db/src/db/setup.rs, crates/screenpipe-db/src/db/frames.rs, crates/screenpipe-db/src/db/search.rs, crates/screenpipe-db/src/db/maintenance.rs, crates/screenpipe-db/src/db/source_identity.rs, crates/screenpipe-db/src/recovery.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/bin/screenpipe-engine.rs, crates/screenpipe-engine/src/cli/db.rs, crates/screenpipe-engine/src/cli/backup.rs, crates/screenpipe-engine/src/routes/data.rs, crates/screenpipe-engine/src/retention.rs, crates/screenpipe-redact/src/worker/mod.rs, crates/screenpipe-redact/src/worker/tables.rs -->
+<!-- doc-covers: crates/screenpipe-db/src/db/setup.rs, crates/screenpipe-db/src/db/frames.rs, crates/screenpipe-db/src/db/search.rs, crates/screenpipe-db/src/db/maintenance.rs, crates/screenpipe-db/src/db/source_identity.rs, crates/screenpipe-db/src/recovery.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/bin/screenpipe-engine.rs, crates/screenpipe-engine/src/cli/db.rs, crates/screenpipe-engine/src/cli/backup.rs, crates/screenpipe-engine/src/routes/data.rs, crates/screenpipe-engine/src/retention.rs, crates/screenpipe-redact/src/worker/mod.rs, crates/screenpipe-redact/src/worker/tables.rs, crates/screenpipe-engine/src/sync_provider.rs, crates/screenpipe-engine/src/routes/data_sync_proxy.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs -->
 <!-- doc-verified: a35e3b89b4e3142f6c203577c1167c5bd50c8d34 -->
 
 [Interactive architecture diagram](diagrams/sqlite-parquet-storage-mode/architecture.html) · [Editable diagram source](diagrams/sqlite-parquet-storage-mode/architecture.json)
@@ -160,6 +160,23 @@ Keep the legacy SQLx migration runner and legacy recovery behavior unchanged. Gi
 
 Opening a compatible hybrid database can migrate its metadata without rewriting all historical files. New writes use the current payload schema; old files retain their recorded schema until an explicit supported rewrite. Unknown required capabilities fail before writer admission. Unsupported or mismatched schema checksums are not repaired by pretending they match.
 
+## Data Sync and enterprise ingestion boundary
+
+This proposal changes local persistence. Data Sync remote search and enterprise ingestion remain consumers of logical records, with their existing cloud formats and destinations.
+
+| Path | Architecture placement | Hybrid integration |
+|---|---|---|
+| Local app/agent queries | Local API → database facade → SQLite metadata/indexes + payload reader | Return the existing fields from staged or sealed payloads. |
+| Data Sync upload | Local sync adapter → existing serialized/encrypted records → Data Sync service | Replace direct frame-payload SQL reads with the payload reader; preserve upload policy, identities, and checkpoints. |
+| Data Sync remote search | App/agent → authenticated local proxy → cloud search → results returned to caller | Preserve the remote-search contract. Results are not imported into the local SQLite/Parquet database. |
+| Enterprise ingestion | Local API → enterprise uploader → existing JSONL → configured enterprise destination | Keep upload and ingestion contracts; make the local endpoints return complete payloads in either storage mode. |
+
+The [Data Sync proxy](../crates/screenpipe-engine/src/routes/data_sync_proxy.rs) forwards authenticated requests and streams the upstream response back. **Data Sync download/import into the local database is not part of this architecture.** Remote results do not pass through capture, local staging, or the Parquet sealer. The combined “Local API + sync adapters” diagram node represents these consumer boundaries; it does not imply that remote queries run against local storage or that the upload provider currently calls HTTP endpoints.
+
+The [upload provider](../crates/screenpipe-engine/src/sync_provider.rs) currently reads `frames.full_text` directly, so its local read adapter must change before hybrid mode can ship. The [enterprise uploader](../apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs) already consumes the local API and serializes logical records as JSONL. Its cloud ingestion format need not change for this proposal. Keeping cloud formats unchanged does not prove compatibility by itself: verify complete text, IDs, ordering, pagination/backfills, failures without cursor advancement, and source identity across a new database root.
+
+Existing and hybrid devices can continue publishing the same logical record formats for remote search. Local Parquet encoding/schema versions stay behind the storage boundary. Local redaction must affect newly read upload payloads and caches; it does not by itself retract previously uploaded records or alter cloud-side search/redaction policy.
+
 ## Other features that must work before opt-in ships
 
 | Surface | Required integration |
@@ -169,7 +186,7 @@ Opening a compatible hybrid database can migrate its metadata without rewriting 
 | Retention and user deletion/redaction | Use the replacement, cache/index invalidation, and durable cleanup protocol in the PII section; deletion omits the removed payload from replacements. |
 | Backup | Take a consistent SQLite snapshot plus a lease on its referenced immutable files; include staged payloads, version metadata, and checksums. A copy of `index.sqlite` alone is incomplete. Media remains separately selectable. |
 | Restore and recovery | Verify catalog/file identity together. Do not apply SQLite-only recovery swaps to a multi-file database. Missing files must not be converted into empty history. |
-| Sync and enterprise upload | Preserve logical records, stable IDs, and source-scoped progress; fetch text through the reader. Do not silently change existing wire formats to raw Parquet or enable cloud archival. |
+| Data Sync and enterprise upload | Follow the boundary above: adapt local upload reads, preserve remote search results and enterprise JSONL, and keep source-scoped progress. |
 | Storage statistics and compact | Count SQLite, WAL, committed payloads, staging, and temporary/obsolete files separately. Catalog compaction and Parquet rewrite have different costs. |
 | Local encryption policy | Preserve the installation's supported protection policy. Parquet compression is not encryption; reject mode creation for a policy combination the implementation cannot honor. |
 
@@ -186,6 +203,7 @@ These are dependencies of the mode, not optional follow-on fixes after users sta
 | [Search](../crates/screenpipe-db/src/db/search.rs), [accessibility](../crates/screenpipe-db/src/db/accessibility.rs), [elements](../crates/screenpipe-db/src/db/elements.rs) | Separate candidate selection from projected payload retrieval; cover direct frame reads and counts as well as keyword queries. |
 | [DB recovery](../crates/screenpipe-db/src/recovery.rs) and [maintenance](../crates/screenpipe-db/src/db/maintenance.rs) | Mode-aware index rebuilding, retention, redaction, integrity checking, and file reclamation. |
 | [Redaction worker](../crates/screenpipe-redact/src/worker/mod.rs) and [table adapters](../crates/screenpipe-redact/src/worker/tables.rs) | Add hybrid candidate reads and conditional replacements; enforce the sealing gate and track archived-file cleanup. Preserve legacy redaction. |
+| [Data Sync provider](../crates/screenpipe-engine/src/sync_provider.rs), [remote-search proxy](../crates/screenpipe-engine/src/routes/data_sync_proxy.rs), and [enterprise uploader](../apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs) | Adapt the provider's local payload reads; verify unchanged remote-search and enterprise wire contracts. No local import of remote search results. |
 | [Backup CLI](../crates/screenpipe-engine/src/cli/backup.rs), [data routes](../crates/screenpipe-engine/src/routes/data.rs), [retention](../crates/screenpipe-engine/src/retention.rs) | Consume the resolved storage layout instead of reconstructing `db.sqlite` paths. |
 
 Recommended build order: preserve/test the legacy payload boundary; implement new-root initialization; add transactional staging and mode-specific FTS; add the redaction adapter and sealing gate; implement sealing, projected reads, and archived redaction/cleanup; wire every consumer and lifecycle operation above; then expose new-database opt-in. No automatic old-database conversion is included.
@@ -199,5 +217,6 @@ Recommended build order: preserve/test the legacy payload boundary; implement ne
 5. **Performance and disk:** replay actual ingestion while querying both modes on macOS, Windows, and Linux. Measure capture latency, writer stalls, CPU, total RSS, transient disk needs, steady-state SQLite staging size, sealing backlog, searchable-history size, and warm/cold query tails. Reuse the current database/current SQL baseline discipline; do not substitute a sequential scan or omit payload retrieval.
 6. **Scope honesty:** measure frame-only hybrid savings separately. The 1.52 GB experiment archived other tables too and is not this mode's expected total size. Audio, element-level, vector-result hydration, and semantic/activity paths need their own parity/performance evidence.
 7. **PII parity and cleanup:** cover enabled/disabled capture, detector failures, late OCR, policy changes during sealing, and redaction enabled on already sealed history. Verify configured fields across both projections, metadata, FTS, caches, and concurrent readers; test index rebuild, sync/export, response-filter failures, and backup/restore with pending cleanup. Inject crashes during replacement and file rewrite; prove stale jobs cannot republish raw data, blocked cleanup remains visible, and obsolete files are removed after leases drain. Compare legacy redaction behavior and measure redaction backlog, rewrite I/O, and temporary disk overhead during recording.
+8. **Cloud boundaries:** compare Data Sync upload records and enterprise JSONL for equivalent legacy/hybrid fixtures, including sealed history and backfills. Verify remote-search responses and authentication/errors remain unchanged and remote queries create no local frame/payload records. Exercise upload retries, checkpoints, new-root source identity, and redaction before payload export; do not introduce a download/import acceptance path.
 
 The immediate next implementation unit is the storage opener plus payload-reader boundary with legacy behavior preserved, followed by a disposable new-root hybrid test. This draft makes no production database changes.

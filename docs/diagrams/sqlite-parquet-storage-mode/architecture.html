@@ -5159,7 +5159,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="callers" data-edge-to="mode" data-edge-label="request" data-edge-key="0" data-edge-id="requests" data-composition-points="230,308;360,308" d="M 230 308 L 360 308" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="callers" data-edge-to="mode" data-edge-label="request" data-edge-key="0" data-edge-id="requests" data-composition-points="270,308;360,308" d="M 270 308 L 360 308" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="mode" data-edge-to="legacy" data-edge-label="legacy format" data-edge-key="1" data-edge-id="open-legacy" data-composition-points="465,270;465,131" d="M 465 270 L 465 131" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="mode" data-edge-to="index" data-edge-label="hybrid format" data-edge-key="2" data-edge-id="open-hybrid" data-composition-points="570,308;680,308" d="M 570 308 L 680 308" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="writer" data-edge-to="index" data-edge-label="atomic ingest" data-edge-key="3" data-edge-id="ingest" data-composition-points="790,131;790,270" d="M 790 131 L 790 270" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
@@ -5168,20 +5168,23 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="sealer" data-edge-to="parquet" data-edge-label="write / rewrite" data-edge-key="6" data-edge-id="publish" data-composition-points="900,553;1010,553" d="M 900 553 L 1010 553" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="reader" data-edge-to="parquet" data-edge-label="read needed blocks" data-edge-key="7" data-edge-id="hydrate" data-composition-points="1125,346;1125,515" d="M 1125 346 L 1125 515" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="redactor" data-edge-to="sealer" data-edge-label="PII gate" data-edge-key="8" data-edge-id="redaction-gate" data-composition-points="570,553;680,553" d="M 570 553 L 680 553" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="callers" data-edge-to="data-sync" data-edge-label="upload / query" data-edge-key="9" data-edge-id="sync-out" data-composition-points="148,270;148,131" d="M 148 270 L 148 131" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="data-sync" data-edge-to="callers" data-edge-label="search results" data-edge-key="10" data-edge-id="sync-results" data-composition-points="162,131;162,270" d="M 162 131 L 162 270" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="callers" data-edge-to="enterprise" data-edge-label="JSONL upload" data-edge-key="11" data-edge-id="enterprise-upload" data-composition-points="155,346;155,515" d="M 155 346 L 155 515" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
 
         <!-- Components -->
-        <g id="node-callers" data-node-id="callers" data-node-label="App and agents" tabindex="0" role="button" aria-label="Focus App and agents, Same public API results, Architecture component" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Same public API results" data-node-context="Architecture component">
-          <title>App and agents · Same public API results · Architecture component</title>
-          <rect x="40" y="270" width="190" height="76" rx="6" class="c-mask"/>
-          <rect x="40" y="270" width="190" height="76" rx="6" class="c-frontend" stroke-width="1.5"/>
+        <g id="node-callers" data-node-id="callers" data-node-label="Local API + sync adapters" tabindex="0" role="button" aria-label="Focus Local API + sync adapters, App / agents / upload consumers, Architecture component" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="App / agents / upload consumers" data-node-context="Architecture component">
+          <title>Local API + sync adapters · App / agents / upload consumers · Architecture component</title>
+          <rect x="40" y="270" width="230" height="76" rx="6" class="c-mask"/>
+          <rect x="40" y="270" width="230" height="76" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 276) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="135" y="306" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">App and agents</text>
-        <text data-detail="context" x="135" y="322" class="t-muted" font-size="9" text-anchor="middle">Same public API results</text>
+          <text data-node-label="" data-detail-anchor="" x="155" y="306" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Local API + sync adapters</text>
+        <text data-detail="context" x="155" y="322" class="t-muted" font-size="9" text-anchor="middle">App / agents / upload consumers</text>
         </g>
 
         <g id="node-mode" data-node-id="mode" data-node-label="Database opener" tabindex="0" role="button" aria-label="Focus Database opener, Resolve persisted format, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Resolve persisted format" data-node-context="Architecture component">
@@ -5276,10 +5279,32 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="context" x="465" y="567" class="t-muted" font-size="9" text-anchor="middle">Staged + archived text / JSON</text>
         </g>
 
+        <g id="node-data-sync" data-node-id="data-sync" data-node-label="Data Sync" tabindex="0" role="button" aria-label="Focus Data Sync, Existing cloud format + search, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="Existing cloud format + search" data-node-context="Architecture component">
+          <title>Data Sync · Existing cloud format + search · Architecture component</title>
+          <rect x="40" y="55" width="230" height="76" rx="6" class="c-mask"/>
+          <rect x="40" y="55" width="230" height="76" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(46 61) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="155" y="91" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Data Sync</text>
+        <text data-detail="context" x="155" y="107" class="t-muted" font-size="9" text-anchor="middle">Existing cloud format + search</text>
+        </g>
+
+        <g id="node-enterprise" data-node-id="enterprise" data-node-label="Enterprise ingestion" tabindex="0" role="button" aria-label="Focus Enterprise ingestion, Existing JSONL / destination, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="Existing JSONL / destination" data-node-context="Architecture component">
+          <title>Enterprise ingestion · Existing JSONL / destination · Architecture component</title>
+          <rect x="40" y="515" width="230" height="76" rx="6" class="c-mask"/>
+          <rect x="40" y="515" width="230" height="76" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(46 521) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="155" y="551" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Enterprise ingestion</text>
+        <text data-detail="context" x="155" y="567" class="t-muted" font-size="9" text-anchor="middle">Existing JSONL / destination</text>
+        </g>
+
         <!-- Connection labels -->
         <g data-detail="context" data-edge-from="callers" data-edge-to="mode" data-edge-label="request" data-edge-key="0" data-edge-id="requests">
-          <rect x="273.2" y="288" width="43.6" height="14" rx="3" class="c-mask"/>
-          <text x="295" y="298" class="t-backend" font-size="8" text-anchor="middle">request</text>
+          <rect x="293.2" y="288" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="315" y="298" class="t-backend" font-size="8" text-anchor="middle">request</text>
         </g>
         <g data-detail="context" data-edge-from="mode" data-edge-to="legacy" data-edge-label="legacy format" data-edge-key="1" data-edge-id="open-legacy">
           <rect x="428.8" y="250" width="72.4" height="14" rx="3" class="c-mask"/>
@@ -5313,6 +5338,18 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="600.8" y="533" width="48.4" height="14" rx="3" class="c-mask"/>
           <text x="625" y="543" class="t-security" font-size="8" text-anchor="middle">PII gate</text>
         </g>
+        <g data-detail="context" data-edge-from="callers" data-edge-to="data-sync" data-edge-label="upload / query" data-edge-key="9" data-edge-id="sync-out">
+          <rect x="49.4" y="250" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="88" y="260" class="t-muted" font-size="8" text-anchor="middle">upload / query</text>
+        </g>
+        <g data-detail="context" data-edge-from="data-sync" data-edge-to="callers" data-edge-label="search results" data-edge-key="10" data-edge-id="sync-results">
+          <rect x="183.4" y="156" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="222" y="166" class="t-backend" font-size="8" text-anchor="middle">search results</text>
+        </g>
+        <g data-detail="context" data-edge-from="callers" data-edge-to="enterprise" data-edge-label="JSONL upload" data-edge-key="11" data-edge-id="enterprise-upload">
+          <rect x="121.2" y="350" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="155" y="360" class="t-muted" font-size="8" text-anchor="middle">JSONL upload</text>
+        </g>
 
         <!-- Boundary labels (foreground masks keep routes out of titles) -->
 
@@ -5332,9 +5369,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <rect x="245" y="635" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
             <text x="267" y="644" class="t-muted" font-size="10" font-weight="500">Database</text>
           </g>
-          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="350" data-legend-baseline="644" data-legend-width="83">
-            <rect x="350" y="635" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
-            <text x="372" y="644" class="t-muted" font-size="10" font-weight="500">Security</text>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="350" data-legend-baseline="644" data-legend-width="68">
+            <rect x="350" y="635" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="372" y="644" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="440" data-legend-baseline="644" data-legend-width="83">
+            <rect x="440" y="635" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="462" y="644" class="t-muted" font-size="10" font-weight="500">Security</text>
           </g>
         </g>
       </svg>
@@ -5525,24 +5566,25 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <div class="cards">
       <div class="card">
         <div class="card-header">
-          <div class="card-dot slate"></div>
-          <h3>Compatibility and durability</h3>
+          <div class="card-dot amber"></div>
+          <h3>Local storage and PII</h3>
         </div>
         <ul>
           <li>&bull; New root only; existing SQLite mode stays unchanged.</li>
-          <li>&bull; Vectors and indexes stay in SQLite; staging lasts until verified publication.</li>
+          <li>&bull; PII enabled: redact before sealing; failures remain staged.</li>
+          <li>&bull; Archived PII: replace payload + index, clear caches, rewrite / remove old files.</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
-          <div class="card-dot amber"></div>
-          <h3>PII removal</h3>
+          <div class="card-dot cyan"></div>
+          <h3>Data Sync and enterprise</h3>
         </div>
         <ul>
-          <li>&bull; When enabled: redact before sealing; failures remain staged.</li>
-          <li>&bull; Archived changes: replace payload + index, invalidate caches, rewrite files.</li>
-          <li>&bull; Cleanup finishes only after obsolete files are removed and leases drain.</li>
+          <li>&bull; Data Sync returns remote search results; no local DB import.</li>
+          <li>&bull; Uploads read logical records; existing cloud formats stay unchanged.</li>
+          <li>&bull; Enterprise reads the local API; both SQLite and Parquet serve the same fields.</li>
         </ul>
       </div>
     </div>

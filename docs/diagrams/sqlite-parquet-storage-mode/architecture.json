@@ -15,14 +15,14 @@
     {
       "id": "callers",
       "type": "frontend",
-      "label": "App and agents",
-      "sublabel": "Same public API results",
+      "label": "Local API + sync adapters",
+      "sublabel": "App / agents / upload consumers",
       "pos": [
         40,
         270
       ],
       "size": [
-        190,
+        230,
         76
       ]
     },
@@ -137,6 +137,34 @@
         210,
         76
       ]
+    },
+    {
+      "id": "data-sync",
+      "type": "cloud",
+      "label": "Data Sync",
+      "sublabel": "Existing cloud format + search",
+      "pos": [
+        40,
+        55
+      ],
+      "size": [
+        230,
+        76
+      ]
+    },
+    {
+      "id": "enterprise",
+      "type": "cloud",
+      "label": "Enterprise ingestion",
+      "sublabel": "Existing JSONL / destination",
+      "pos": [
+        40,
+        515
+      ],
+      "size": [
+        230,
+        76
+      ]
     }
   ],
   "connections": [
@@ -201,24 +229,48 @@
       "to": "sealer",
       "label": "PII gate",
       "variant": "security"
+    },
+    {
+      "id": "sync-out",
+      "from": "callers",
+      "to": "data-sync",
+      "label": "upload / query",
+      "labelDx": -60
+    },
+    {
+      "id": "sync-results",
+      "from": "data-sync",
+      "to": "callers",
+      "label": "search results",
+      "variant": "emphasis",
+      "labelDx": 60,
+      "labelDy": 45
+    },
+    {
+      "id": "enterprise-upload",
+      "from": "callers",
+      "to": "enterprise",
+      "label": "JSONL upload",
+      "labelDy": 24
     }
   ],
   "cards": [
     {
-      "dot": "slate",
-      "title": "Compatibility and durability",
+      "dot": "amber",
+      "title": "Local storage and PII",
       "items": [
         "New root only; existing SQLite mode stays unchanged.",
-        "Vectors and indexes stay in SQLite; staging lasts until verified publication."
+        "PII enabled: redact before sealing; failures remain staged.",
+        "Archived PII: replace payload + index, clear caches, rewrite / remove old files."
       ]
     },
     {
-      "dot": "amber",
-      "title": "PII removal",
+      "dot": "cyan",
+      "title": "Data Sync and enterprise",
       "items": [
-        "When enabled: redact before sealing; failures remain staged.",
-        "Archived changes: replace payload + index, invalidate caches, rewrite files.",
-        "Cleanup finishes only after obsolete files are removed and leases drain."
+        "Data Sync returns remote search results; no local DB import.",
+        "Uploads read logical records; existing cloud formats stay unchanged.",
+        "Enterprise reads the local API; both SQLite and Parquet serve the same fields."
       ]
     }
   ]
