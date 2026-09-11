@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Screenpipe storage modes \u2014 proposal",
+    "title": "Screenpipe SQLite + Parquet storage — design",
     "locale": "en",
     "quality_profile": "showcase",
     "animation": "none",
@@ -15,8 +15,8 @@
     {
       "id": "callers",
       "type": "frontend",
-      "label": "Local API + sync adapters",
-      "sublabel": "App / agents / upload consumers",
+      "label": "Local API + upload adapters",
+      "sublabel": "App / agents / complete records",
       "pos": [
         40,
         270
@@ -29,8 +29,8 @@
     {
       "id": "mode",
       "type": "backend",
-      "label": "Database opener",
-      "sublabel": "Resolve persisted format",
+      "label": "DatabaseManager + opener",
+      "sublabel": "Active generation / read contract",
       "pos": [
         360,
         270
@@ -43,8 +43,8 @@
     {
       "id": "legacy",
       "type": "database",
-      "label": "Existing SQLite mode",
-      "sublabel": "Existing database path",
+      "label": "Legacy SQLite",
+      "sublabel": "Existing schema and behavior",
       "pos": [
         360,
         55
@@ -57,8 +57,8 @@
     {
       "id": "writer",
       "type": "backend",
-      "label": "Capture coordinator",
-      "sublabel": "One serialized SQLite writer",
+      "label": "Capture + late OCR",
+      "sublabel": "Frame transaction / immediate FTS",
       "pos": [
         680,
         55
@@ -71,8 +71,8 @@
     {
       "id": "index",
       "type": "database",
-      "label": "Hybrid SQLite",
-      "sublabel": "Indexes, IDs, vectors, staging",
+      "label": "SQLite + write coordinator",
+      "sublabel": "Catalog / FTS / staging / vectors",
       "pos": [
         680,
         270
@@ -86,7 +86,7 @@
       "id": "reader",
       "type": "backend",
       "label": "Payload reader",
-      "sublabel": "Version-aware, bounded cache",
+      "sublabel": "Snapshot pins / revision admission",
       "pos": [
         1010,
         270
@@ -99,8 +99,8 @@
     {
       "id": "sealer",
       "type": "backend",
-      "label": "Sealer + file cleanup",
-      "sublabel": "Verify, publish, reclaim originals",
+      "label": "Sealer + reclamation",
+      "sublabel": "Whole batches / durable retirement",
       "pos": [
         680,
         515
@@ -114,7 +114,7 @@
       "id": "parquet",
       "type": "database",
       "label": "Immutable Parquet",
-      "sublabel": "Small text blocks + bulk JSON",
+      "sublabel": "Search text / detail JSON",
       "pos": [
         1010,
         515
@@ -127,14 +127,14 @@
     {
       "id": "redactor",
       "type": "security",
-      "label": "PII redactor",
-      "sublabel": "Staged + archived text / JSON",
+      "label": "PII worker",
+      "sublabel": "Generation and policy completion",
       "pos": [
-        360,
-        515
+        1010,
+        55
       ],
       "size": [
-        210,
+        230,
         76
       ]
     },
@@ -142,7 +142,7 @@
       "id": "data-sync",
       "type": "cloud",
       "label": "Data Sync",
-      "sublabel": "Existing cloud format + search",
+      "sublabel": "JSONL upload / remote search",
       "pos": [
         40,
         55
@@ -156,13 +156,27 @@
       "id": "enterprise",
       "type": "cloud",
       "label": "Enterprise ingestion",
-      "sublabel": "Existing JSONL / destination",
+      "sublabel": "Existing JSONL and destination",
       "pos": [
         40,
         515
       ],
       "size": [
         230,
+        76
+      ]
+    },
+    {
+      "id": "lifecycle",
+      "type": "backend",
+      "label": "Storage lifecycle",
+      "sublabel": "Migrate / back up / restore",
+      "pos": [
+        360,
+        515
+      ],
+      "size": [
+        210,
         76
       ]
     }
@@ -172,62 +186,84 @@
       "id": "requests",
       "from": "callers",
       "to": "mode",
-      "label": "request",
+      "label": "local reads",
       "variant": "emphasis"
     },
     {
       "id": "open-legacy",
       "from": "mode",
       "to": "legacy",
-      "label": "legacy format"
+      "label": "sqlite",
+      "variant": "default"
     },
     {
       "id": "open-hybrid",
       "from": "mode",
       "to": "index",
-      "label": "hybrid format",
+      "label": "hybrid",
       "variant": "emphasis"
     },
     {
       "id": "ingest",
       "from": "writer",
       "to": "index",
-      "label": "atomic ingest",
+      "label": "stage + index",
+      "variant": "default",
       "labelDy": 24
     },
     {
       "id": "fetch",
       "from": "index",
       "to": "reader",
-      "label": "matching IDs",
-      "variant": "emphasis"
+      "label": "snapshot",
+      "variant": "emphasis",
+      "labelDy": 24
     },
     {
       "id": "seal",
       "from": "index",
       "to": "sealer",
-      "label": "eligible generation",
-      "labelDy": 24
+      "label": "eligible batch",
+      "variant": "default",
+      "labelDy": 24,
+      "labelDx": 60
+    },
+    {
+      "id": "commit-files",
+      "from": "sealer",
+      "to": "index",
+      "label": "publish / retire",
+      "variant": "default",
+      "labelDx": -60
     },
     {
       "id": "publish",
       "from": "sealer",
       "to": "parquet",
-      "label": "write / rewrite"
+      "label": "write / reclaim",
+      "variant": "default"
     },
     {
       "id": "hydrate",
       "from": "reader",
       "to": "parquet",
-      "label": "read needed blocks",
+      "label": "projected read",
       "variant": "emphasis",
       "labelDy": 24
     },
     {
-      "id": "redaction-gate",
+      "id": "redact-read",
       "from": "redactor",
-      "to": "sealer",
-      "label": "PII gate",
+      "to": "reader",
+      "label": "read generation",
+      "variant": "security",
+      "labelDy": 24
+    },
+    {
+      "id": "redact-write",
+      "from": "redactor",
+      "to": "index",
+      "label": "replace + index",
       "variant": "security"
     },
     {
@@ -235,6 +271,7 @@
       "from": "callers",
       "to": "data-sync",
       "label": "upload / query",
+      "variant": "default",
       "labelDx": -60
     },
     {
@@ -243,34 +280,42 @@
       "to": "callers",
       "label": "search results",
       "variant": "emphasis",
-      "labelDx": 60,
-      "labelDy": 45
+      "labelDy": 24,
+      "labelDx": 60
     },
     {
       "id": "enterprise-upload",
       "from": "callers",
       "to": "enterprise",
       "label": "JSONL upload",
+      "variant": "default",
       "labelDy": 24
+    },
+    {
+      "id": "activate",
+      "from": "lifecycle",
+      "to": "mode",
+      "label": "verify + activate",
+      "variant": "default"
     }
   ],
   "cards": [
     {
-      "dot": "amber",
-      "title": "Local storage and PII",
+      "dot": "slate",
+      "title": "Record ownership",
       "items": [
-        "New root only; existing SQLite mode stays unchanged.",
-        "PII enabled: redact before sealing; failures remain staged.",
-        "Archived PII: replace payload + index, clear caches, rewrite / remove old files."
+        "One SQLite writer commits payloads, indexes and privacy state.",
+        "PII completion gates sealing; read admission checks the current revision.",
+        "Durable catalog retirement and drained leases precede file removal."
       ]
     },
     {
-      "dot": "cyan",
-      "title": "Data Sync and enterprise",
+      "dot": "slate",
+      "title": "Database lifecycle",
       "items": [
-        "Data Sync returns remote search results; no local DB import.",
-        "Uploads read logical records; existing cloud formats stay unchanged.",
-        "Enterprise reads the local API; both SQLite and Parquet serve the same fields."
+        "Migration: freeze → build → verify → activate → clean up.",
+        "Format migration preserves record identity and upload checkpoints.",
+        "Local APIs serve complete records; remote search returns to callers."
       ]
     }
   ]

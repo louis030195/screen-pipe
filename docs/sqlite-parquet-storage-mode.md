@@ -1,222 +1,210 @@
-# New database mode: SQLite indexes and Parquet frame payloads
+# SQLite indexes and Parquet frame storage
 
-> **Status: architecture proposal, not implemented.** Opt-in for a new database root. Existing databases retain their current storage path and behavior. This document does not authorize converting, replacing, or deleting an existing database.
+> **Status: architecture design; implementation pending.** Opt-in local storage for a fresh database or an explicitly requested offline format migration. Ordinary opens of existing databases retain SQLite mode.
 
-<!-- doc-covers: crates/screenpipe-db/src/db/setup.rs, crates/screenpipe-db/src/db/frames.rs, crates/screenpipe-db/src/db/search.rs, crates/screenpipe-db/src/db/maintenance.rs, crates/screenpipe-db/src/db/source_identity.rs, crates/screenpipe-db/src/recovery.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/bin/screenpipe-engine.rs, crates/screenpipe-engine/src/cli/db.rs, crates/screenpipe-engine/src/cli/backup.rs, crates/screenpipe-engine/src/routes/data.rs, crates/screenpipe-engine/src/retention.rs, crates/screenpipe-redact/src/worker/mod.rs, crates/screenpipe-redact/src/worker/tables.rs, crates/screenpipe-engine/src/sync_provider.rs, crates/screenpipe-engine/src/routes/data_sync_proxy.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs -->
-<!-- doc-verified: a35e3b89b4e3142f6c203577c1167c5bd50c8d34 -->
+<!-- doc-covers: crates/screenpipe-config/src/defaults.rs, crates/screenpipe-db/src/db/setup.rs, crates/screenpipe-db/src/db/frames.rs, crates/screenpipe-db/src/db/search.rs, crates/screenpipe-db/src/db/accessibility.rs, crates/screenpipe-db/src/db/elements.rs, crates/screenpipe-db/src/db/maintenance.rs, crates/screenpipe-db/src/db/source_identity.rs, crates/screenpipe-db/src/recovery.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/bin/screenpipe-engine.rs, crates/screenpipe-engine/src/cli/db.rs, crates/screenpipe-engine/src/cli/backup.rs, crates/screenpipe-engine/src/cli/sync.rs, crates/screenpipe-engine/src/routes/content.rs, crates/screenpipe-engine/src/routes/search.rs, crates/screenpipe-engine/src/routes/data.rs, crates/screenpipe-engine/src/retention.rs, crates/screenpipe-redact/src/worker/mod.rs, crates/screenpipe-redact/src/worker/tables.rs, crates/screenpipe-engine/src/sync_provider.rs, crates/screenpipe-engine/src/routes/data_sync_proxy.rs, apps/screenpipe-app-tauri/src-tauri/src/server_core.rs, apps/screenpipe-app-tauri/src-tauri/src/db_relaunch.rs, apps/screenpipe-app-tauri/src-tauri/src/disk_usage.rs, apps/screenpipe-app-tauri/src-tauri/src/vault.rs, apps/screenpipe-app-tauri/src-tauri/src/suggestions.rs, apps/screenpipe-app-tauri/src-tauri/src/data_sync.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise_sync.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs, crates/screenpipe-telemetry-wire/src/records.rs -->
+<!-- doc-verified: c310ae867b892e5b433d312ba84436f3ec7ed26b -->
 
-[Interactive architecture diagram](diagrams/sqlite-parquet-storage-mode/architecture.html) · [Editable diagram source](diagrams/sqlite-parquet-storage-mode/architecture.json)
+[Interactive architecture](diagrams/sqlite-parquet-storage-mode/architecture.html) · [Diagram source](diagrams/sqlite-parquet-storage-mode/architecture.json)
 
-## Decision
+## Storage model
 
-Add a persisted database mode that stores frame identifiers, relationships, search indexes, and mutable state in SQLite, while moving frame text and large JSON payloads into immutable Parquet files. Agents and the app retain the existing successful API response shapes; the database layer retrieves archived payloads when those responses need them.
+`DatabaseManager` presents logical records backed by either `sqlite` or `hybrid-parquet-v1`. Both modes preserve typed local API fields and domain IDs. Hybrid mode keeps frame metadata, relationships, indexes, vectors, and mutable state in SQLite. Frame text and large JSON become immutable Parquet payloads after durable staging and applicable PII processing.
 
-The frame row stays small. Historical `full_text` is **not** retained indefinitely in SQLite as a compatibility shortcut. New payloads are temporarily staged there for transactional durability, then sealed into Parquet in bounded background batches.
-
-Start by archiving **frame payloads**, including their searchable text. Keep speaker vectors, transcripts, elements, semantic/activity records, and operational tables in SQLite in the first implementation. Those tables remain functional and can be assessed separately. In particular, retaining the large `elements` table means the whole-database benchmark ratio is not a forecast for this first implementation.
-
-## What the experiment established
-
-The corrected local benchmark used the current 13.20 GB database and the full screen keyword-search SQL from this checkout, including its existing `frames_fts` index, joins, tags, filtering, and pagination. All 336 serialized responses matched between the two storage paths.
-
-| Local screen keyword search | Current SQLite | Indexed Parquet prototype |
-|---|---:|---:|
-| Warm median | 31.2 ms | 14.8 ms |
-| Warm observed p95 | 208.4 ms | 111.7 ms |
-| Fresh-reader median | 34.5 ms | 19.5 ms |
-
-The prototype's complete archived dataset, index/metadata, and small text projections totaled 1.52 GB. It reused existing FTS postings, used 128-row text blocks, and did not measure live ingestion, ongoing index construction, all search types, physical deletion, HTTP/Rust scheduling, or cold-disk/cloud reads. The SQLite baseline used the actual database, not a sequential text scan or restored-copy baseline. These are feasibility measurements, not production acceptance or a storage promise for the selective mode proposed here.
-
-## Mode selection and compatibility
-
-Define the persisted mode once:
-
-| Value | Meaning |
+| Data | Hybrid storage |
 |---|---|
-| `sqlite` | Existing SQLite-only database implementation. |
-| `hybrid-parquet-v1` | New metadata/index database plus Parquet frame payloads. |
+| Frame IDs, timestamps, app/window/URL metadata, device, media references, tags, semantic references | SQLite metadata |
+| Frame `full_text` and `accessibility_text` | SQLite staging, then `search.parquet` |
+| `accessibility_tree_json` and OCR `text_json` | SQLite staging, then `detail.parquet` |
+| Frame keyword index | Contentless-delete FTS5 in the same SQLite database |
+| Elements, transcripts, semantic/activity records, corrections, job state | Existing queryable SQLite tables |
+| Speaker embeddings and centroids | Existing SQLite vector tables and matching functions |
+| Payload locations, generations, privacy completion, file jobs, upload bindings | SQLite catalog |
+| Screenshots, video, audio | Existing media layout |
 
-Mode is selected **when creating a database**, not toggled on an existing database. Omitted selection continues to create SQLite mode initially. An explicit new-mode selection requires an unused database root; the app must not reset the old root to satisfy that request.
+The two Parquet projections share a payload generation and preserve distinct fields, nulls, empty strings, and fallback semantics. Search reads text columns; detail endpoints read only their requested columns. SQLite holds character-length and presence predicates with the same semantics as the corresponding legacy SQL expressions. Staging pages become reusable after sealing.
 
-The opener resolves the following cases before migrations, recovery mutations, or recorder startup:
+## Database ownership and opening
 
-| Root contents / request | Result |
-|---|---|
-| Existing legacy database, no descriptor | Open with the existing implementation; do not add hybrid metadata or rewrite payloads. |
-| Existing legacy database, hybrid requested | Reject the mismatch and require a different new root. |
-| Empty root, explicit mode | Initialize that mode atomically with a new database identity. |
-| Existing valid descriptor | Reopen its persisted mode; a conflicting request is an error. |
-| Unknown format, conflicting identities, missing required file, or partial initialization | Report the storage problem; never silently create an empty replacement database or fall back to another mode. |
-
-**Backward compatibility means new Screenpipe can continue opening legacy databases. It does not mean old Screenpipe can open a hybrid database.** A separate index filename prevents old code from treating hybrid metadata as the old `db.sqlite`; it cannot force an old binary to understand the descriptor or prevent it from creating its own unrelated database if deliberately pointed at that directory. Such downgrades are unsupported. Returning to an older compatible app requires an explicit legacy export to a separate destination, not an in-place toggle.
-
-## Proposed on-disk layout
-
-Paths below are relative to an explicitly selected database root. The root comes from one resolver; it must not be reconstructed independently by engine, backup, recovery, or storage-statistics code.
+A storage owner resolves the selected logical root, owns its lifecycle lock and active `DatabaseManager`, and supplies resolved paths to desktop startup, engine startup, recovery, backup, retention, storage statistics, and encryption. The descriptor is read before any mode-specific database creation, migration, recovery, or writer admission.
 
 ```text
-existing root/                    new hybrid root/
-  db.sqlite                        storage.json
-  existing media and state         index.sqlite
-                                   index.sqlite-wal / index.sqlite-shm
-                                   payloads/<schema>/<date>/<segment>/
-                                     search.parquet
-                                     detail.parquet
-                                   temporary/
-                                   existing media layout
+logical root/
+  storage.json                         active physical generation
+  storage-migration.json               present during format migration
+  storage/<physical-generation>/
+    index.sqlite                       metadata, FTS, vectors, staging, catalog
+    index.sqlite-wal / index.sqlite-shm
+    payloads/<schema>/<date>/<segment>/
+      search.parquet
+      detail.parquet
+    temporary/
+  data/                                existing media layout
 ```
 
-`storage.json` is the bootstrap descriptor: mode, storage format version, database UUID, index path, and required reader capabilities. The SQLite catalog is authoritative for committed payload generations and file references; directory scans never make files visible as recorded history. The database UUID must agree with the descriptor.
+Legacy roots use their existing `db.sqlite` and media paths. A migration builds its candidate under `storage/` while the source remains at its original location. Physical generations let the owner activate a prepared database without moving shared media.
 
-The new database receives a new upload source identity and fresh source-scoped checkpoints. The old database's identity and cursors are preserved. Hardware/account identity is not changed merely because the storage mode differs. The existing database-scoped identity behavior is in [source_identity.rs](../crates/screenpipe-db/src/db/source_identity.rs).
+`storage.json` identifies the mode, storage format, required capabilities, logical database UUID, physical generation, and relative index/payload paths. Its identity agrees with the SQLite catalog. The descriptor selects a database generation; the catalog selects committed payload generations within it. File visibility follows the catalog. Paths resolve within their declared generation or media root.
 
-## Data placement
-
-| Data | Hybrid location and behavior |
+| Open request and root | Resolution |
 |---|---|
-| Frame ID, time, app/window/browser metadata, media reference, device, tags, semantic references | SQLite metadata; stable IDs and joins. |
-| Frame full text and accessibility text | Parquet after sealing; preserve both fields and their null/empty/fallback semantics. |
-| Accessibility tree and OCR bounding-box JSON | Parquet detail projection, loaded only when requested. |
-| Keyword search index | Contentless FTS5 in the same SQLite database, preserving tokenizer, query semantics, and frame IDs without duplicating full text. |
-| Speaker embeddings and centroids | SQLite with the current vector functions and matching path. The measured snapshot had about 6.1 MB of vector payloads. |
-| Elements, audio/transcripts, semantic/activity records, user corrections, job state | Existing queryable tables in SQLite for v1. No new vector-search capability is implied. |
-| Newly captured or updated frame payload | Durable SQLite staging until its exact generation is safely published in Parquet. |
-| Redaction/deletion state and current payload generation | SQLite; applied before any archived content is returned. |
-| Audio/video/image files | Existing media storage. Parquet frame payloads do not replace media backup or retention. |
+| Legacy database with no descriptor or migration journal | Existing SQLite implementation |
+| Empty root, mode omitted | Create SQLite mode |
+| Empty root, explicit hybrid mode | Prepare, verify, and durably activate a fresh hybrid generation |
+| Valid descriptor | Open its persisted mode and physical generation |
+| Conflicting mode selection | Return a mode mismatch; format conversion uses the migration operation |
+| Migration journal present | Resume its recorded lifecycle phase before admitting writers |
+| Unsupported capabilities, identity mismatch, or incomplete required files | Return a storage error and retain the recorded generation |
 
-Store frequently used scalar predicates, including text-length metadata with the current character-length semantics, in SQLite. Queries must not decompress every payload merely to apply a length filter. A metadata-first candidate query then retrieves only the projected payload fields for the selected IDs.
+Legacy databases continue through their existing SQLx migration history and recovery path. Hybrid metadata has its own bootstrap schema and checksummed migration ledger. Shared domain changes cover both schemas. Supported payload readers are selected per file schema; metadata upgrades can leave older payload files in place. Legacy export materializes a separate SQLite destination for an older compatible application.
 
-`search.parquet` contains the text fields required for normal search responses. `detail.parquet` contains large trees and bounding boxes. Both share a logical payload generation; detail reads must not load the search projection unnecessarily, and keyword searches must not decode detail JSON. Start experiments with the demonstrated 128-row search groups, but also enforce a decoded-byte bound: row count alone cannot bound memory when one frame is unusually large. Detail grouping, flush thresholds, and backlog limits must be selected by the live-ingestion acceptance measurements below.
+## Identity and provenance
 
-## Database-layer boundary
-
-Keep `DatabaseManager` as the public database facade. Add a resolved storage location and a mode-specific payload implementation behind it. Domain IDs and successful API DTOs are shared; legacy SQL continues on its existing path.
-
-The new internal boundary needs four operations:
-
-1. **Stage a payload generation** as part of the existing coordinated frame transaction.
-2. **Read a projected batch of frame payloads** by stable ID and current generation, from staging or a committed file location.
-3. **Publish a sealed batch** through the same SQLite write coordinator, conditional on the staged generations still being current.
-4. **Replace a payload for redaction** through that coordinator, conditional on the input payload and privacy generations still being current; commit the replacement, metadata/index changes, and durable file-cleanup work together.
-
-A reader groups requested IDs by file and row group, reads only needed columns, applies current privacy state, and assembles the existing result fields in their original order. Its cache is byte-bounded and keyed by file generation, projection, and privacy generation. The prior cache budget was not a measurement of total process memory; decoding, response assembly, and concurrent requests need separate limits.
-
-Do not make raw legacy SQL silently return empty text for archived frames. Every payload consumer must either call this boundary or remain on the explicit legacy implementation. Missing/corrupt archive files are distinct from an actually empty or deleted payload.
-
-## Capture and crash consistency
-
-Keep **one serialized SQLite writer**. Parquet compression and filesystem writes run outside the capture callback and outside the SQLite writer permit. Production folds metadata, FTS, and catalog into `index.sqlite`; the benchmark's separate index database is not a proposal for a second recording DB writer.
-
-A payload's authoritative location has two states: `staged` or `sealed`. A deleted/redacted logical record is governed by the existing privacy/retention state, not a third location state.
-
-1. The existing capture transaction commits the frame metadata, payload generation, staging bytes, and durable indexing work together. Preserve the current indexing-visibility contract; do not add synchronous compression or a new per-frame index-building workload to a callback.
-2. The sealer reads a bounded immutable batch of staged generations eligible under the PII sealing gate below. A late OCR update creates a new generation rather than mutating a batch being encoded.
-3. Write both projections to unique temporary files. Finish their footers, verify IDs/generations/row counts and checksums, and synchronize the files. Move them to their final immutable paths and durably synchronize the containing directory using the platform-supported equivalent.
-4. In one coordinated SQLite transaction, verify those generations and their PII sealing eligibility are still current, register files and locators, and change their location to `sealed`. Only release staging bytes for successfully published generations whose required indexing work is complete.
-5. A crash before publication leaves authoritative staging data. A crash after publication leaves a committed catalog referring only to durable verified files. Unreferenced temporary/final files are recoverable garbage, not visible records.
-
-On disk-full or encoder failure, retain staging and report the existing storage-health failure. Bound backlog growth and use the recorder's established failure/backpressure path when that bound is reached; never discard unsealed records to meet a disk target. Successful seals must allow SQLite staging pages to be reused; do not schedule repeated full VACUUM operations on the recording path.
-
-Readers hold file-generation leases during access. Compaction, retention, and backup respect those leases. Deleting the last reference makes a file eligible for cleanup only after readers and backup snapshots no longer require it.
-
-## Search and updates
-
-The frame FTS index stays queryable in SQLite. Hybrid indexing consumes the authoritative payload generation rather than assuming `frames.full_text` is permanently materialized. Current external-content triggers/rebuild code cannot simply be reused after moving that column's content.
-
-Use supported contentless-delete FTS5 behavior for replacement/deletion, preserving the current tokenizer and searchable fields. A metadata-only edit that changes an indexed field also updates the index. Where indexing is deferred, its durable job includes the payload generation; work for an obsolete generation must not overwrite current postings. Rebuilding the index streams authoritative payloads through the reader and includes only current, non-deleted generations.
-
-The fast path remains: SQL filter and order → stable IDs → projected payload read → unchanged response fields. Search counts, app/window/URL filters, length filters, pagination, null/empty values, snippets, and highlighting require parity tests, not just a successful `MATCH` query. Vector matching stays on its existing store; any consumer that subsequently needs archived frame text uses the same payload reader.
-
-## PII redaction
-
-The current [background redactor](../crates/screenpipe-redact/src/worker/tables.rs) reads frame payload columns directly from SQLite and overwrites them, with per-surface completion watermarks. Its frame pass also handles related accessibility text, tree JSON, OCR text JSON, and selected metadata according to the configured column policy. Hybrid mode requires an adapter for fetching candidates and committing replacements through the payload boundary; leaving these queries unchanged would skip sealed history. Preserve the legacy worker path and existing category/column choices.
-
-**PII sealing gate:** when PII removal is enabled, a generation may be sealed only after all required frame surfaces have completed redaction under the applicable policy. Keep completion, policy identity, and payload generation in SQLite; a timestamp for an older generation cannot authorize sealing a late OCR update. Failed or pending work stays staged and uses the bounded backlog/health behavior above, with no timeout that silently archives unredacted data. When PII removal is disabled, sealing is allowed and provenance records that redaction was not required; this must not be recorded as successful redaction. Policy changes invalidate affected eligibility, including a sealer already encoding files. This gate controls archival, not a new claim that capture or search can never contain PII before the existing asynchronous redactor finishes.
-
-For staged frames, the worker replaces the authoritative payload and updates applicable SQLite metadata, character-length predicates, completion state, and FTS postings in one coordinated transaction. The same operation supports sealed frames by publishing a redacted replacement into staging first, superseding the archived generation immediately, and queuing cleanup of the old files. Expensive detection and encoding remain outside the writer permit. Replacement must cover both search and detail projections, preserving OCR geometry while scrubbing configured text fields. Stale indexing or sealing jobs must not resurrect an earlier generation.
-
-For archived history processed after PII removal is enabled or its policy changes, discover work from catalog metadata, retrieve payloads through the reader, and use that replacement operation. Invalidate payload and response caches and recheck privacy generations before returning results so an in-flight read cannot serve superseded content after the replacement commits. Remove obsolete FTS postings as part of the same commit; a contentless index can still contain sensitive tokens. Apply the same current-generation rule to sync/export consumers and index rebuilds.
-
-**Cleanup completion is separate from redacted results.** Rewrite affected immutable files with only current, permitted records, publish verified replacements, then remove obsolete originals after reader/backup leases drain. Batch work by file and bound file size, rewrite memory, temporary disk use, and backlog. Track cleanup durably across crashes, including stale temporary files from rejected seals. Do not mark file removal complete while a lease or failure retains an original. SQLite staging, WAL, and index remnants must also follow the supported reclamation policy; logical replacement alone is not a secure-erasure guarantee. Previously created backups or synced copies are separate copies and are not retroactively scrubbed by local cleanup.
-
-Keep the existing API `filter_pii` step after payload retrieval, including its failure behavior. Response filtering does not redact stored files. Screenshot PII removal continues through the existing image worker because media remains outside Parquet; audio, UI-event, and element redaction stays on its SQLite path in v1. Record applied redaction policy/backend version where available for provenance without retaining original secrets or assuming a completed detector found every possible PII value.
-
-## Versioning and migrations
-
-Persist these distinct identities rather than relying on one app-version string:
-
-| Identity | Purpose |
+| Identity | Lifetime and purpose |
 |---|---|
-| Storage format and required reader capabilities | Decide whether this implementation can open the database before mutating it. |
-| Hybrid metadata migration ledger with checksums | Evolve the catalog and metadata schema. |
-| Payload schema version and schema fingerprint | Decode each immutable file using the appropriate adapter. |
-| Capture app version and archive-writer app version | Preserve provenance even when a newer app seals previously staged records. |
-| Redaction policy identity, applied backend version where available, and per-generation completion | Enforce the PII sealing gate and resume redaction/cleanup correctly after restart or restore. |
-| Index format/tokenizer configuration; embedding model/dimensions where applicable | Distinguish searchable-index compatibility from payload compatibility. |
+| Logical database UUID | Stable through format migration and restore; fresh for an independent empty database |
+| Physical generation | Changes when a prepared database generation is activated |
+| Upload binding | Account/destination scope, logical source identity, existing wire namespace, consent boundary, and source-scoped checkpoints |
+| Payload generation and schema fingerprint | Select the exact record version and decoder |
+| Capture and archive-writer versions | Preserve the origin of a record and the implementation that encoded it |
+| Redaction policy identity, detector/backend version, surface completion | Describe the processing applied to each payload generation |
+| Index configuration and embedding model/dimensions | Select compatible search and vector behavior |
 
-Capture provenance when records are written/sealed. The prototype's app version was recovered from logs after export; production must not depend on that recovery.
+Provenance is recorded at capture, replacement, and sealing. Migration carries existing provenance forward; unavailable historical values remain unknown with the migration writer recorded separately. A legacy source without a logical storage UUID receives one in its migration journal. Existing upload identities, record IDs, and checkpoints are retained during format migration.
 
-Keep the legacy SQLx migration runner and legacy recovery behavior unchanged. Give hybrid mode its own migration history and reviewed bootstrap schema, derived from the current metadata contract and excluding legacy external-content payload triggers. Share domain definitions and test fixtures; do not run the legacy migration/checksum-repair routine against a hybrid database or edit old migrations to introduce hybrid behavior. Future changes to shared domain tables must explicitly cover each supported mode.
+Upload bindings are selected by logical source, independently of physical generation and hardware identity. Migration and restore reuse the source binding after consent revalidation. An independent root receives separate local progress and a destination-supported wire namespace. Upload admission requires a binding that distinguishes its record keys from prior roots under that destination's existing protocol. An unavailable binding is an explicit upload status; remote search and local recording retain their normal contracts. Switching roots closes old upload admission and selects the corresponding binding and checkpoints.
 
-Opening a compatible hybrid database can migrate its metadata without rewriting all historical files. New writes use the current payload schema; old files retain their recorded schema until an explicit supported rewrite. Unknown required capabilities fail before writer admission. Unsupported or mismatched schema checksums are not repaired by pretending they match.
+## Coordinated transactions and read admission
 
-## Data Sync and enterprise ingestion boundary
+The storage owner provides one serialized SQLite writer, one short generation gate, and generation leases. Capture, redaction, metadata edits, indexing, file publication, and cleanup-job commits use that writer. Hybrid write connections use WAL with `synchronous=FULL`; acknowledged transactions include a durable WAL commit. Legacy connection policy remains unchanged. File and descriptor publication use the platform's tested durable replacement implementation.
 
-This proposal changes local persistence. Data Sync remote search and enterprise ingestion remain consumers of logical records, with their existing cloud formats and destinations.
+The generation gate orders catalog snapshot admission, replacement commits, and result handoff. Mutation lock order is writer lane, then generation gate. Readers acquire the gate without acquiring the writer lane. Compression, detection, payload decoding, and network transfer run outside both.
 
-| Path | Architecture placement | Hybrid integration |
-|---|---|---|
-| Local app/agent queries | Local API → database facade → SQLite metadata/indexes + payload reader | Return the existing fields from staged or sealed payloads. |
-| Data Sync upload | Local sync adapter → existing serialized/encrypted records → Data Sync service | Replace direct frame-payload SQL reads with the payload reader; preserve upload policy, identities, and checkpoints. |
-| Data Sync remote search | App/agent → authenticated local proxy → cloud search → results returned to caller | Preserve the remote-search contract. Results are not imported into the local SQLite/Parquet database. |
-| Enterprise ingestion | Local API → enterprise uploader → existing JSONL → configured enterprise destination | Keep upload and ingestion contracts; make the local endpoints return complete payloads in either storage mode. |
+1. A read opens a SQLite snapshot and pins its catalog revision under the gate. Candidate IDs, metadata, counts, and payload locators come from that snapshot. The pin protects every file the snapshot can address.
+2. After collecting locators, the read releases its SQLite snapshot and retrieves projected payloads under the retained lease. Staged bytes are copied from the same snapshot. Response assembly preserves candidate order.
+3. The owner advances a persisted read revision when replacement, deletion, indexed metadata edits, or privacy changes invalidate existing results. Ordinary capture inserts retain normal snapshot semantics.
+4. Cache lookup, cache insertion, and response/export admission check that revision under the gate. A changed revision causes a bounded retry of selection and hydration, followed by an explicit retryable error if contention persists.
+5. Admission transfers a prepared body to the response or upload transport and releases the gate. Transfers already admitted belong to the earlier revision; subsequent admissions use the new revision. File leases drain when decoding/copying finishes.
 
-The [Data Sync proxy](../crates/screenpipe-engine/src/routes/data_sync_proxy.rs) forwards authenticated requests and streams the upstream response back. **Data Sync download/import into the local database is not part of this architecture.** Remote results do not pass through capture, local staging, or the Parquet sealer. The combined “Local API + sync adapters” diagram node represents these consumer boundaries; it does not imply that remote queries run against local storage or that the upload provider currently calls HTTP endpoints.
+Payload caches are keyed by database generation, file generation, projection, and privacy revision. Serialized-response caches carry the read revision and use the same admission path on hits and inserts. Upload adapters retain a read token through serialization and revalidate at export admission; the local API adapter supplies that token separately from the unchanged cloud body. Owner shutdown cancels workers, closes admission, drains leases and transports, and releases the database-manager lease before another generation opens.
 
-The [upload provider](../crates/screenpipe-engine/src/sync_provider.rs) currently reads `frames.full_text` directly, so its local read adapter must change before hybrid mode can ship. The [enterprise uploader](../apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs) already consumes the local API and serializes logical records as JSONL. Its cloud ingestion format need not change for this proposal. Keeping cloud formats unchanged does not prove compatibility by itself: verify complete text, IDs, ordering, pagination/backfills, failures without cursor advancement, and source identity across a new database root.
+## Capture, indexing, and sealing
 
-Existing and hybrid devices can continue publishing the same logical record formats for remote search. Local Parquet encoding/schema versions stay behind the storage boundary. Local redaction must affect newly read upload payloads and caches; it does not by itself retract previously uploaded records or alter cloud-side search/redaction policy.
+A frame payload is either `staged` or `sealed`. Each update creates a monotonically increasing payload generation. Deletion state and privacy eligibility are separate catalog attributes.
 
-## Other features that must work before opt-in ships
+Capture commits metadata, staging bytes, length/presence predicates, and frame FTS postings together, preserving immediate frame-search visibility. Metadata edits replace all indexed fields as needed. Supplementary element jobs carry the originating payload generation and read authoritative data when executed; obsolete jobs are retired. Retained SQLite redaction surfaces participate in the read-revision contract.
 
-| Surface | Required integration |
+The hybrid FTS schema uses `content=''`, `contentless_delete=1`, the existing tokenizer and searchable fields, and the same eligibility of frames with searchable text. Replacements and deletions update query-visible postings in the coordinated transaction. Index rebuild streams current logical records through the payload reader. Speaker-vector matching continues through the existing SQLite implementation.
+
+The sealer owns bounded file jobs:
+
+1. Reserve unique output paths and pin a batch of staged generations with their applicable privacy policy. The job protects its temporary and final paths while encoding.
+2. Encode both projections outside the writer lane. Verify record IDs, generations, row counts, schema fingerprints, and checksums; finish footers and synchronize files.
+3. Install immutable files and durably synchronize their directory entries, including newly created ancestors.
+4. Under the coordinated writer and generation gate, validate every included generation and its sealing eligibility. Publish the whole file pair and all locators in one durable transaction, then release its staging bytes. A stale member rejects the entire pair and queues both files for cleanup.
+5. Release the job lease. Interrupted jobs leave authoritative staging and recoverable file-job state. Restart reconciles uncommitted files against jobs and the catalog.
+
+Rewrites use the same whole-batch publication rule. Metadata-only retention that removes detail creates a new payload generation preserving search text. Fully deleted records are omitted from replacement files. Every formerly referenced file is retired by a durable catalog transaction before it becomes eligible for unlink.
+
+## PII processing and reclamation
+
+The redactor reads staged or sealed candidates through the payload boundary. Completion belongs to a payload generation, policy identity, and required surface set. With PII enabled, sealing requires completion of every configured surface; absent or empty surfaces are explicitly complete without detection. With PII disabled, eligibility records that processing was not required. Policy changes invalidate affected completion and pending sealing work.
+
+Detection covers full text and configured derived text/JSON and metadata, preserving OCR geometry. A coordinated replacement transaction checks the input generation and policy, stages the replacement, updates metadata and predicates, replaces FTS postings, records completion, advances the read revision, and queues affected files for rewrite. Archived history uses this same replacement operation. Search continues with the installation's asynchronous PII behavior until a replacement is committed.
+
+Detector failures and malformed configured JSON remain identifiable blocked work with retry/backoff or an explicit user deletion as resolution. They consume the bounded staging/backlog budget. The API's `filter_pii` step runs after payload retrieval with its existing failure behavior. Screenshot redaction uses the image worker; audio, elements, and UI-event text remain in SQLite.
+
+Reclamation receipts distinguish three outcomes:
+
+| Outcome | Completion evidence |
 |---|---|
-| Frame detail, Timeline text, OCR highlighting, accessibility views | Retrieve the requested projection; retain media references and frame IDs. |
-| Semantic processing, reprocessing, pipes and agent context | Read full input through the payload boundary, including sealed history. |
-| Retention and user deletion/redaction | Use the replacement, cache/index invalidation, and durable cleanup protocol in the PII section; deletion omits the removed payload from replacements. |
-| Backup | Take a consistent SQLite snapshot plus a lease on its referenced immutable files; include staged payloads, version metadata, and checksums. A copy of `index.sqlite` alone is incomplete. Media remains separately selectable. |
-| Restore and recovery | Verify catalog/file identity together. Do not apply SQLite-only recovery swaps to a multi-file database. Missing files must not be converted into empty history. |
-| Data Sync and enterprise upload | Follow the boundary above: adapt local upload reads, preserve remote search results and enterprise JSONL, and keep source-scoped progress. |
-| Storage statistics and compact | Count SQLite, WAL, committed payloads, staging, and temporary/obsolete files separately. Catalog compaction and Parquet rewrite have different costs. |
-| Local encryption policy | Preserve the installation's supported protection policy. Parquet compression is not encryption; reject mode creation for a policy combination the implementation cannot honor. |
+| Current logical content | Replacement/deletion, query-visible indexes, and read revision committed together |
+| Archived file removal | Verified rewrites published, old references durably retired, all reader/backup/job leases drained, originals unlinked, and directory changes persisted |
+| SQLite remnant reclamation | Supported maintenance has replaced the index database with a verified compact copy containing current tables/indexes, then retired its old SQLite/WAL generation |
 
-These are dependencies of the mode, not optional follow-on fixes after users start writing hybrid databases.
+The cleanup scheduler batches rewrites by file and retains durable jobs until removal succeeds. Rejected seals and abandoned temporary files follow the same ownership checks. FTS tombstones remove rows from results immediately; bounded merges reclaim obsolete postings. SQLite remnant reclamation runs under exclusive lifecycle ownership and uses the generation activation protocol, allowing recording to remain paused for that maintenance operation. This index-only replacement retains the resolved payload root and media inventory; its cleanup retires the old SQLite/WAL files. The receipts describe local artifacts; previously completed backups, remote copies, and filesystem snapshots have their own lifetimes. Physical media secure erasure is outside this storage contract.
 
-## Implementation map
+## Queries and consumers
 
-| Existing seam | Proposed change |
+Typed queries select metadata and IDs in SQLite, retrieve the requested payload projection, and assemble the existing successful DTOs. Missing or corrupt payloads return storage errors. The SQL predicate metadata preserves legacy character-length, presence, and fallback behavior without decoding history to filter a page.
+
+`/raw_sql` exposes the selected mode's resident SQLite schema. Legacy mode retains its existing schema; hybrid schema discovery lists metadata, indexes, vectors, and retained tables. Archived payload fields are available through typed queries, and SQL references to unavailable payload columns receive an explicit unsupported-storage-query error. First-party suggestions, Timeline queries, and shipped agent/Pipe instructions use typed payload endpoints for text and JSON. This keeps SQL expressions and aggregates meaningful for the actual resident schema.
+
+| Consumer | Read and delivery contract |
 |---|---|
-| [Engine startup](../crates/screenpipe-engine/src/bin/screenpipe-engine.rs) and [CLI DB lifecycle](../crates/screenpipe-engine/src/cli/db.rs) | Resolve mode/root before `DatabaseManager` construction; route open, recovery, and inspection by format. |
-| [DB setup](../crates/screenpipe-db/src/db/setup.rs) | Preserve the legacy constructor path; add hybrid bootstrap, capability checks, and separate migrator. |
-| [Write queue](../crates/screenpipe-db/src/write_queue.rs) and [frame writes](../crates/screenpipe-db/src/db/frames.rs) | Stage generations and catalog changes through the existing coordinator. |
-| New `screenpipe-db` storage module | Own descriptor resolution, payload reader, staging/catalog types, Parquet encoding/decoding, and generation leases. Keep format ownership together. |
-| [Search](../crates/screenpipe-db/src/db/search.rs), [accessibility](../crates/screenpipe-db/src/db/accessibility.rs), [elements](../crates/screenpipe-db/src/db/elements.rs) | Separate candidate selection from projected payload retrieval; cover direct frame reads and counts as well as keyword queries. |
-| [DB recovery](../crates/screenpipe-db/src/recovery.rs) and [maintenance](../crates/screenpipe-db/src/db/maintenance.rs) | Mode-aware index rebuilding, retention, redaction, integrity checking, and file reclamation. |
-| [Redaction worker](../crates/screenpipe-redact/src/worker/mod.rs) and [table adapters](../crates/screenpipe-redact/src/worker/tables.rs) | Add hybrid candidate reads and conditional replacements; enforce the sealing gate and track archived-file cleanup. Preserve legacy redaction. |
-| [Data Sync provider](../crates/screenpipe-engine/src/sync_provider.rs), [remote-search proxy](../crates/screenpipe-engine/src/routes/data_sync_proxy.rs), and [enterprise uploader](../apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs) | Adapt the provider's local payload reads; verify unchanged remote-search and enterprise wire contracts. No local import of remote search results. |
-| [Backup CLI](../crates/screenpipe-engine/src/cli/backup.rs), [data routes](../crates/screenpipe-engine/src/routes/data.rs), [retention](../crates/screenpipe-engine/src/retention.rs) | Consume the resolved storage layout instead of reconstructing `db.sqlite` paths. |
+| Search, counts, keyword episodes, accessibility search | Snapshot selection plus projected retrieval; existing filtering, ordering, pagination, and highlighting |
+| Frame detail, Timeline, bounds, accessibility context | Requested search/detail columns and existing media references |
+| Semantic processing/reprocessing, agent context, pipes | Complete logical inputs through the facade or local API |
+| Desktop Data Sync upload | `data_sync.rs` local `/search` client → existing account-scoped JSONL ingestion |
+| Enterprise ingestion | `enterprise_sync.rs` local API client → `enterprise/sync.rs` → existing JSONL and configured destination |
+| CLI sync upload | `cli/sync.rs` → `sync_provider.rs` → logical payload reader → existing serialized/encrypted records |
+| Data Sync remote search | Authenticated local proxy → cloud search → streamed results to the caller |
 
-Recommended build order: preserve/test the legacy payload boundary; implement new-root initialization; add transactional staging and mode-specific FTS; add the redaction adapter and sealing gate; implement sealing, projected reads, and archived redaction/cleanup; wire every consumer and lifecycle operation above; then expose new-database opt-in. No automatic old-database conversion is included.
+Upload adapters select the binding described in Identity and provenance, retrieve complete pages, admit their serialized bodies against the read revision, and advance checkpoints after the destination acknowledges the page. Partial retrieval and storage errors preserve the previous checkpoint. Remote search remains a caller response path, independent of local capture/staging. Local replacement affects subsequent local reads and exports; previously uploaded copies follow their destination's retention and redaction policy.
 
-## Acceptance before calling the mode usable
+## Offline format migration
 
-1. **Legacy isolation:** existing roots resolve identically; no hybrid files or hybrid schema changes appear during ordinary legacy open/read/write/backup/recovery. Existing relevant regression suites still pass.
-2. **New-mode lifecycle:** fresh initialization, restart, interrupted initialization, conflicting selection, unsupported format, and explicitly exported legacy copies all follow the compatibility table.
-3. **Durability:** inject failures before/after file synchronization, rename, catalog commit, staging cleanup, index update, and compaction; each acknowledged record remains recoverable with the correct generation.
-4. **Functional parity:** current API-level search and counts, frame detail, bounds/highlights, semantic input, retention, redaction, sync, and backup/restore match equivalent legacy fixtures. Include late OCR updates and deleted/corrected records.
-5. **Performance and disk:** replay actual ingestion while querying both modes on macOS, Windows, and Linux. Measure capture latency, writer stalls, CPU, total RSS, transient disk needs, steady-state SQLite staging size, sealing backlog, searchable-history size, and warm/cold query tails. Reuse the current database/current SQL baseline discipline; do not substitute a sequential scan or omit payload retrieval.
-6. **Scope honesty:** measure frame-only hybrid savings separately. The 1.52 GB experiment archived other tables too and is not this mode's expected total size. Audio, element-level, vector-result hydration, and semantic/activity paths need their own parity/performance evidence.
-7. **PII parity and cleanup:** cover enabled/disabled capture, detector failures, late OCR, policy changes during sealing, and redaction enabled on already sealed history. Verify configured fields across both projections, metadata, FTS, caches, and concurrent readers; test index rebuild, sync/export, response-filter failures, and backup/restore with pending cleanup. Inject crashes during replacement and file rewrite; prove stale jobs cannot republish raw data, blocked cleanup remains visible, and obsolete files are removed after leases drain. Compare legacy redaction behavior and measure redaction backlog, rewrite I/O, and temporary disk overhead during recording.
-8. **Cloud boundaries:** compare Data Sync upload records and enterprise JSONL for equivalent legacy/hybrid fixtures, including sealed history and backfills. Verify remote-search responses and authentication/errors remain unchanged and remote queries create no local frame/payload records. Exercise upload retries, checkpoints, new-root source identity, and redaction before payload export; do not introduce a download/import acceptance path.
+Migration is an explicitly invoked, resumable conversion with a single durable activation point. The first implementation pauses recording and background mutation for the conversion. The migration journal defines these phases:
 
-The immediate next implementation unit is the storage opener plus payload-reader boundary with legacy behavior preserved, followed by a disposable new-root hybrid test. This draft makes no production database changes.
+| Phase | Work and durable state |
+|---|---|
+| `building` | Source frozen and identified; candidate generation, batch progress, and ownership recorded |
+| `ready` | Candidate conversion, indexes, parity, and normal-opener verification complete |
+| `active` | Active descriptor durably selects the candidate |
+| `complete` | Source database generation and disposable migration artifacts reclaimed |
+
+1. **Prepare and freeze.** Resolve the exact source root, verify its health/capabilities and supported upload bindings, estimate destination plus scratch/headroom space, acquire lifecycle ownership, close new admissions, drain mutations and uploads, and record the journal. The source includes committed WAL state and is read through its coordinated owner. Source tables and payloads remain intact.
+2. **Build.** Create the separate hybrid generation. Copy retained tables, stable IDs and relationships, vectors, corrections, source bindings/checkpoints, and provenance in bounded batches. Compare every source record with its decoded copy before any intentional redaction. Apply the selected PII policy, verify those transformations, and seal through the normal payload protocol. Journal progress against the frozen source identity so resume uses the same input.
+3. **Index.** Build hybrid FTS and ordinary indexes from the candidate's authoritative records. Each copied record has a stable key and comparison receipt; source schema/provenance and migration writer versions are recorded.
+4. **Verify.** Check all logical records, null/empty values, text/JSON, relationships, retained vectors/state, SQLite integrity, foreign keys, catalog references, file checksums, and media resolution. Compare complete typed results and search/count/filter/order/pagination behavior with the original indexed SQLite source. Intended redaction differences have separate expected-output receipts. Counts alone are one part of this verification.
+5. **Prepare activation.** Synchronize candidate files/catalog and directories, close candidate handles, reopen through the normal hybrid opener, and repeat critical retrieval/search checks. Persist `ready` with the verification receipts while source recording remains paused.
+6. **Activate.** Durably replace `storage.json` to select the verified physical generation. This replacement is the commit point. Record `active`, then open worker and upload admission against the selected generation.
+7. **Reclaim.** After activation and successful reopening, durably retire and remove the source SQLite generation and disposable migration files. Shared media remains referenced at its existing location. Persist `complete` and retire the journal.
+
+Startup reconciles the journal with the active descriptor under lifecycle ownership. Before activation the source remains authoritative and the operation resumes or cancels back to it. A changed frozen-source identity requires rebuilding candidate evidence. If activation committed before the journal advanced, descriptor identity establishes `active`. After activation, recovery uses the candidate and resumes cleanup; new writes always belong to that generation. A cleanup failure retains extra files and pending work while the active database remains usable.
+
+## Backup, restore, and resource ownership
+
+A hybrid backup is a versioned directory bundle with `manifest.json`, a consistent SQLite snapshot, its referenced immutable files, the storage descriptor, and optional media. The manifest records identities, relative paths, schemas, lengths, checksums, and included media policy. Staged payloads, upload bindings, provenance, and pending cleanup state travel in the SQLite snapshot.
+
+Backup admission pins the catalog snapshot through the generation gate. The owner retains that fixed SQLite read transaction throughout the snapshot copy, including every incremental backup step. The manifest and file pins describe that same snapshot. Immutable-file copying occurs outside the writer lane, and pins remain until copying and verification finish. Backup deadlines release the read transaction and leases and leave an incomplete bundle distinguishable from a verified one. Cleanup jobs restored from the snapshot distinguish included files from obsolete files already absent from the bundle.
+
+Restore validates a bundle into a separate generation, resolves media paths, reopens and verifies it, and activates it through the same durable descriptor protocol. Logical/source identities are retained. Recovery distinguishes repairable SQLite/index damage from unavailable payload files and preserves the selected generation and its evidence. Legacy backup/export retains its existing file format.
+
+The owner also supplies the complete file inventory to storage statistics and encryption. Protection covers the index, staging/WAL, payload files, scratch files, and supported backup outputs according to the selected policy. Creation, migration, and restore admit only mode/protection combinations supported by the implementation.
+
+One `StorageBudget` configuration owns decoded bytes per operation, maximum individual payload handling, total in-flight decoding/response bytes, cache bytes, file/row-group sizes, worker concurrency, staging/backlog bytes, temporary-disk reserve, and retry/deadline limits. The initial search-row-group experiment starts at 128 rows with an independent byte bound. Oversized records use a bounded streaming path or explicit admission failure before acknowledgment; stored records are retrieved completely or return an explicit resource error. Search timeouts release decoder capacity and leases. Capture admission pauses at the backlog/storage reserve boundary, retains acknowledged staged records, and resumes when capacity recovers.
+
+The release budget profile is selected by the ingestion and query acceptance measurements below. Storage statistics distinguish allocated SQLite/WAL bytes, logical staging occupancy, committed Parquet, scratch, obsolete generations, and media so staging is not double-counted in total disk usage.
+
+## Repository integration
+
+The following existing seams supply the implementation entry points; the storage contracts above own their behavior.
+
+| Owner | Entry points |
+|---|---|
+| Storage lifecycle and opener | [DB setup](../crates/screenpipe-db/src/db/setup.rs), [engine startup](../crates/screenpipe-engine/src/bin/screenpipe-engine.rs), [desktop server](../apps/screenpipe-app-tauri/src-tauri/src/server_core.rs), [desktop relaunch](../apps/screenpipe-app-tauri/src-tauri/src/db_relaunch.rs), [CLI recovery](../crates/screenpipe-engine/src/cli/db.rs) |
+| Payload/catalog implementation | New `screenpipe-db` storage module behind `DatabaseManager`, [write queue](../crates/screenpipe-db/src/write_queue.rs), [frame writes](../crates/screenpipe-db/src/db/frames.rs), [source identity](../crates/screenpipe-db/src/db/source_identity.rs), [connection policy](../crates/screenpipe-config/src/defaults.rs) |
+| Selection, retrieval, and response admission | [DB search](../crates/screenpipe-db/src/db/search.rs), [accessibility](../crates/screenpipe-db/src/db/accessibility.rs), [elements/keyword hydration](../crates/screenpipe-db/src/db/elements.rs), [search route/cache](../crates/screenpipe-engine/src/routes/search.rs), [raw SQL route](../crates/screenpipe-engine/src/routes/content.rs), [suggestions](../apps/screenpipe-app-tauri/src-tauri/src/suggestions.rs) |
+| PII and reclamation | [Redaction worker](../crates/screenpipe-redact/src/worker/mod.rs), [table adapters](../crates/screenpipe-redact/src/worker/tables.rs), [maintenance](../crates/screenpipe-db/src/db/maintenance.rs), [retention](../crates/screenpipe-engine/src/retention.rs), [DB recovery](../crates/screenpipe-db/src/recovery.rs) |
+| Upload and remote reads | [Desktop Data Sync](../apps/screenpipe-app-tauri/src-tauri/src/data_sync.rs), [enterprise API client](../apps/screenpipe-app-tauri/src-tauri/src/enterprise_sync.rs), [enterprise uploader](../apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs), [CLI sync](../crates/screenpipe-engine/src/cli/sync.rs), [sync provider](../crates/screenpipe-engine/src/sync_provider.rs), [remote-search proxy](../crates/screenpipe-engine/src/routes/data_sync_proxy.rs) |
+| Backup, statistics, and protection | [Backup CLI](../crates/screenpipe-engine/src/cli/backup.rs), [data routes](../crates/screenpipe-engine/src/routes/data.rs), [disk usage](../apps/screenpipe-app-tauri/src-tauri/src/disk_usage.rs), [vault](../apps/screenpipe-app-tauri/src-tauri/src/vault.rs) |
+
+Implementation proceeds through the legacy-preserving facade and opener, hybrid staging/indexing, generation admission and PII, sealing/reclamation, consumers and lifecycle operations, and offline migration. User opt-in is enabled when the supported mode's acceptance matrix passes.
+
+## Acceptance and measurements
+
+| Area | Required evidence |
+|---|---|
+| Legacy and format lifecycle | Existing relevant regressions; unchanged ordinary legacy opens; fresh hybrid initialization/restart; interrupted initialization; conflicting selection; unsupported capabilities; descriptor/catalog mismatch; desktop and engine entry points |
+| Transactions and file durability | Failure injection at staging, file flush, rename, catalog publication/retirement, and unlink; application-crash recovery plus separate power-loss/filesystem fault tests; recovery of every acknowledged hybrid record |
+| Concurrent privacy and cleanup | Deterministic barriers around selection, cache hit/insertion, response/export admission, policy change, replacement, whole-batch rejection, rewrite, and backup leases; stale jobs retired; obsolete originals removed after leases drain |
+| Logical parity | Complete staged/sealed payloads, counts, tags/filters, equal-timestamp ordering, pagination, Unicode lengths, null/empty fallback, details/geometry, semantic inputs, late OCR, deferred elements, vector paths, deletion, lean retention, and mode-specific raw SQL |
+| PII and resource failures | Enabled/disabled capture, pending surfaces, detector outages, malformed JSON, policy changes, archived-history processing, API-filter failure behavior, FTS rebuild, bounded backlog pause/resume, and visible cleanup receipts |
+| Migration and restore | All-record comparisons and explicit redaction receipts; source identity/checkpoint preservation; corruption or interruption in each journal phase; activation-before-journal crash; writes after activation; pending cleanup; media paths; legacy export and backup restoration |
+| Cloud consumers | Actual desktop Data Sync and enterprise JSONL equality, CLI upload parity, consent/source binding across roots, pages beyond 500 records and equal timestamps, retries without premature checkpoints, remote authentication/errors, and remote queries returning results without local frame writes |
+| Continuous operation | Replay representative capture with concurrent search, redaction, sealing, cleanup, and backup on macOS, Windows, and Linux; measure writer/capture latency, CPU, total RSS, decode cancellation, disk reserve, SQLite high-water size, backlog, rewrite I/O, and query tails against the pinned budget |
+
+The performance baseline is the current indexed SQLite implementation, including its candidate selection, joins, filters, counts, and complete result retrieval/serialization. Compare equivalent projections and truncation settings, record query plans and cache conditions, and report warm, fresh-reader, and cold-disk runs separately. Storage measurements cover frame-only hybrid mode with all retained SQLite tables, indexes, staging allocation, WAL, and temporary/obsolete files.
+
+The exploratory benchmark report used a 13.20 GB indexed SQLite database and matched 336 serialized screen-search responses. Its reported warm median/p95 were 31.2/208.4 ms for SQLite and 14.8/111.7 ms for the indexed Parquet prototype; fresh-reader medians were 34.5 and 19.5 ms. That prototype reused FTS postings and archived additional tables, totaling 1.52 GB. Its coverage was local screen search and retrieval; live indexing/ingestion, other query families, cleanup, HTTP scheduling, and cold-disk behavior belong to the acceptance measurements above. Frame-only savings and production performance are measured independently.
