@@ -9,6 +9,8 @@ mod bindings;
 pub(crate) mod bulk;
 mod codec;
 mod command;
+#[cfg(feature = "storage-bench-experiments")]
+pub mod experiments;
 mod faults;
 mod inventory;
 mod lifecycle;

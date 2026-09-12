@@ -206,9 +206,78 @@ pub(crate) struct Runtime {
 enum Cached {
     Records(Arc<Vec<Record>>),
     ElementIndex(Arc<element_index::ElementIndex>),
+    #[cfg(feature = "storage-bench-experiments")]
+    Frames(Arc<Vec<super::FramePayload>>),
 }
 
 impl HybridStorage {
+    #[cfg(feature = "storage-bench-experiments")]
+    pub(super) fn cached_frame_projection(
+        &self,
+        path: &std::path::Path,
+        hash: &str,
+        projection: super::Projection,
+        selected: &std::collections::BTreeSet<i64>,
+    ) -> Result<Arc<Vec<super::FramePayload>>, sqlx::Error> {
+        let key = format!("frames:{}:{hash}:{selected:?}", path.display());
+        let value = self.bulk.cache.get_or_load(self, key, || {
+            let rows = super::codec::read_selected(
+                path,
+                projection,
+                hash,
+                &self.descriptor.budget,
+                Some(selected),
+            )?;
+            Ok(Cached::Frames(Arc::new(rows)))
+        })?;
+        let Cached::Frames(rows) = value else {
+            unreachable!()
+        };
+        Ok(rows)
+    }
+
+    #[cfg(feature = "storage-bench-experiments")]
+    fn bulk_frame_records(
+        &self,
+        path: &str,
+        hash: &str,
+        frame: i64,
+        index: &element_index::ElementIndex,
+    ) -> Result<Arc<Vec<Record>>, sqlx::Error> {
+        let key = format!("element-frame:{path}:{hash}:{frame}");
+        let value = self.bulk.cache.get_or_load(self, key, || {
+            if super::experiments::enabled("selective-decode") {
+                let selected: Vec<_> = index
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, row)| (row.frame == frame).then_some(position))
+                    .collect();
+                let rows = codec::read_positions(
+                    &self.payload_path(std::path::Path::new(path))?,
+                    hash,
+                    &TABLES[0],
+                    &self.descriptor.budget,
+                    &selected,
+                )?;
+                return Ok(Cached::Records(Arc::new(rows)));
+            }
+            let mut rows = codec::read(
+                &self.payload_path(std::path::Path::new(path))?,
+                hash,
+                &TABLES[0],
+                &self.descriptor.budget,
+            )?;
+            rows.retain(|row| row.values.first() == Some(&Value::Integer(frame)));
+            rows.shrink_to_fit();
+            Ok(Cached::Records(Arc::new(rows)))
+        })?;
+        let Cached::Records(rows) = value else {
+            unreachable!()
+        };
+        Ok(rows)
+    }
+
     fn element_frame_rows(
         &self,
         key: String,

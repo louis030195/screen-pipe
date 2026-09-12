@@ -162,6 +162,7 @@ crossbeam = { workspace = true }
 criterion = { workspace = true }
 
 [features]
+storage-bench-experiments = ["screenpipe-db/storage-bench-experiments"]
 # redact-onnx-cpu is in defaults because screenpipe-engine.rs unconditionally
 # imports `screenpipe_redact::adapters::onnx` for the async PII worker. Without
 # it, `cargo {check,clippy,build} -p screenpipe-engine` (no --features) fails

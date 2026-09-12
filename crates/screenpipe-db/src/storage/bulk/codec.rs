@@ -212,3 +212,67 @@ pub(super) fn checked_reader(
     }
     Ok(reader)
 }
+
+#[cfg(feature = "storage-bench-experiments")]
+pub(super) fn read_positions(
+    path: &Path,
+    hash: &str,
+    table: &Table,
+    budget: &StorageBudget,
+    positions: &[usize],
+) -> Result<Vec<Record>, sqlx::Error> {
+    let file = checked_reader(path, hash, table, budget)?;
+    let mut output = Vec::with_capacity(positions.len());
+    let mut offset = 0;
+    let mut bytes = 0;
+    for index in 0..file.num_row_groups() {
+        let count = file.metadata().row_group(index).num_rows() as usize;
+        let selected: Vec<_> = positions
+            .iter()
+            .filter_map(|&p| (p >= offset && p < offset + count).then(|| p - offset))
+            .collect();
+        offset += count;
+        if selected.is_empty() {
+            continue;
+        }
+        let group = file.get_row_group(index).map_err(storage_error)?;
+        let mut rows: Vec<_> = selected
+            .iter()
+            .map(|_| Record {
+                id: 0,
+                generation: 0,
+                values: Vec::with_capacity(table.columns.len()),
+            })
+            .collect();
+        for column in 0..table.columns.len() + 2 {
+            let values =
+                crate::storage::codec::column_positions(&*group, column, &selected, column >= 2)?;
+            for (row, value) in rows.iter_mut().zip(values) {
+                match (column, value) {
+                    (0, Field::Long(id)) => row.id = id,
+                    (1, Field::Long(generation)) => row.generation = generation,
+                    (0..=1, _) => return Err(storage_error("invalid selected bulk identity")),
+                    (_, Field::Null) => row.values.push(Value::Null),
+                    (_, Field::Str(s)) => row.values.push(Value::Text(s)),
+                    (_, Field::Long(i)) => row.values.push(Value::Integer(i)),
+                    (_, Field::Double(f)) => row.values.push(Value::Real(f)),
+                    _ => return Err(storage_error("invalid selected bulk value")),
+                }
+            }
+        }
+        for row in rows {
+            bytes += row.bytes();
+            if row.bytes() > budget.record_bytes || bytes > budget.decode_bytes {
+                return Err(storage_error("bulk record budget exceeded"));
+            }
+            if output.last().is_some_and(|r: &Record| r.id >= row.id) {
+                return Err(storage_error("bulk row order invalid"));
+            }
+            output.push(row);
+        }
+    }
+    if output.len() != positions.len() {
+        return Err(storage_error("incomplete selected bulk rows"));
+    }
+    Ok(output)
+}

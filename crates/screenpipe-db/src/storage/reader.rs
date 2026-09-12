@@ -25,6 +25,8 @@ impl Projection {
 /// Carries the read revision through response assembly, caches and export.
 pub struct StorageReadToken {
     pub revision: i64,
+    #[cfg(feature = "storage-bench-experiments")]
+    revocation: Option<i64>,
     storage: Option<Arc<HybridStorage>>,
     _lease: Option<Arc<OwnedRwLockReadGuard<()>>>,
 }
@@ -50,6 +52,19 @@ impl StorageReadToken {
         if storage.closing.is_cancelled() {
             return Err(sqlx::Error::PoolClosed);
         }
+        #[cfg(feature = "storage-bench-experiments")]
+        if let Some(expected) = self.revocation {
+            let current: i64 =
+                sqlx::query_scalar("SELECT revision FROM _benchmark_revocation WHERE id=1")
+                    .fetch_one(pool)
+                    .await?;
+            if current != expected {
+                return Err(storage_error(
+                    "read revision changed; retry the complete query",
+                ));
+            }
+            return Ok(Some(gate));
+        }
         let current: i64 =
             sqlx::query_scalar("SELECT revision FROM storage_metadata WHERE singleton=1")
                 .fetch_one(pool)
@@ -72,6 +87,15 @@ impl DatabaseManager {
         let Some(storage) = &self.storage else {
             return read().await;
         };
+        #[cfg(feature = "storage-bench-experiments")]
+        if super::experiments::response_admission() {
+            return tokio::time::timeout(
+                std::time::Duration::from_secs(storage.descriptor.budget.operation_timeout_secs),
+                read(),
+            )
+            .await
+            .map_err(|_| storage_error("payload read deadline exceeded"))?;
+        }
         let mut last = storage_error("read revision changed; retry the complete query");
         for _ in 0..storage.descriptor.budget.read_attempts {
             let token = self.storage_read_token().await?;
@@ -100,6 +124,8 @@ impl DatabaseManager {
     ) -> Result<Option<OwnedMutexGuard<()>>, sqlx::Error> {
         StorageReadToken {
             revision,
+            #[cfg(feature = "storage-bench-experiments")]
+            revocation: None,
             storage: self.storage.clone(),
             _lease: None,
         }
@@ -119,6 +145,8 @@ impl DatabaseManager {
         let Some(storage) = &self.storage else {
             return Ok(StorageReadToken {
                 revision: 0,
+                #[cfg(feature = "storage-bench-experiments")]
+                revocation: None,
                 storage: None,
                 _lease: None,
             });
@@ -250,16 +278,40 @@ impl HybridStorage {
             _ = self.closing.cancelled() => return Err(sqlx::Error::PoolClosed),
             lease = Arc::clone(&self.leases).read_owned() => lease,
         };
+        #[cfg(feature = "storage-bench-experiments")]
+        let _gate = if super::experiments::in_snapshot()
+            && super::experiments::enabled("snapshot-admission")
+        {
+            None
+        } else {
+            Some(self.gate.lock().await)
+        };
+        #[cfg(not(feature = "storage-bench-experiments"))]
         let _gate = self.gate.lock().await;
         if self.closing.is_cancelled() {
             return Err(sqlx::Error::PoolClosed);
         }
+        #[cfg(feature = "storage-bench-experiments")]
+        let (revision, revocation) = if super::experiments::in_snapshot() {
+            let (revision, revocation) = super::experiments::revision(pool).await?;
+            (revision, Some(revocation))
+        } else {
+            (
+                sqlx::query_scalar("SELECT revision FROM storage_metadata WHERE singleton=1")
+                    .fetch_one(pool)
+                    .await?,
+                None,
+            )
+        };
+        #[cfg(not(feature = "storage-bench-experiments"))]
         let revision =
             sqlx::query_scalar("SELECT revision FROM storage_metadata WHERE singleton=1")
                 .fetch_one(pool)
                 .await?;
         Ok(StorageReadToken {
             revision,
+            #[cfg(feature = "storage-bench-experiments")]
+            revocation,
             storage: Some(Arc::clone(self)),
             _lease: Some(Arc::new(lease)),
         })
@@ -275,6 +327,9 @@ impl HybridStorage {
             return Ok(BTreeMap::new());
         }
         let token = self.read_token(pool).await?;
+        #[cfg(feature = "storage-bench-experiments")]
+        let mut snapshot = super::experiments::frame_snapshot(pool).await?;
+        #[cfg(not(feature = "storage-bench-experiments"))]
         let mut snapshot = pool.begin().await?;
         let columns = projection.sqlite_columns();
         let ids_json = serde_json::to_string(ids).map_err(storage_error)?;
@@ -329,11 +384,17 @@ impl HybridStorage {
         for (_, (search, detail, search_hash, detail_hash, requested)) in files {
             let search = self.payload_path(Path::new(&search))?;
             let detail = self.payload_path(Path::new(&detail))?;
-            let permit = tokio::select! {
-                biased;
-                _ = self.closing.cancelled() => return Err(sqlx::Error::PoolClosed),
-                permit = Arc::clone(&self.decoder).acquire_owned() => permit.map_err(|_|sqlx::Error::PoolClosed)?,
+            let cached = frame_cache_enabled();
+            let permit = if cached {
+                None
+            } else {
+                Some(tokio::select! {
+                    biased;
+                    _ = self.closing.cancelled() => return Err(sqlx::Error::PoolClosed),
+                    permit = Arc::clone(&self.decoder).acquire_owned() => permit.map_err(|_|sqlx::Error::PoolClosed)?,
+                })
             };
+            let storage = Arc::clone(self);
             // A blocking decoder shares its admitted pin. Acquiring another
             // read lease behind shutdown's queued writer would deadlock.
             let lease = token._lease.clone();
@@ -344,7 +405,8 @@ impl HybridStorage {
                 let selected = requested.iter().map(|(id, _)| *id).collect();
                 let mut records = BTreeMap::<i64, FramePayload>::new();
                 if projection != Projection::Detail {
-                    for r in codec::read_selected(
+                    for r in read_projection(
+                        &storage,
                         &search,
                         Projection::Search,
                         &search_hash,
@@ -355,7 +417,8 @@ impl HybridStorage {
                     }
                 }
                 if projection != Projection::Search {
-                    for r in codec::read_selected(
+                    for r in read_projection(
+                        &storage,
                         &detail,
                         Projection::Detail,
                         &detail_hash,
@@ -399,12 +462,47 @@ impl HybridStorage {
             }
             out.extend(decoded);
         }
-        let _admission = token.admit(pool).await?;
+        #[cfg(feature = "storage-bench-experiments")]
+        let response_admission = super::experiments::response_admission();
+        #[cfg(not(feature = "storage-bench-experiments"))]
+        let response_admission = false;
+        if !response_admission {
+            let _admission = token.admit(pool).await?;
+        }
         Ok(out)
     }
 }
 
 use std::path::Path;
+
+fn frame_cache_enabled() -> bool {
+    #[cfg(feature = "storage-bench-experiments")]
+    {
+        return super::experiments::enabled("frame-cache");
+    }
+    #[cfg(not(feature = "storage-bench-experiments"))]
+    {
+        false
+    }
+}
+
+fn read_projection(
+    _storage: &HybridStorage,
+    path: &Path,
+    projection: Projection,
+    hash: &str,
+    budget: &super::StorageBudget,
+    selected: Option<&std::collections::BTreeSet<i64>>,
+) -> Result<Vec<FramePayload>, sqlx::Error> {
+    #[cfg(feature = "storage-bench-experiments")]
+    if frame_cache_enabled() {
+        return Ok(_storage
+            .cached_frame_projection(path, hash, projection, selected.unwrap())?
+            .as_ref()
+            .clone());
+    }
+    codec::read_selected(path, projection, hash, budget, selected)
+}
 
 #[cfg(test)]
 mod tests {

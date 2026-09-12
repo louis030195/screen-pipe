@@ -1515,7 +1515,7 @@ impl DatabaseManager {
         let snapshot: Option<(Option<String>,)> =
             sqlx::query_as("SELECT snapshot_path FROM frames WHERE id = ?1")
                 .bind(frame_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.acquire_read().await?)
                 .await?;
 
         match snapshot {
@@ -1536,7 +1536,7 @@ impl DatabaseManager {
                     "#,
                 )
                 .bind(frame_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.acquire_read().await?)
                 .await?;
                 Ok(result.map(|(path, offset)| (path, offset, false)))
             }
@@ -1553,7 +1553,7 @@ impl DatabaseManager {
             "SELECT timestamp FROM frames WHERE id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *self.acquire_read().await?)
         .await?
         .flatten())
     }
@@ -1569,7 +1569,7 @@ impl DatabaseManager {
         )
         .bind(start)
         .bind(end)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.acquire_read().await?)
         .await?;
         Ok(ids)
     }
@@ -1693,7 +1693,7 @@ impl DatabaseManager {
             "SELECT file_path FROM video_chunks WHERE id = ?1 AND file_path NOT LIKE 'cloud://%'",
         )
         .bind(chunk_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *self.acquire_read().await?)
         .await
     }
 
@@ -1705,7 +1705,7 @@ impl DatabaseManager {
             "SELECT MIN(timestamp), MAX(timestamp) FROM frames WHERE video_chunk_id = ?1",
         )
         .bind(chunk_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *self.acquire_read().await?)
         .await?;
         Ok(range.and_then(|(start, end)| start.zip(end)))
     }
@@ -1740,7 +1740,7 @@ impl DatabaseManager {
         )
         .bind(start)
         .bind(end)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.acquire_read().await?)
         .await?;
         Ok(rows)
     }
@@ -1788,7 +1788,7 @@ impl DatabaseManager {
         sqlx::query_as::<_, (i64, String, i64, DateTime<Utc>, bool)>(query)
             .bind(frame_id)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *self.acquire_read().await?)
             .await
     }
 
@@ -1815,7 +1815,7 @@ impl DatabaseManager {
             "#,
             )
             .bind(frame_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.acquire_read().await?)
             .await?;
 
             Ok(result.flatten())
@@ -1842,7 +1842,7 @@ impl DatabaseManager {
                 "SELECT accessibility_text, accessibility_tree_json FROM frames WHERE id = ?1",
             )
             .bind(frame_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.acquire_read().await?)
             .await?;
 
             Ok(row.unwrap_or((None, None)))
@@ -2404,12 +2404,12 @@ impl DatabaseManager {
     > {
         let latest_frame: Option<(DateTime<Utc>,)> =
             sqlx::query_as("SELECT timestamp FROM frames WHERE timestamp IS NOT NULL AND timestamp != '' ORDER BY timestamp DESC LIMIT 1")
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.acquire_read().await?)
                 .await?;
 
         let latest_audio: Option<(DateTime<Utc>,)> =
             sqlx::query_as("SELECT timestamp FROM audio_chunks WHERE timestamp IS NOT NULL AND timestamp != '' ORDER BY timestamp DESC LIMIT 1")
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.acquire_read().await?)
                 .await?;
 
         Ok((latest_frame.map(|f| f.0), latest_audio.map(|a| a.0), None))

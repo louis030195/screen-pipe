@@ -49,6 +49,13 @@ impl DatabaseManager {
         if self.storage.is_some() {
             crate::storage::sql::validate_resident_query(&self.pool, query).await?;
         }
+        #[cfg(feature = "storage-bench-experiments")]
+        if crate::storage::experiments::response_admission() {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+                .fetch_all(&mut *self.acquire_read().await?)
+                .await?;
+            return Ok(Self::raw_sql_rows(&rows));
+        }
         let token = self.storage_read_token().await?;
         let result = Self::raw_sql_on_pool(&self.pool, query).await;
         let _admission = token.admit(&self.pool).await?;
@@ -1479,21 +1486,53 @@ impl DatabaseManager {
     /// multi-GB database. On failure we log loudly with the exact recovery
     /// command so the user can self-heal via the existing `screenpipe db
     /// recover` path (which backs up the original before rebuilding).
+    fn startup_integrity_pool(&self) -> sqlx::SqlitePool {
+        // SQLite's FTS5 xIntegrity callback can retain a structure from a prior
+        // search on a pooled connection. Verification owns a fresh read-only
+        // connection, with the same VFS and hybrid functions as normal reads.
+        crate::storage::bulk::pool_options(self.storage.clone(), true)
+            .max_connections(1)
+            .connect_lazy_with((*self.pool.connect_options()).clone())
+    }
+
     pub(crate) fn spawn_startup_integrity_check(&self, database_path: Arc<str>) {
-        let pool = self.pool.clone();
+        let pool = self.startup_integrity_pool();
+        crate::recovery::register_database_pool(std::path::Path::new(&*database_path), &pool);
+        let timeout = Duration::from_secs(self.storage.as_ref().map_or_else(
+            || crate::storage::StorageBudget::default().lifecycle_timeout_secs,
+            |storage| storage.descriptor.budget.lifecycle_timeout_secs,
+        ));
         let health = self.write_queue_health.clone();
         let shutdown = self.close_token.clone();
         let persistent_failure_hook = self.persistent_failure_hook.clone();
         tokio::spawn(async move {
             // Let boot settle so the scan doesn't compete with migrations
             // and the first capture writes for I/O.
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                _ = shutdown.cancelled() => { pool.close().await; return; }
+            }
             // quick_check(1) stops after the first error — we only need a
             // yes/no signal here, not the full corruption inventory.
-            match sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
-                .fetch_one(&pool)
-                .await
-            {
+            let result = async {
+                let mut connection = crate::cancellable_query::CancellableReadConnection::acquire(
+                    &pool,
+                    std::time::Instant::now() + timeout,
+                    shutdown.clone(),
+                )
+                .await?;
+                let result = sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
+                    .fetch_one(&mut *connection)
+                    .await;
+                connection.release().await?;
+                result
+            }
+            .await;
+            pool.close().await;
+            if shutdown.is_cancelled() {
+                return;
+            }
+            match result {
                 Ok(result) if result == "ok" => {
                     debug!("startup integrity check: ok");
                 }
@@ -1620,6 +1659,50 @@ mod wal_maintenance_tests {
     use sqlx::Row;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn startup_integrity_uses_fresh_fts_state_after_concurrent_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DbConfig::for_tier(DeviceTier::Low);
+        config.read_pool_max = 1;
+        config.read_pool_min = 1;
+        let db = DatabaseManager::new(dir.path().join("db.sqlite").to_str().unwrap(), config)
+            .await
+            .unwrap();
+        db.execute_raw_sql_write(
+            "CREATE VIRTUAL TABLE integrity_fts USING fts5(t,content='',contentless_delete=1)",
+        )
+        .await
+        .unwrap();
+        db.execute_raw_sql_write("INSERT INTO integrity_fts(integrity_fts,rank) VALUES('pgsz',64)")
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            db.execute_raw_sql_write("INSERT INTO integrity_fts(t) VALUES('one two three four five six seven eight nine ten eleven twelve')").await.unwrap();
+        }
+        let mut reused = db.pool.acquire().await.unwrap();
+        sqlx::query("SELECT count(*) FROM integrity_fts WHERE integrity_fts MATCH 'one'")
+            .fetch_one(&mut *reused)
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            db.execute_raw_sql_write("INSERT INTO integrity_fts(t) VALUES('one two three four five six seven eight nine ten eleven twelve')").await.unwrap();
+        }
+        drop(reused);
+        let fresh = db.startup_integrity_pool();
+        let result: String = sqlx::query_scalar("PRAGMA quick_check(1)")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(result, "ok", "valid FTS writes must not be quarantined");
+        let query_only: i64 = sqlx::query_scalar("PRAGMA query_only")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(query_only, 1);
+        fresh.close().await;
+        db.close().await;
+    }
 
     #[tokio::test]
     async fn raw_sql_writes_wait_for_coordinator_and_reads_return_rows() {

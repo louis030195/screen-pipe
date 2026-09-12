@@ -132,6 +132,22 @@ fn lookup(db: &Connection, storage: &HybridStorage, id: i64) -> Result<Option<Re
     let Some((_, path, hash)) = location(db, id)? else {
         return Ok(None);
     };
+    #[cfg(feature = "storage-bench-experiments")]
+    if crate::storage::experiments::enabled("element-cache") {
+        let index = storage
+            .element_index(&path, &hash)
+            .map_err(|_| failure("element index unavailable"))?;
+        let Ok(position) = index.rows.binary_search_by_key(&id, |r| r.id) else {
+            return Ok(None);
+        };
+        let rows = storage
+            .bulk_frame_records(&path, &hash, index.rows[position].frame, &index)
+            .map_err(|_| failure("element archive unavailable"))?;
+        return Ok(rows
+            .binary_search_by_key(&id, |r| r.id)
+            .ok()
+            .map(|i| rows[i].clone()));
+    }
     let rows = storage
         .bulk_records(&path, &hash, 0)
         .map_err(|_| failure("element archive unavailable"))?;
@@ -819,10 +835,24 @@ unsafe impl VTabCursor for Cursor {
                     _ => (),
                 }
                 let (path, hash) = self.archive_location.as_ref().unwrap();
-                full = self
-                    .storage
-                    .bulk_records(path, hash, 0)
-                    .map_err(|_| failure("element archive unavailable"))?;
+                #[cfg(feature = "storage-bench-experiments")]
+                let cached = crate::storage::experiments::enabled("element-cache");
+                #[cfg(not(feature = "storage-bench-experiments"))]
+                let cached = false;
+                full = if cached {
+                    #[cfg(feature = "storage-bench-experiments")]
+                    {
+                        self.storage
+                            .bulk_frame_records(path, hash, row.frame, archive)
+                    }
+                    #[cfg(not(feature = "storage-bench-experiments"))]
+                    {
+                        unreachable!()
+                    }
+                } else {
+                    self.storage.bulk_records(path, hash, 0)
+                }
+                .map_err(|_| failure("element archive unavailable"))?;
                 let position = full
                     .binary_search_by_key(&row.id, |r| r.id)
                     .map_err(|_| failure("element row is absent"))?;

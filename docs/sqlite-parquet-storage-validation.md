@@ -91,6 +91,10 @@ Element-search/count cases took 2.72–5.04 seconds in hybrid mode and 20–1,28
 
 ## Concurrent reader validation
 
+HTTP benchmarks using the production router, including latency, throughput, CPU, memory, and remaining deadline and mixed-read/write failures, are recorded in [Local HTTP API benchmarks](sqlite-parquet-api-benchmarks.md).
+
+Subsequent [API method experiments](sqlite-parquet-api-method-experiments.md) measure opt-in snapshot, cache, decoding, and element-lookup candidates against SQLite. These experiments are separate from the default implementation described here.
+
 On 2026-09-12, deterministic database tests verified independent cold-file decoding, same-file decode sharing, cached reads while both decoder slots are occupied, capture writes during a paused read, and SQL admission during file unlinking. The same transaction/stream scenario runs against SQLite and hybrid storage: an old snapshot begins with metadata only, replacements commit on another connection, new readers see replacements, old readers retain complete original records, and cleanup removes the originals after both the transaction and stream finish. Shutdown also releases SQL workers waiting for decoder admission.
 
 The existing private source and migrated copies were replayed at 1, 4, and 8 concurrent requests. Each schedule contains 16 requests: four complete frame payloads, four complete element trees, four full-history element searches with counts, and four audio projections. All 96 serialized request results matched the indexed SQLite baseline. Each measurement reopened its manager; SQLite and OS caches were shared. These are local observations, with cold-disk and hundreds-of-gigabytes workloads still unmeasured.

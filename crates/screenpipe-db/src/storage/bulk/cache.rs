@@ -21,6 +21,14 @@ struct State {
 impl Cached {
     fn bytes(&self) -> usize {
         match self {
+            #[cfg(feature = "storage-bench-experiments")]
+            Self::Frames(rows) => {
+                rows.capacity() * std::mem::size_of::<super::super::FramePayload>()
+                    + rows
+                        .iter()
+                        .map(super::super::FramePayload::bytes)
+                        .sum::<usize>()
+            }
             Self::ElementIndex(index) => index.bytes(),
             Self::Records(rows) => {
                 rows.capacity() * std::mem::size_of::<Record>()

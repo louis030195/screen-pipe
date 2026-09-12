@@ -13,6 +13,7 @@ edition.workspace = true
 
 [features]
 storage-fault-injection = []
+storage-bench-experiments = []
 
 [dependencies]
 uuid = { workspace = true }

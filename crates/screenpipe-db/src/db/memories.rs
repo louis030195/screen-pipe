@@ -43,7 +43,7 @@ impl DatabaseManager {
              FROM memories WHERE id = ?1",
         )
         .bind(id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *self.acquire_read().await?)
         .await
     }
 
@@ -116,7 +116,7 @@ impl DatabaseManager {
                     created_at, updated_at, sync_modified_by \
              FROM memories",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.acquire_read().await?)
         .await
     }
 
@@ -230,7 +230,7 @@ impl DatabaseManager {
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT sync_uuid FROM memories WHERE id = ?1")
                 .bind(id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *self.acquire_read().await?)
                 .await?;
         Ok(row.and_then(|(u,)| u))
     }
@@ -399,7 +399,7 @@ impl DatabaseManager {
             let mut connection = self.acquire_search_read().await?;
             query.fetch_all(&mut *connection).await
         } else {
-            query.fetch_all(&self.pool).await
+            query.fetch_all(&mut *self.acquire_read().await?).await
         }
     }
 
@@ -518,7 +518,7 @@ impl DatabaseManager {
             let mut connection = self.acquire_search_read().await?;
             query.fetch_one(&mut *connection).await
         } else {
-            query.fetch_one(&self.pool).await
+            query.fetch_one(&mut *self.acquire_read().await?).await
         }
     }
 
@@ -533,7 +533,7 @@ impl DatabaseManager {
              WHERE j.value IS NOT NULL AND j.value != '' \
              ORDER BY j.value",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.acquire_read().await?)
         .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
@@ -636,7 +636,7 @@ impl DatabaseManager {
         .bind(candidate_limit)
         .bind(limit)
         .bind(offset)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.acquire_read().await?)
         .await
     }
 }

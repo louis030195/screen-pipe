@@ -475,7 +475,7 @@ impl DatabaseManager {
         let rows: Vec<(String, String, i64)> = sqlx::query_as(sql)
             .bind(start_time)
             .bind(end_time)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *self.acquire_read().await?)
             .await?;
 
         Ok(rows)
@@ -625,7 +625,7 @@ impl DatabaseManager {
         )
         .bind(app_name)
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.acquire_read().await?)
         .await?;
 
         Ok(rows.into_iter().map(UiEventRecord::from).collect())
@@ -672,7 +672,7 @@ impl DatabaseManager {
         let rows: Vec<UiEventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(query)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *self.acquire_read().await?)
             .await?;
 
         Ok(rows.into_iter().map(UiEventRecord::from).collect())

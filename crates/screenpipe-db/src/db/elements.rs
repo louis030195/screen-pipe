@@ -173,7 +173,7 @@ LIMIT ? OFFSET ?
         // Bind limit and offset
         query_builder = query_builder.bind(limit as i64).bind(offset as i64);
 
-        let mut rows = query_builder.fetch_all(&self.pool).await?;
+        let mut rows = query_builder.fetch_all(&mut *self.acquire_read().await?).await?;
         self.hydrate_frame_rows(&mut rows).await?;
 
         Ok(rows
@@ -254,7 +254,13 @@ LIMIT ? OFFSET ?
 
         let hybrid = self.storage.as_ref().is_some_and(|s| s.has_bulk());
         let grouped = !use_fts && hybrid;
-        let from = if grouped {
+        #[cfg(feature = "storage-bench-experiments")]
+        let lookup = hybrid && use_fts && crate::storage::experiments::enabled("element-lookup");
+        #[cfg(not(feature = "storage-bench-experiments"))]
+        let lookup = false;
+        let from = if lookup {
+            "_benchmark_element_search e JOIN frames f ON f.id=e.frame_id"
+        } else if grouped {
             "frames f CROSS JOIN elements e ON e.frame_id=f.id"
         } else {
             "elements e JOIN frames f ON f.id=e.frame_id"
@@ -279,7 +285,9 @@ LIMIT ? OFFSET ?
                ORDER BY {frame_order} DESC, e.sort_order ASC, e.id ASC
                LIMIT ? OFFSET ?"#
         ) };
-        let count_source = if grouped {
+        let count_source = if lookup {
+            "_benchmark_element_search"
+        } else if grouped {
             "_bulk_element_counts"
         } else {
             "elements"
@@ -339,8 +347,8 @@ LIMIT ? OFFSET ?
         data_query = data_query.bind(limit as i64).bind(offset as i64);
 
         let (rows, total) = tokio::try_join!(
-            data_query.fetch_all(&self.pool),
-            count_query.fetch_one(&self.pool),
+            async { data_query.fetch_all(&mut *self.acquire_read().await?).await },
+            async { count_query.fetch_one(&mut *self.acquire_read().await?).await },
         )?;
 
         let elements: Vec<Element> = rows.into_iter().map(Element::from).collect();
@@ -364,7 +372,7 @@ LIMIT ? OFFSET ?
             "SELECT COALESCE(elements_ref_frame_id, id) FROM frames WHERE id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *self.acquire_read().await?)
         .await?
         .unwrap_or(frame_id);
 
@@ -379,7 +387,7 @@ LIMIT ? OFFSET ?
             query = query.bind(src.to_string());
         }
 
-        let rows = query.fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(&mut *self.acquire_read().await?).await?;
         Ok(rows.into_iter().map(Element::from).collect())
         }).await
     }
@@ -536,7 +544,7 @@ WHERE f.id IN ({placeholders})
             hydration_query = hydration_query.bind(row.id);
         }
 
-        let mut hydrated = hydration_query.fetch_all(&self.pool).await?;
+        let mut hydrated = hydration_query.fetch_all(&mut *self.acquire_read().await?).await?;
         self.hydrate_frame_rows(&mut hydrated).await?;
         let mut matches_by_id: HashMap<i64, SearchMatch> = hydrated
             .iter()
