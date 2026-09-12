@@ -494,3 +494,115 @@ async fn production_clone_write_replay() {
         serde_json::json!({"frame_transactions": frames, "element_batches": elements})
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SCREENPIPE_STORAGE_TEST_CLONE and SCREENPIPE_STORAGE_TEST_HYBRID private fixtures"]
+async fn production_clone_concurrent_reads() {
+    use futures::{stream, StreamExt, TryStreamExt};
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+
+    async fn query(db: &DatabaseManager, case: usize, frame: i64) -> Result<Vec<u8>, sqlx::Error> {
+        match case % 4 {
+            0 => {
+                let mut rows = db.frame_payloads(&[frame], Projection::All).await?;
+                for row in rows.values_mut() {
+                    row.generation = 0;
+                }
+                serde_json::to_vec(&rows).map_err(storage_error)
+            }
+            1 => serde_json::to_vec(&db.get_frame_elements(frame, None).await?)
+                .map_err(storage_error),
+            2 => serde_json::to_vec(
+                &db.search_elements(
+                    "meeting",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(case % 8 == 2),
+                    25,
+                    7,
+                )
+                .await?,
+            )
+            .map_err(storage_error),
+            _ => serde_json::to_vec(
+                &db.query_raw_sql(
+                    "SELECT id,transcription FROM audio_transcriptions ORDER BY id DESC LIMIT 64",
+                )
+                .await?,
+            )
+            .map_err(storage_error),
+        }
+    }
+    let source_path = std::env::var("SCREENPIPE_STORAGE_TEST_CLONE").unwrap();
+    let hybrid_path = std::env::var("SCREENPIPE_STORAGE_TEST_HYBRID").unwrap();
+    let source = Arc::new(
+        DatabaseManager::new_with_storage(&source_path, Default::default(), None, false, false)
+            .await
+            .unwrap(),
+    );
+    let ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM frames WHERE id % 499=0 ORDER BY id LIMIT 16")
+            .fetch_all(&source.pool)
+            .await
+            .unwrap();
+    assert_eq!(ids.len(), 16);
+    let mut expected = Vec::new();
+    for (case, &id) in ids.iter().enumerate() {
+        expected.push(Sha256::digest(query(&source, case, id).await.unwrap()).to_vec());
+    }
+    source.close().await;
+    for concurrency in [1, 4, 8] {
+        for (mode, path) in [("sqlite", &source_path), ("hybrid", &hybrid_path)] {
+            // Reopen for each measurement. SQLite/OS caches may remain warm;
+            // the in-process decoded payload cache starts empty.
+            let resolved = super::resolve_database_path(Path::new(path)).unwrap();
+            let storage = HybridStorage::for_index(&resolved).unwrap();
+            assert_eq!(storage.is_some(), mode == "hybrid");
+            let db = Arc::new(
+                DatabaseManager::new_with_storage(
+                    resolved.to_str().unwrap(),
+                    Default::default(),
+                    storage,
+                    false,
+                    false,
+                )
+                .await
+                .unwrap(),
+            );
+            let started = Instant::now();
+            let results: Vec<_> =
+                stream::iter(ids.iter().copied().enumerate().map(|(case, id)| {
+                    let db = db.clone();
+                    async move {
+                        let start = Instant::now();
+                        let bytes = query(&db, case, id).await?;
+                        Ok::<_, sqlx::Error>((
+                            case,
+                            start.elapsed().as_secs_f64() * 1000.0,
+                            Sha256::digest(bytes).to_vec(),
+                        ))
+                    }
+                }))
+                .buffer_unordered(concurrency)
+                .try_collect()
+                .await
+                .unwrap();
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let mut timings = Vec::new();
+            for (case, ms, hash) in results {
+                assert_eq!(hash, expected[case], "complete query parity at case {case}");
+                timings.push(ms);
+            }
+            db.close().await;
+            println!(
+                "{}",
+                serde_json::json!({"mode": mode, "concurrency": concurrency, "queries": ids.len(), "elapsed_ms": elapsed_ms, "median_ms": percentile(&mut timings,0.5), "p95_ms": percentile(&mut timings,0.95), "parity":true,"cache":"fresh manager, shared SQLite/OS caches"})
+            );
+        }
+    }
+}

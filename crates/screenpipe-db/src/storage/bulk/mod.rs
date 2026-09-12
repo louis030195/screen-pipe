@@ -4,20 +4,22 @@
 //! Ordered element records and typed payload columns share bounded Parquet
 //! files. SQLite owns pending writes, search postings, and relational lookups.
 
+mod cache;
 mod codec;
 mod connection;
 mod element_index;
 pub(super) mod elements;
 mod lifecycle;
 mod schema;
+#[cfg(test)]
+mod tests;
 
 use super::{storage_error, HybridStorage};
 pub(crate) use connection::pool_options;
 pub(crate) use connection::register_hash;
 pub(super) use lifecycle::export;
 pub(super) use schema::bootstrap;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::AtomicUsize, Arc, Mutex};
 
 pub const CAPABILITY: &str = "parquet-bulk-v1";
 pub const FILE_ROWS: usize = 32_768;
@@ -193,8 +195,11 @@ impl Record {
 
 #[derive(Default)]
 pub(crate) struct Runtime {
-    cache: Mutex<VecDeque<(String, usize, Cached)>>,
+    cache: cache::Cache,
+    statements: AtomicUsize,
     element_frames: Mutex<Option<(String, Arc<std::collections::HashMap<i64, Vec<usize>>>)>>,
+    #[cfg(test)]
+    decode_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
 
 #[derive(Clone)]
@@ -203,43 +208,18 @@ enum Cached {
     ElementIndex(Arc<element_index::ElementIndex>),
 }
 
-fn cached(cache: &mut VecDeque<(String, usize, Cached)>, key: &str) -> Option<Cached> {
-    let index = cache.iter().position(|(k, _, _)| k == key)?;
-    let hit = cache.remove(index).unwrap();
-    let value = hit.2.clone();
-    cache.push_back(hit);
-    Some(value)
-}
-
-fn retain(
-    cache: &mut VecDeque<(String, usize, Cached)>,
-    key: String,
-    bytes: usize,
-    value: Cached,
-    budget: usize,
-) {
-    let mut retained: usize = cache.iter().map(|entry| entry.1).sum();
-    while retained + bytes > budget {
-        let Some((_, size, _)) = cache.pop_front() else {
-            break;
-        };
-        retained -= size;
-    }
-    if bytes <= budget {
-        cache.push_back((key, bytes, value));
-    }
-}
-
 impl HybridStorage {
     fn element_frame_rows(
         &self,
         key: String,
         rows: &[element_index::Entry],
     ) -> Result<Arc<std::collections::HashMap<i64, Vec<usize>>>, sqlx::Error> {
-        let mut cache = self.bulk.element_frames.lock().map_err(storage_error)?;
-        if let Some((existing, frames)) = &*cache {
-            if existing == &key {
-                return Ok(frames.clone());
+        {
+            let cache = self.bulk.element_frames.lock().map_err(storage_error)?;
+            if let Some((existing, frames)) = &*cache {
+                if existing == &key {
+                    return Ok(frames.clone());
+                }
             }
         }
         let mut frames: std::collections::HashMap<i64, Vec<usize>> = Default::default();
@@ -247,7 +227,7 @@ impl HybridStorage {
             frames.entry(row.frame).or_default().push(index);
         }
         let frames = Arc::new(frames);
-        *cache = Some((key, frames.clone()));
+        *self.bulk.element_frames.lock().map_err(storage_error)? = Some((key, frames.clone()));
         Ok(frames)
     }
     pub(crate) fn has_bulk(&self) -> bool {
@@ -260,22 +240,17 @@ impl HybridStorage {
         hash: &str,
     ) -> Result<Arc<element_index::ElementIndex>, sqlx::Error> {
         let key = format!("index:{path}:{hash}");
-        let mut cache = self.bulk.cache.lock().map_err(storage_error)?;
-        if let Some(Cached::ElementIndex(index)) = cached(&mut cache, &key) {
-            return Ok(index);
-        }
-        let index = Arc::new(element_index::read(
-            &self.payload_path(std::path::Path::new(path))?,
-            hash,
-            &self.descriptor.budget,
-        )?);
-        retain(
-            &mut cache,
-            key,
-            index.bytes(),
-            Cached::ElementIndex(index.clone()),
-            self.descriptor.budget.decode_bytes,
-        );
+        let value = self.bulk.cache.get_or_load(self, key, || {
+            let index = element_index::read(
+                &self.payload_path(std::path::Path::new(path))?,
+                hash,
+                &self.descriptor.budget,
+            )?;
+            Ok(Cached::ElementIndex(Arc::new(index)))
+        })?;
+        let Cached::ElementIndex(index) = value else {
+            unreachable!()
+        };
         Ok(index)
     }
 
@@ -286,44 +261,21 @@ impl HybridStorage {
         table: usize,
     ) -> Result<Arc<Vec<Record>>, sqlx::Error> {
         let key = format!("records:{path}:{hash}");
-        let mut cache = self.bulk.cache.lock().map_err(storage_error)?;
-        if let Some(Cached::Records(rows)) = cached(&mut cache, &key) {
-            return Ok(rows);
-        }
-        let table = TABLES
-            .get(table)
-            .ok_or_else(|| storage_error("unknown bulk table"))?;
-        let rows = Arc::new(codec::read(
-            &self.payload_path(std::path::Path::new(path))?,
-            hash,
-            table,
-            &self.descriptor.budget,
-        )?);
-        // Parallel data/count queries retain their working files within one
-        // byte budget. Include owned row/value arrays and string allocations;
-        // numeric values occupy their enum slots rather than separate buffers.
-        let bytes = rows.capacity() * std::mem::size_of::<Record>()
-            + rows
-                .iter()
-                .map(|row| {
-                    row.values.capacity() * std::mem::size_of::<Value>()
-                        + row
-                            .values
-                            .iter()
-                            .map(|value| match value {
-                                Value::Text(text) => text.capacity(),
-                                _ => 0,
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>();
-        retain(
-            &mut cache,
-            key,
-            bytes,
-            Cached::Records(rows.clone()),
-            self.descriptor.budget.decode_bytes,
-        );
+        let value = self.bulk.cache.get_or_load(self, key, || {
+            let table = TABLES
+                .get(table)
+                .ok_or_else(|| storage_error("unknown bulk table"))?;
+            let rows = codec::read(
+                &self.payload_path(std::path::Path::new(path))?,
+                hash,
+                table,
+                &self.descriptor.budget,
+            )?;
+            Ok(Cached::Records(Arc::new(rows)))
+        })?;
+        let Cached::Records(rows) = value else {
+            unreachable!()
+        };
         Ok(rows)
     }
 }

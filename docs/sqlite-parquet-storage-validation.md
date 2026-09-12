@@ -3,7 +3,7 @@
 > **Status: explicit CLI opt-in.** Existing SQLite roots retain their current mode. This implementation has local macOS validation; the architecture's cross-platform release qualification remains separate.
 
 <!-- doc-covers: crates/screenpipe-db/src/storage/, crates/screenpipe-db/tests/hybrid_storage.rs, crates/screenpipe-db/tests/bulk_storage.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/archive.rs, crates/screenpipe-engine/src/sync_provider.rs, crates/screenpipe-redact/src/worker/hybrid.rs, crates/screenpipe-redact/tests/hybrid_frames.rs, apps/screenpipe-app-tauri/src-tauri/src/data_sync.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs -->
-<!-- doc-verified: e67f66b502fbe24415162f5baa8a6e5cae766a00 -->
+<!-- doc-verified: f4927e7821a7a615717e9c24da3a0b81be7b50c5 -->
 
 ## Operations
 
@@ -31,7 +31,7 @@ An unactivated migration or unfinished index maintenance keeps normal writer adm
 
 The manager provides logical records to search, Timeline, frame details, keyword/accessibility queries, late OCR, retention, redaction, sync, and cloud archive. Frame text and detail JSON use typed payload endpoints. Complete element records use ordered Parquet ranges behind a writable SQLite virtual table. Audio and meeting transcripts, UI-event payloads, semantic bodies, completed execution logs, and output previews use Parquet columns behind logical SQL views. SQLite retains compact lookup/count summaries, relationship enforcement, FTS postings, vectors, and live state. The existing `/raw_sql` surface reads complete bulk-table rows and resident frame metadata.
 
-Element searches filter and order a compact metadata projection, then retrieve complete records for the selected page. Metadata and full records share a cache bounded by the configured decoded-byte budget. The comparison command reports element search/count timings separately from primary screen/audio search and from deferred element writes.
+Element searches filter and order a compact metadata projection, then retrieve complete records for the selected page. Metadata and full records share a cache bounded by the configured decoded-byte budget. Cache access stays short; independent cold files decode concurrently, same-file readers share an in-flight decode, and cache hits proceed while decoder slots are occupied. Frame and bulk reads share the configured decoder concurrency. SQL snapshot pins preserve old files across writes and allow new snapshots during obsolete-file removal. The comparison command reports element search/count timings separately from primary screen/audio search and from deferred element writes.
 
 Hybrid writes use the existing single writer with durable WAL commits. Immutable files publish as complete frame pairs or bulk column batches after round-trip verification. Generation checks cover replacement and export admission; file leases cover SQL statements/transactions, decode, backup, and transport lifetimes. Element replacements update grouped counts and search postings in the same transaction, with parent references checked at commit. Its external-content FTS index uses `columnsize=0` and retrieves lengths for ranking from complete records. Per-column overrides preserve explicit NULL and partial updates in the other six tables, and audio duplicate identity covers staged and sealed text. Privacy completion records the configured surfaces and policy for each generation, including archived-history replacements and retryable detector/JSON failures.
 
@@ -88,6 +88,31 @@ A separate comparison after activation re-hashed all 20,669,912 logical rows wit
 The write measurements come from the final writer's focused release replay: 128 frames containing 7,983,638 bytes of real payloads and 32 element batches containing 8,845 elements, with identical synthetic metadata and separate temporary roots for each mode. Sealing the replayed frames took 70.74 ms. Prepared statements are reused for each element transaction and finalized on commit preparation or rollback. The remaining median overhead is approximately 0.25 ms per frame transaction and 5.30 ms per element batch; these are database costs, with capture and detector work excluded.
 
 Element-search/count cases took 2.72–5.04 seconds in hybrid mode and 20–1,286 ms in SQLite. Full-history element search remains slower despite projected metadata reads and late payload retrieval. The primary screen/audio search improvement and this element-search cost are distinct results. Both query modes used one fresh manager followed by shared SQLite and OS caches; no cold-disk result is claimed.
+
+## Concurrent reader validation
+
+On 2026-09-12, deterministic database tests verified independent cold-file decoding, same-file decode sharing, cached reads while both decoder slots are occupied, capture writes during a paused read, and SQL admission during file unlinking. The same transaction/stream scenario runs against SQLite and hybrid storage: an old snapshot begins with metadata only, replacements commit on another connection, new readers see replacements, old readers retain complete original records, and cleanup removes the originals after both the transaction and stream finish. Shutdown also releases SQL workers waiting for decoder admission.
+
+The existing private source and migrated copies were replayed at 1, 4, and 8 concurrent requests. Each schedule contains 16 requests: four complete frame payloads, four complete element trees, four full-history element searches with counts, and four audio projections. All 96 serialized request results matched the indexed SQLite baseline. Each measurement reopened its manager; SQLite and OS caches were shared. These are local observations, with cold-disk and hundreds-of-gigabytes workloads still unmeasured.
+
+| Concurrent requests | SQLite elapsed, 16 requests | Hybrid elapsed, 16 requests |
+|---|---:|---:|
+| 1 | 0.386 s | 12.749 s |
+| 4 | 1.472 s | 4.621 s |
+| 8 | 1.508 s | 4.651 s |
+
+The measured hybrid batch completes about 2.76 times faster with four concurrent requests. Its full-history element searches still dominate elapsed time and remain slower than SQLite. Peak process RSS was 1,090,928,640 bytes across both modes and all schedules in the direct release-test invocation; this includes SQLite caches, decoded payloads, results and allocator retention. The configured read-pool size and persisted storage format are unchanged. Cold frame and bulk work share two decoder slots; cache hits use the existing read pool independently.
+
+The capture replay also passed with 128 frames (7,983,638 payload bytes) and 32 deferred batches (8,845 elements). SQLite/hybrid median frame commits were 0.485/0.797 ms, and median element batches were 2.524/8.515 ms. These are local database measurements; capture callbacks, detector work and battery cost are excluded.
+
+| Command | Result |
+|---|---|
+| `cargo test -p screenpipe-db --lib storage:: -- --nocapture` | 11 passed, including five concurrent-reader regressions; two private-fixture benchmarks ignored |
+| `cargo test -p screenpipe-db --features storage-fault-injection --test bulk_storage --test hybrid_storage` | 21 passed |
+| `cargo test -p screenpipe-redact --test hybrid_frames` | 3 passed, including archived-data privacy and file removal |
+| `cargo test -p screenpipe-db --lib close` | 3 passed |
+| `SCREENPIPE_STORAGE_TEST_CLONE=<private-source.sqlite> SCREENPIPE_STORAGE_TEST_HYBRID=<private-hybrid-root>/db.sqlite cargo test -p screenpipe-db --release --lib production_clone_concurrent_reads -- --ignored --nocapture` | Passed; 96 request results matched. The table and RSS above use a subsequent direct invocation of the built release test executable, excluding compilation. |
+| `SCREENPIPE_STORAGE_TEST_CLONE=<private-source.sqlite> <release-test-executable> production_clone_write_replay --ignored --nocapture` | Passed; complete frame/element write replay and sealing |
 
 ## Previous frame-only measurement
 

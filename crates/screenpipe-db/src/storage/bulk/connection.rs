@@ -8,14 +8,37 @@ use sqlx::{sqlite::SqlitePoolOptions, SqliteConnection};
 use std::{
     collections::HashSet,
     ffi::{c_int, c_void, CStr},
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex},
 };
-use tokio::sync::OwnedRwLockReadGuard;
 
 #[derive(Default)]
 struct Statements {
     active: HashSet<usize>,
-    lease: Option<OwnedRwLockReadGuard<()>>,
+    lease: Option<StatementLease>,
+}
+
+struct StatementLease(Arc<HybridStorage>);
+
+impl StatementLease {
+    fn new(storage: &Arc<HybridStorage>) -> Self {
+        storage.bulk.statements.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(storage))
+    }
+}
+
+impl Drop for StatementLease {
+    fn drop(&mut self) {
+        self.0.bulk.statements.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl HybridStorage {
+    /// Called after retiring locators under the writer permit. A snapshot
+    /// admitted after this cutoff sees current files; existing snapshots pin
+    /// their old files through statement completion or transaction end.
+    pub(crate) fn sql_readers_active(&self) -> bool {
+        self.bulk.statements.load(Ordering::SeqCst) != 0
+    }
 }
 
 struct Context {
@@ -178,19 +201,14 @@ unsafe extern "C" fn trace(
     _: *mut c_void,
 ) -> c_int {
     let context = &*pointer.cast::<Context>();
-    // SQLite can also execute nested metadata statements during preparation
-    // on an async caller. Acquisition stays nonblocking there. A concurrent
-    // reclamation fails the statement before it can observe missing files.
-    // The lease covers streaming statements and explicit transactions.
+    // Pin before SQLite opens a snapshot, including nested statements during
+    // preparation. Admission is independent of file unlinking: new snapshots
+    // see committed current locators while older snapshots defer reclamation.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut state = context.statements.lock().map_err(storage_error)?;
         if event == ffi::SQLITE_TRACE_STMT as u32 {
             if state.lease.is_none() {
-                state.lease = Some(
-                    Arc::clone(&context.storage.leases)
-                        .try_read_owned()
-                        .map_err(|_| storage_error("payload reclamation in progress"))?,
-                );
+                state.lease = Some(StatementLease::new(&context.storage));
             }
             state.active.insert(statement as usize);
         } else if event == ffi::SQLITE_TRACE_PROFILE as u32 {

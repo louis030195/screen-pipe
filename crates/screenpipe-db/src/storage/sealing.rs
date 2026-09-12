@@ -431,6 +431,9 @@ impl HybridStorage {
             let Ok(_leases) = Arc::clone(&self.leases).try_write_owned() else {
                 return Ok(removed);
             };
+            if self.sql_readers_active() {
+                return Ok(removed);
+            }
             super::faults::checkpoint("files_retired");
             for row in &retired {
                 for column in ["search_path", "detail_path"] {

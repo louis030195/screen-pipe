@@ -290,7 +290,14 @@ impl HybridStorage {
             let Ok(_leases) = Arc::clone(&self.leases).try_write_owned() else {
                 return Ok(0);
             };
-            self.bulk.cache.lock().map_err(storage_error)?.clear();
+            if self.sql_readers_active() {
+                return Ok(0);
+            }
+            let paths = retired
+                .iter()
+                .map(|row| row.try_get("path"))
+                .collect::<Result<Vec<String>, _>>()?;
+            self.bulk.cache.retire(&paths)?;
             for row in &retired {
                 let path = self.payload_path(Path::new(row.try_get::<&str, _>("path")?))?;
                 match std::fs::remove_file(&path) {
