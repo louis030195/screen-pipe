@@ -24,6 +24,7 @@ sqlx = { workspace = true, features = [
 ] }
 sqlite-vec = "0.1.3"
 libsqlite3-sys = { workspace = true }
+rusqlite = { workspace = true, features = ["vtab"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true, features = ["std"] }

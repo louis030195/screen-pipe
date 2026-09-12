@@ -61,6 +61,14 @@ impl DatabaseManager {
         &self,
         query: &str,
     ) -> Result<serde_json::Value, sqlx::Error> {
+        if self.storage.as_ref().is_some_and(|s| s.has_bulk()) {
+            let mut tx = self.begin_immediate_with_retry().await?;
+            let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+                .fetch_all(&mut **tx.conn())
+                .await?;
+            tx.commit().await?;
+            return Ok(Self::raw_sql_rows(&rows));
+        }
         let writer = self.coordinated_writer().lock().await?;
         Self::raw_sql_on_pool(writer.pool(), query).await
     }
@@ -75,12 +83,20 @@ impl DatabaseManager {
             .fetch_all(pool)
             .await?;
 
+        Ok(Self::raw_sql_rows(&rows))
+    }
+
+    fn raw_sql_rows(rows: &[sqlx::sqlite::SqliteRow]) -> serde_json::Value {
         let result: Vec<serde_json::Map<String, serde_json::Value>> = rows
             .iter()
             .map(|row| {
                 let mut map = serde_json::Map::new();
                 for (i, column) in row.columns().iter().enumerate() {
                     if let Ok(value) = row.try_get_raw(i) {
+                        if value.is_null() {
+                            map.insert(column.name().to_string(), serde_json::Value::Null);
+                            continue;
+                        }
                         let json_value = match value.type_info().name() {
                             "TEXT" => {
                                 let s: String = row.try_get(i).unwrap_or_default();
@@ -105,9 +121,7 @@ impl DatabaseManager {
             })
             .collect();
 
-        Ok(serde_json::Value::Array(
-            result.into_iter().map(serde_json::Value::Object).collect(),
-        ))
+        serde_json::Value::Array(result.into_iter().map(serde_json::Value::Object).collect())
     }
 
     pub async fn delete_time_range(

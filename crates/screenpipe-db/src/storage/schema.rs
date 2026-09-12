@@ -5,6 +5,59 @@ use super::{storage_error, StorageDescriptor};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
 
+/// Execute trusted construction statements while the offline lifecycle owns
+/// the writer permit. Callers supply simple DDL/DML, without trigger bodies or
+/// semicolons inside literals. Each completed statement releases its WAL pages
+/// before the next operation; normal capture keeps its shared checkpoint policy.
+pub(super) async fn construction_sql(
+    conn: &mut SqliteConnection,
+    sql: &str,
+) -> Result<(), sqlx::Error> {
+    for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&mut *conn)
+            .await?;
+        construction_checkpoint(conn).await?;
+        super::faults::checkpoint("migration_schema_step");
+    }
+    Ok(())
+}
+
+pub(super) async fn construction_checkpoint(
+    conn: &mut SqliteConnection,
+) -> Result<(), sqlx::Error> {
+    let row = sqlx::query("PRAGMA wal_checkpoint(RESTART)")
+        .fetch_one(&mut *conn)
+        .await?;
+    if row.try_get::<i64, _>(0)? != 0 {
+        return Err(storage_error("offline construction has an active reader"));
+    }
+    Ok(())
+}
+
+/// Backfill by primary-key windows so construction WAL is reused between
+/// batches. Both statements are static SQL supplied by schema construction.
+pub(super) async fn construction_rows(
+    conn: &mut SqliteConnection,
+    statement: &str,
+    source: &str,
+    batch_rows: usize,
+) -> Result<(), sqlx::Error> {
+    let mut after = None;
+    loop {
+        let lower = after.map_or_else(|| "1".to_owned(), |id: i64| format!("id>{id}"));
+        let last: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT max(id) FROM (SELECT id FROM {source} WHERE {lower} ORDER BY id LIMIT {batch_rows})"
+        )))
+        .fetch_one(&mut *conn)
+        .await?;
+        let Some(last) = last else { break };
+        construction_sql(conn, &format!("{statement} WHERE {lower} AND id<={last}")).await?;
+        after = Some(last);
+    }
+    Ok(())
+}
+
 pub(super) const LEGACY_FTS: &str =
     include_str!("../migrations/20260415000000_frames_fts_external_content.sql");
 
@@ -136,7 +189,15 @@ pub(crate) async fn bootstrap(
     conn: &mut SqliteConnection,
     descriptor: &StorageDescriptor,
 ) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(CATALOG).execute(&mut *conn).await?;
+    let (catalog, flags) = CATALOG.rsplit_once("UPDATE frames SET ").unwrap();
+    construction_sql(conn, catalog).await?;
+    construction_rows(
+        conn,
+        &format!("UPDATE frames SET {}", flags.trim().trim_end_matches(';')),
+        "frames",
+        128,
+    )
+    .await?;
     sqlx::query("INSERT INTO storage_metadata(singleton,descriptor,staging_limit,record_limit,policy,required_surfaces,writer_version) VALUES(1,?,?,?,?,?,?)")
         .bind(serde_json::to_string(descriptor).map_err(storage_error)?)
         .bind(descriptor.budget.staging_bytes as i64).bind(descriptor.budget.record_bytes as i64)
@@ -168,6 +229,13 @@ pub(crate) async fn bootstrap(
         .bind(checksum)
         .execute(&mut *conn)
         .await?;
+    if descriptor
+        .capabilities
+        .iter()
+        .any(|s| s == super::bulk::CAPABILITY)
+    {
+        super::bulk::bootstrap(conn).await?;
+    }
     Ok(())
 }
 
@@ -189,6 +257,19 @@ pub(crate) async fn verify(
             .await?;
     if checksum != format!("{:x}", Sha256::digest(format!("{CATALOG}{}", triggers()))) {
         return Err(storage_error("hybrid schema checksum mismatch"));
+    }
+    if descriptor
+        .capabilities
+        .iter()
+        .any(|s| s == super::bulk::CAPABILITY)
+    {
+        let checksum: String =
+            sqlx::query_scalar("SELECT checksum FROM _hybrid_migrations WHERE version=2")
+                .fetch_one(&mut *conn)
+                .await?;
+        if checksum != super::bulk::manifest_checksum() {
+            return Err(storage_error("bulk schema checksum mismatch"));
+        }
     }
     Ok(())
 }

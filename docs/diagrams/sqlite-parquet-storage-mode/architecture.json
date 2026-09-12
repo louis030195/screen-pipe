@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Screenpipe SQLite + Parquet storage — design",
+    "title": "Screenpipe SQLite + Parquet storage",
     "locale": "en",
     "quality_profile": "showcase",
     "animation": "none",
@@ -57,8 +57,8 @@
     {
       "id": "writer",
       "type": "backend",
-      "label": "Capture + late OCR",
-      "sublabel": "Frame transaction / immediate FTS",
+      "label": "Capture + enrichment",
+      "sublabel": "Atomic staging / immediate search",
       "pos": [
         680,
         55
@@ -72,7 +72,7 @@
       "id": "index",
       "type": "database",
       "label": "SQLite + write coordinator",
-      "sublabel": "Catalog / FTS / staging / vectors",
+      "sublabel": "FTS / count summaries / vectors",
       "pos": [
         680,
         270
@@ -85,8 +85,8 @@
     {
       "id": "reader",
       "type": "backend",
-      "label": "Payload reader",
-      "sublabel": "Snapshot pins / revision admission",
+      "label": "Logical record reader",
+      "sublabel": "Ranges / SQL views / file leases",
       "pos": [
         1010,
         270
@@ -100,7 +100,7 @@
       "id": "sealer",
       "type": "backend",
       "label": "Sealer + reclamation",
-      "sublabel": "Whole batches / durable retirement",
+      "sublabel": "Verified files / staged mutations",
       "pos": [
         680,
         515
@@ -114,7 +114,7 @@
       "id": "parquet",
       "type": "database",
       "label": "Immutable Parquet",
-      "sublabel": "Search text / detail JSON",
+      "sublabel": "Element records / text / JSON",
       "pos": [
         1010,
         515
@@ -302,20 +302,20 @@
   "cards": [
     {
       "dot": "slate",
-      "title": "Record ownership",
+      "title": "Storage ownership",
       "items": [
-        "One SQLite writer commits payloads, indexes and privacy state.",
-        "PII completion gates sealing; read admission checks the current revision.",
-        "Durable catalog retirement and drained leases precede file removal."
+        "SQLite owns search, grouped counts, relationships and mutable state.",
+        "Parquet owns complete element records and large text, JSON and logs.",
+        "Range and frame references resolve compressed history by record ID."
       ]
     },
     {
       "dot": "slate",
-      "title": "Database lifecycle",
+      "title": "Complete records throughout the lifecycle",
       "items": [
-        "Migration: freeze → build → verify → activate → clean up.",
-        "Format migration preserves record identity and upload checkpoints.",
-        "Local APIs serve complete records; remote search returns to callers."
+        "Logical SQL merges immutable records and transactional replacements.",
+        "Migration: freeze \u2192 build \u2192 verify records and search \u2192 activate \u2192 clean up.",
+        "Privacy completion gates sealing; retired files wait for SQL snapshots and readers."
       ]
     }
   ]

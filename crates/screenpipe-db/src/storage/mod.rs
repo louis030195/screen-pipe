@@ -6,6 +6,7 @@
 
 mod backup;
 mod bindings;
+pub(crate) mod bulk;
 mod codec;
 mod command;
 mod faults;
@@ -177,6 +178,17 @@ pub(crate) struct HybridStorage {
     pub file_job: Mutex<()>,
     pub closing: tokio_util::sync::CancellationToken,
     pub privacy_ready: std::sync::atomic::AtomicBool,
+    pub bulk: bulk::Runtime,
+}
+
+const FRAME_CAPABILITIES: [&str; 3] =
+    ["parquet-frame-v1", "contentless-delete-fts5", "durable-wal"];
+pub(super) fn capabilities() -> Vec<String> {
+    FRAME_CAPABILITIES
+        .into_iter()
+        .chain([bulk::CAPABILITY])
+        .map(String::from)
+        .collect()
 }
 
 impl StorageDescriptor {
@@ -196,8 +208,8 @@ impl StorageDescriptor {
     pub fn validate(&self, root: &Path) -> Result<(), sqlx::Error> {
         if self.format != 1
             || self.mode != StorageMode::HybridParquetV1
-            || self.capabilities
-                != ["parquet-frame-v1", "contentless-delete-fts5", "durable-wal"].map(String::from)
+            || (self.capabilities != FRAME_CAPABILITIES.map(String::from)
+                && self.capabilities != capabilities())
         {
             return Err(storage_error("unsupported storage format or capabilities"));
         }
@@ -340,6 +352,19 @@ impl HybridStorage {
     }
     pub async fn verify_catalog(&self, pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
         use sqlx::Row;
+        if self.has_bulk() {
+            let files: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT table_name,path,checksum FROM _bulk_files WHERE state IN ('published','dirty')",
+            ).fetch_all(pool).await?;
+            for (table, path, checksum) in files {
+                if !bulk::is_bulk_table(&table)
+                    || checksum.len() != 64
+                    || !self.payload_path(Path::new(&path))?.is_file()
+                {
+                    return Err(storage_error("bulk payload catalog is incomplete"));
+                }
+            }
+        }
         let missing:i64=sqlx::query_scalar("SELECT count(*) FROM frames f LEFT JOIN frame_payloads p ON p.frame_id=f.id WHERE p.frame_id IS NULL").fetch_one(pool).await?;
         if missing != 0 {
             return Err(storage_error("frame payload catalog is incomplete"));
@@ -400,6 +425,7 @@ impl HybridStorage {
             file_job: Mutex::new(()),
             closing: tokio_util::sync::CancellationToken::new(),
             privacy_ready: std::sync::atomic::AtomicBool::new(false),
+            bulk: bulk::Runtime::default(),
         }))
     }
 }

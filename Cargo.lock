@@ -8856,6 +8856,7 @@ dependencies = [
  "parquet",
  "rand 0.9.4",
  "regex",
+ "rusqlite",
  "screenpipe-config",
  "screenpipe-core",
  "screenpipe-secrets",

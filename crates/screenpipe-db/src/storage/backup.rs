@@ -53,8 +53,16 @@ impl DatabaseManager {
         let mut conn =
             sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display())).await?;
         let files=sqlx::query("SELECT DISTINCT pf.search_path,pf.detail_path FROM payload_files pf JOIN frame_payloads p ON p.file_id=pf.id ORDER BY pf.id").fetch_all(&mut conn).await?;
-        conn.close().await?;
         let mut payload_paths = Vec::new();
+        if storage.has_bulk() {
+            let paths: Vec<String> = sqlx::query_scalar(
+                "SELECT path FROM _bulk_files WHERE state IN ('published','dirty')",
+            )
+            .fetch_all(&mut conn)
+            .await?;
+            payload_paths.extend(paths.into_iter().map(PathBuf::from));
+        }
+        conn.close().await?;
         for row in files {
             for column in ["search_path", "detail_path"] {
                 payload_paths.push(PathBuf::from(row.try_get::<String, _>(column)?));

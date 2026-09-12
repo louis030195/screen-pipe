@@ -323,8 +323,8 @@ impl DatabaseManager {
                 _ => continue,
             };
 
-            let result = sqlx::query_scalar::<_, i64>(
-                "INSERT INTO elements (frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order) VALUES (?1, 'ocr', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING id",
+            let result = sqlx::query(
+                "INSERT INTO elements (frame_id, source, role, text, parent_id, depth, left_bound, top_bound, width_bound, height_bound, confidence, sort_order) VALUES (?1, 'ocr', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(frame_id)
             .bind(role)
@@ -337,11 +337,12 @@ impl DatabaseManager {
             .bind(height)
             .bind(confidence)
             .bind(sort_order)
-            .fetch_one(&mut **tx)
+            .execute(&mut **tx)
             .await;
 
             match result {
-                Ok(id) => {
+                Ok(result) => {
+                    let id = result.last_insert_rowid();
                     match level {
                         1 => {
                             page_ids.insert(page_num, id);

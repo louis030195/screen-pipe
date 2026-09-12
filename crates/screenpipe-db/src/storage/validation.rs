@@ -21,6 +21,179 @@ pub struct ComparisonReport {
     pub hybrid_p95_ms: f64,
     pub cache_condition: &'static str,
     pub frame_transactions: Vec<FrameTransactionReport>,
+    pub bulk_queries: usize,
+    pub bulk_result_rows: usize,
+    pub element_batches: Vec<ElementBatchReport>,
+    pub element_search: Vec<ElementSearchReport>,
+}
+
+#[derive(Serialize)]
+pub struct ElementSearchReport {
+    pub case: usize,
+    pub on_screen: Option<bool>,
+    pub matches: i64,
+    pub sqlite_ms: f64,
+    pub hybrid_ms: f64,
+}
+
+#[derive(Serialize)]
+pub struct ElementBatchReport {
+    pub mode: &'static str,
+    pub batches: usize,
+    pub elements: i64,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+}
+
+async fn bulk_queries(
+    source: &DatabaseManager,
+    target: &DatabaseManager,
+    terms: &[String],
+) -> Result<(usize, usize, Vec<ElementSearchReport>), sqlx::Error> {
+    let mut queries = 0;
+    let mut rows = 0;
+    let mut timings = Vec::new();
+    for query in terms.iter().filter(|q| !q.is_empty()).take(6) {
+        for on_screen in [None, Some(true), Some(false)] {
+            let start = Instant::now();
+            let left = source
+                .search_elements(query, None, None, None, None, None, None, on_screen, 25, 7)
+                .await?;
+            let sqlite_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            let right = target
+                .search_elements(query, None, None, None, None, None, None, on_screen, 25, 7)
+                .await?;
+            let hybrid_ms = start.elapsed().as_secs_f64() * 1000.0;
+            if serde_json::to_vec(&left).map_err(storage_error)?
+                != serde_json::to_vec(&right).map_err(storage_error)?
+            {
+                return Err(storage_error("element search/count parity failed"));
+            }
+            rows += left.0.len();
+            timings.push(ElementSearchReport {
+                case: timings.len(),
+                on_screen,
+                matches: left.1,
+                sqlite_ms,
+                hybrid_ms,
+            });
+            tracing::info!(
+                completed_queries = timings.len(),
+                sqlite_ms,
+                hybrid_ms,
+                "element search comparison"
+            );
+            queries += 1;
+        }
+    }
+    for table in [
+        "elements",
+        "audio_transcriptions",
+        "ui_events",
+        "semantic_items",
+        "pipe_executions",
+        "meeting_transcript_segments",
+        "outputs",
+    ] {
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?) ORDER BY cid")
+                .bind(table)
+                .fetch_all(&source.pool)
+                .await?;
+        let sql = format!(
+            "SELECT {} FROM {table} ORDER BY id DESC LIMIT 64",
+            columns.join(",")
+        );
+        let left = source.query_raw_sql(&sql).await?;
+        let right = target.query_raw_sql(&sql).await?;
+        if left != right {
+            return Err(storage_error(format!(
+                "bulk SQL projection parity failed: {table}"
+            )));
+        }
+        rows += left.as_array().map_or(0, Vec::len);
+        queries += 1;
+    }
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT frame_id FROM elements WHERE frame_id % 997=0 ORDER BY frame_id LIMIT 32",
+    )
+    .fetch_all(&source.pool)
+    .await?;
+    for id in ids {
+        let left = source.get_frame_elements(id, None).await?;
+        let right = target.get_frame_elements(id, None).await?;
+        if serde_json::to_vec(&left).map_err(storage_error)?
+            != serde_json::to_vec(&right).map_err(storage_error)?
+        {
+            return Err(storage_error("complete element tree parity failed"));
+        }
+        rows += left.len();
+        queries += 1;
+    }
+    Ok((queries, rows, timings))
+}
+
+async fn element_batches(
+    payloads: &[super::FramePayload],
+) -> Result<Vec<ElementBatchReport>, sqlx::Error> {
+    let mut reports = Vec::new();
+    for hybrid in [false, true] {
+        let root = tempfile::tempdir()?;
+        let db = if hybrid {
+            DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default()).await?
+        } else {
+            DatabaseManager::new_with_storage(
+                root.path().join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+                None,
+                false,
+                false,
+            )
+            .await?
+        };
+        let result = async {
+            let mut times = Vec::new();
+            for (index, payload) in payloads.iter().take(32).enumerate() {
+                let id = index as i64 + 1;
+                db.execute_raw_sql_write(&format!(
+                    "INSERT INTO frames(id,timestamp) VALUES({id},'2026-09-11T12:00:00Z')"
+                ))
+                .await?;
+                let start = Instant::now();
+                let mut tx = db.begin_immediate_with_retry().await?;
+                if let Some(json) = &payload.text_json {
+                    DatabaseManager::insert_ocr_elements(tx.conn(), id, json).await;
+                }
+                if let Some(json) = &payload.accessibility_tree_json {
+                    DatabaseManager::insert_accessibility_elements(tx.conn(), id, json).await;
+                }
+                tx.commit().await?;
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM elements")
+                .fetch_one(&db.pool)
+                .await?;
+            Ok::<_, sqlx::Error>(ElementBatchReport {
+                mode: if hybrid {
+                    "hybrid-parquet-v1"
+                } else {
+                    "sqlite"
+                },
+                batches: times.len(),
+                elements: count,
+                median_ms: percentile(&mut times, 0.5),
+                p95_ms: percentile(&mut times, 0.95),
+            })
+        }
+        .await;
+        db.close().await;
+        reports.push(result?);
+    }
+    if reports[0].elements != reports[1].elements {
+        return Err(storage_error("element replay row count differs"));
+    }
+    Ok(reports)
 }
 
 #[derive(Serialize)]
@@ -271,16 +444,53 @@ async fn compare_queries(
             return Err(storage_error("typed detail parity failed"));
         }
     }
-    let sample_ids = &ids[..ids.len().min(128)];
-    let payloads: Vec<_> = source
-        .frame_payloads(sample_ids, Projection::All)
-        .await?
-        .into_values()
-        .collect();
+    let payloads = write_payloads(source, &ids[..ids.len().min(128)]).await?;
     let frame_transactions = if payloads.is_empty() || !benchmark {
         Vec::new()
     } else {
         frame_transactions(&payloads).await?
     };
-    Ok(ComparisonReport {logical_tables:0,logical_rows:0,queries:a.len(),result_rows,detail_records:ids.len(),sqlite_median_ms:percentile(&mut a,0.5),sqlite_p95_ms:percentile(&mut a,0.95),hybrid_median_ms:percentile(&mut b,0.5),hybrid_p95_ms:percentile(&mut b,0.95),cache_condition:"one fresh manager per mode; subsequent reads share SQLite and OS caches; no cold-disk claim",frame_transactions})
+    let (bulk_queries, bulk_result_rows, element_search) =
+        bulk_queries(source, target, &queries).await?;
+    let element_batches = if benchmark && !payloads.is_empty() {
+        element_batches(&payloads).await?
+    } else {
+        Vec::new()
+    };
+    Ok(ComparisonReport {logical_tables:0,logical_rows:0,queries:a.len(),result_rows,detail_records:ids.len(),sqlite_median_ms:percentile(&mut a,0.5),sqlite_p95_ms:percentile(&mut a,0.95),hybrid_median_ms:percentile(&mut b,0.5),hybrid_p95_ms:percentile(&mut b,0.95),cache_condition:"one fresh manager per mode; subsequent reads share SQLite and OS caches; no cold-disk claim",frame_transactions,bulk_queries,bulk_result_rows,element_batches,element_search})
+}
+
+async fn write_payloads(
+    source: &DatabaseManager,
+    ids: &[i64],
+) -> Result<Vec<super::FramePayload>, sqlx::Error> {
+    let payloads: Vec<_> = source
+        .frame_payloads(ids, Projection::All)
+        .await?
+        .into_values()
+        .collect();
+    Ok(payloads)
+}
+
+#[tokio::test]
+#[ignore = "requires SCREENPIPE_STORAGE_TEST_CLONE pointing to a private SQLite clone"]
+async fn production_clone_write_replay() {
+    let path = std::env::var("SCREENPIPE_STORAGE_TEST_CLONE").unwrap();
+    let source = DatabaseManager::new_with_storage(&path, Default::default(), None, false, false)
+        .await
+        .unwrap();
+    let ids = sqlx::query_scalar("SELECT id FROM frames WHERE id % 499 = 0 ORDER BY id LIMIT 128")
+        .fetch_all(&source.pool)
+        .await
+        .unwrap();
+    let payloads = write_payloads(&source, &ids).await.unwrap();
+    source.close().await;
+    assert!(!payloads.is_empty());
+    let frames = frame_transactions(&payloads).await.unwrap();
+    let elements = element_batches(&payloads).await.unwrap();
+    assert!(elements[0].elements > 0);
+    println!(
+        "{}",
+        serde_json::json!({"frame_transactions": frames, "element_batches": elements})
+    );
 }

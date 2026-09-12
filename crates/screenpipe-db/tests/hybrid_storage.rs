@@ -433,6 +433,8 @@ async fn storage_budget_rejects_before_acknowledging_and_accepts_after_reclamati
 async fn migration_crashes_resume_without_losing_acknowledged_records() {
     for point in [
         "migration_copied",
+        "migration_schema_step",
+        "migration_elements_copied",
         "seal_reserved",
         "seal_files_synced",
         "seal_before_commit",
@@ -489,7 +491,11 @@ async fn migration_crashes_resume_without_losing_acknowledged_records() {
 #[cfg(feature = "storage-fault-injection")]
 #[tokio::test]
 async fn interrupted_initialization_resumes_its_recorded_generation() {
-    for point in ["initialization_ready", "initialization_activated"] {
+    for point in [
+        "migration_schema_step",
+        "initialization_ready",
+        "initialization_activated",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let killed = std::process::Command::new(env!("CARGO_BIN_EXE_screenpipe-storage"))
             .arg("init")

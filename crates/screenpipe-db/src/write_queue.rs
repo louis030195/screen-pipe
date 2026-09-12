@@ -581,6 +581,7 @@ pub(crate) fn capture_pool_options() -> sqlx::sqlite::SqlitePoolOptions {
 /// loop can drop poisoned connections in-process without a full restart.
 #[derive(Clone)]
 pub(crate) struct WritePoolRebuilder {
+    storage: Option<Arc<crate::storage::HybridStorage>>,
     options: sqlx::sqlite::SqliteConnectOptions,
     max_connections: u32,
     min_connections: u32,
@@ -595,14 +596,23 @@ impl WritePoolRebuilder {
         acquire_timeout: Duration,
     ) -> Self {
         Self {
+            storage: None,
             options,
             max_connections,
             min_connections,
             acquire_timeout,
         }
     }
+    pub(crate) fn with_storage(
+        mut self,
+        storage: Option<Arc<crate::storage::HybridStorage>>,
+    ) -> Self {
+        self.storage = storage;
+        self
+    }
+
     async fn rebuild(&self) -> Result<Pool<Sqlite>, sqlx::Error> {
-        capture_pool_options()
+        crate::storage::bulk::pool_options(self.storage.clone(), false)
             .max_connections(self.max_connections)
             .min_connections(self.min_connections)
             .acquire_timeout(self.acquire_timeout)

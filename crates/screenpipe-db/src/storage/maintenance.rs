@@ -153,7 +153,7 @@ pub async fn compact(root: &Path, config: DbConfig) -> Result<(), sqlx::Error> {
             .await;
             candidate.close().await;
             verification?;
-            lifecycle::compact_candidate(&index, &journal.candidate.budget).await?;
+            lifecycle::compact_candidate(&index, candidate.storage.as_ref().unwrap()).await?;
             sync_directory(index.parent().unwrap())?;
             sync_directory(&root.join("storage"))?;
             super::faults::checkpoint("compact_ready");
@@ -207,6 +207,7 @@ pub async fn export_sqlite(
         let mut output=sqlx::SqliteConnection::connect(&format!("sqlite:{}",index.display())).await?;
         let triggers:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'hybrid_%'").fetch_all(&mut output).await?;
         for name in triggers {sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TRIGGER \"{}\"",name.replace('"',"\"\"")))).execute(&mut output).await?;}
+        super::bulk::export(&source,&mut output).await?;
         sqlx::raw_sql("DROP TABLE frames_fts; DROP TABLE frame_payloads; DROP TABLE payload_files; DROP TABLE upload_bindings; DROP TABLE storage_metadata; DROP TABLE _hybrid_migrations;").execute(&mut output).await?;
         let mut after=i64::MIN;
         loop {

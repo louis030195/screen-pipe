@@ -235,7 +235,7 @@ impl HybridStorage {
             bytes += size;
         }
         if ids.is_empty() {
-            return Ok(0);
+            return self.seal_bulk(pool, writer).await;
         }
         let payloads: Vec<_> = self
             .read(pool, &ids, Projection::All)
@@ -392,6 +392,7 @@ impl HybridStorage {
         writer: &SqliteWritePool,
     ) -> Result<usize, sqlx::Error> {
         let _job = self.file_job.lock().await;
+        let bulk_removed = self.reclaim_bulk(pool, writer).await?;
         let dirty: Option<String> =
             sqlx::query_scalar("SELECT id FROM payload_files WHERE state='dirty' LIMIT 1")
                 .fetch_optional(pool)
@@ -419,28 +420,32 @@ impl HybridStorage {
         }
         // No waiter is queued: a reader can acquire another pin while holding
         // its existing pin. Cleanup tries again after those operations drain.
-        let Ok(_leases) = Arc::clone(&self.leases).try_write_owned() else {
-            return Ok(0);
-        };
-        super::faults::checkpoint("files_retired");
+        let permit = writer.lock().await?;
         let retired = sqlx::query(
             "SELECT id,search_path,detail_path FROM payload_files WHERE state='retired' AND NOT EXISTS(SELECT 1 FROM frame_payloads WHERE file_id=payload_files.id) LIMIT 32",
         )
-        .fetch_all(pool)
+        .fetch_all(permit.pool())
         .await?;
-        let mut removed = 0;
-        for row in retired {
-            for column in ["search_path", "detail_path"] {
-                let relative: &str = row.try_get(column)?;
-                let path = self.payload_path(Path::new(relative))?;
-                match std::fs::remove_file(&path) {
-                    Ok(()) => sync_directory(path.parent().unwrap())?,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
+        let mut removed = bulk_removed;
+        {
+            let Ok(_leases) = Arc::clone(&self.leases).try_write_owned() else {
+                return Ok(removed);
+            };
+            super::faults::checkpoint("files_retired");
+            for row in &retired {
+                for column in ["search_path", "detail_path"] {
+                    let relative: &str = row.try_get(column)?;
+                    let path = self.payload_path(Path::new(relative))?;
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => sync_directory(path.parent().unwrap())?,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
             }
+        }
+        for row in retired {
             super::faults::checkpoint("files_unlinked");
-            let permit = writer.lock().await?;
             sqlx::query("DELETE FROM payload_files WHERE id=? AND state='retired'")
                 .bind(row.get::<&str, _>("id"))
                 .execute(permit.pool())

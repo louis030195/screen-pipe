@@ -319,7 +319,7 @@ impl DatabaseManager {
         };
 
         // Read pool: handles all SELECT queries (search, timeline, API, pipes).
-        let read_pool = crate::write_queue::capture_pool_options()
+        let read_pool = crate::storage::bulk::pool_options(storage.clone(), true)
             .max_connections(config.read_pool_max)
             .min_connections(config.read_pool_min)
             .acquire_timeout(Duration::from_secs(5))
@@ -332,7 +332,7 @@ impl DatabaseManager {
         // Write pool: dedicated to INSERT/UPDATE/DELETE via begin_immediate_with_retry().
         // Writes are serialized by write_semaphore so only 1 is active
         // at a time; extras absorb connection detach without killing the pool.
-        let write_pool = match crate::write_queue::capture_pool_options()
+        let write_pool = match crate::storage::bulk::pool_options(storage.clone(), false)
             .max_connections(config.write_pool_max)
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(10))
@@ -359,7 +359,8 @@ impl DatabaseManager {
             config.write_pool_max,
             1,
             Duration::from_secs(10),
-        );
+        )
+        .with_storage(storage.clone());
         let persistent_failure_hook = crate::write_queue::persistent_failure_slot(None);
         let close_token = tokio_util::sync::CancellationToken::new();
         let write_queue = crate::write_queue::spawn_write_drain_with(
@@ -443,9 +444,50 @@ impl DatabaseManager {
             if let Some(storage) = &db_manager.storage {
                 let mut conn = db_manager.write_pool.acquire().await?;
                 if bootstrap_storage {
-                    let mut tx = conn.begin().await?;
-                    crate::storage::schema::bootstrap(&mut tx, &storage.descriptor).await?;
-                    tx.commit().await?;
+                    // Offline index construction spills large sorts to disk;
+                    // the connection resumes its configured capture settings
+                    // before entering the live pool.
+                    let temp_store: i64 = sqlx::query_scalar("PRAGMA temp_store")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA temp_store=FILE")
+                        .execute(&mut *conn)
+                        .await?;
+                    let root = storage.root.clone();
+                    let reserve = storage.descriptor.budget.disk_reserve_bytes;
+                    let mut checked = std::time::Instant::now() - Duration::from_secs(1);
+                    let exhausted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let progress_exhausted = Arc::clone(&exhausted);
+                    conn.lock_handle()
+                        .await?
+                        .set_progress_handler(10_000, move || {
+                            if checked.elapsed() < Duration::from_millis(100) {
+                                return true;
+                            }
+                            checked = std::time::Instant::now();
+                            let available = fs2::available_space(&root).unwrap_or(0);
+                            let proceed = available >= reserve;
+                            progress_exhausted
+                                .store(!proceed, std::sync::atomic::Ordering::Relaxed);
+                            proceed
+                        });
+                    // This generation is unpublished. Each construction step
+                    // commits before the next checkpoint; the lifecycle journal
+                    // rebuilds an interrupted schema from its intact source.
+                    let construction =
+                        crate::storage::schema::bootstrap(&mut conn, &storage.descriptor).await;
+                    conn.lock_handle().await?.remove_progress_handler();
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                        "PRAGMA temp_store={temp_store}"
+                    )))
+                    .execute(&mut *conn)
+                    .await?;
+                    if exhausted.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(crate::storage::storage_error(
+                            "offline construction reached disk reserve; source remains intact",
+                        ));
+                    }
+                    construction?;
                 }
                 crate::storage::schema::verify(&mut conn, &storage.descriptor).await?;
                 storage.verify_catalog(&db_manager.pool).await?;

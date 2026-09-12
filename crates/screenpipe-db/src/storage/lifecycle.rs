@@ -84,6 +84,8 @@ struct Journal {
     phase: Phase,
     descriptor: StorageDescriptor,
     copied: bool,
+    #[serde(default)]
+    constructing: bool,
     source: Vec<TableParity>,
     report: Option<MigrationReport>,
 }
@@ -136,9 +138,7 @@ pub async fn migrate(
             source_continuity: true,
             index: directory.join("index.sqlite"),
             payloads: directory.join("payloads"),
-            capabilities: ["parquet-frame-v1", "contentless-delete-fts5", "durable-wal"]
-                .map(String::from)
-                .to_vec(),
+            capabilities: super::capabilities(),
             budget: options.budget,
             privacy: options.privacy,
         };
@@ -147,6 +147,7 @@ pub async fn migrate(
             phase: Phase::Building,
             descriptor,
             copied: false,
+            constructing: false,
             source: Vec::new(),
             report: None,
         }
@@ -186,13 +187,12 @@ pub async fn migrate(
                 ));
             }
             journal.source = source_receipts;
+            if journal.constructing {
+                // A partial unpublished schema is reconstructed from source.
+                journal.copied = false;
+            }
             durable_json(&journal_path, &journal)?;
             if !journal.copied {
-                let needed = std::fs::metadata(&source_path)?.len()
-                    + journal.descriptor.budget.disk_reserve_bytes;
-                if fs2::available_space(&root)? < needed {
-                    return Err(storage_error("insufficient migration disk reserve"));
-                }
                 std::fs::create_dir_all(index.parent().unwrap())?;
                 // This path belongs to an incomplete backup recorded by this journal.
                 for path in [
@@ -204,6 +204,13 @@ pub async fn migrate(
                         std::fs::remove_file(path)?;
                     }
                 }
+                let needed = std::fs::metadata(&source_path)?
+                    .len()
+                    .saturating_mul(2)
+                    .saturating_add(journal.descriptor.budget.disk_reserve_bytes);
+                if fs2::available_space(&root)? < needed {
+                    return Err(storage_error("insufficient migration disk reserve"));
+                }
                 tracing::info!(phase = "sqlite_copy", "storage migration");
                 copy_sqlite(
                     source.pool.clone(),
@@ -213,6 +220,7 @@ pub async fn migrate(
                 .await?;
                 super::faults::checkpoint("migration_copied");
                 journal.copied = true;
+                journal.constructing = false;
                 durable_json(&journal_path, &journal)?;
             }
             let storage = HybridStorage::new(root.clone(), journal.descriptor.clone())?;
@@ -229,7 +237,11 @@ pub async fn migrate(
                 conn.close().await?;
                 n != 0
             };
-            let candidate = DatabaseManager::new_with_storage(
+            if !catalog_exists {
+                journal.constructing = true;
+                durable_json(&journal_path, &journal)?;
+            }
+            let mut candidate = DatabaseManager::new_with_storage(
                 index.to_str().unwrap(),
                 config.clone(),
                 Some(storage),
@@ -237,11 +249,42 @@ pub async fn migrate(
                 false,
             )
             .await?;
+            if !catalog_exists {
+                journal.constructing = false;
+                durable_json(&journal_path, &journal)?;
+                // Release the construction WAL with every candidate connection
+                // closed before the bounded sealing phase starts.
+                candidate.close().await;
+                candidate = DatabaseManager::new_with_storage(
+                    index.to_str().unwrap(),
+                    config.clone(),
+                    Some(HybridStorage::new(
+                        root.clone(),
+                        journal.descriptor.clone(),
+                    )?),
+                    false,
+                    false,
+                )
+                .await?;
+            }
             let candidate_result = async {
                 tracing::info!(phase = "sealing", "storage migration");
+                const CHECKPOINT_BATCHES: usize = 16;
+                let mut batches = 0;
                 loop {
                     if candidate.seal_frame_payloads().await? == 0 {
                         break;
+                    }
+                    batches += 1;
+                    if batches % CHECKPOINT_BATCHES == 0 {
+                        let writer = candidate.coordinated_writer();
+                        let permit = writer.lock().await?;
+                        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(RESTART)")
+                            .fetch_one(permit.pool())
+                            .await?;
+                        if checkpoint.try_get::<i64, _>(0)? != 0 {
+                            return Err(storage_error("offline checkpoint has an active reader"));
+                        }
                     }
                 }
                 let pending: i64 =
@@ -253,7 +296,7 @@ pub async fn migrate(
                         "migration awaits required PII completion before sealing",
                     ));
                 }
-                verify_integrity(&candidate.pool).await?;
+                candidate.verify_storage().await?;
                 tracing::info!(phase = "candidate_parity_receipts", "storage migration");
                 let tables = table_receipts(&candidate, Some(&journal.source)).await?;
                 if tables != journal.source {
@@ -266,7 +309,7 @@ pub async fn migrate(
             .await;
             candidate.close().await;
             let tables = candidate_result?;
-            compact_candidate(&index, &journal.descriptor.budget).await?;
+            compact_candidate(&index, candidate.storage.as_ref().unwrap()).await?;
             // The regular opener checks identity, schema, and catalog before ready.
             let reopened = DatabaseManager::new_with_storage(
                 index.to_str().unwrap(),
@@ -417,8 +460,9 @@ pub(super) async fn verify_integrity(pool: &SqlitePool) -> Result<(), sqlx::Erro
 /// file. Closing its manager first releases the bootstrap WAL allocation.
 pub(super) async fn compact_candidate(
     index: &Path,
-    budget: &super::StorageBudget,
+    storage: &std::sync::Arc<HybridStorage>,
 ) -> Result<(), sqlx::Error> {
+    let budget = &storage.descriptor.budget;
     tracing::info!(phase = "compact_candidate", "storage migration");
     let compact = index.with_extension("compacting.sqlite");
     if compact.exists() {
@@ -426,6 +470,10 @@ pub(super) async fn compact_candidate(
     }
     let mut conn =
         sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display())).await?;
+    super::bulk::register_hash(&mut conn).await?;
+    if storage.has_bulk() {
+        super::bulk::elements::register(&mut conn, storage.clone()).await?;
+    }
     let pages: i64 = sqlx::query_scalar("PRAGMA page_count")
         .fetch_one(&mut conn)
         .await?;
@@ -515,7 +563,7 @@ pub(super) async fn table_receipts(
     let tables: Vec<String> = if let Some(source) = source {
         source.iter().map(|t| t.table.clone()).collect()
     } else {
-        sqlx::query_scalar("SELECT m.name FROM sqlite_master m WHERE m.type='table' AND (m.name NOT LIKE 'sqlite_%' OR m.name='sqlite_sequence') AND m.name NOT LIKE '%_fts%' AND m.name NOT LIKE '%_fts5%' AND m.sql NOT LIKE 'CREATE VIRTUAL TABLE%' ORDER BY m.name")
+        sqlx::query_scalar("SELECT m.name FROM sqlite_master m WHERE m.type='table' AND (m.name NOT LIKE 'sqlite_%' OR m.name='sqlite_sequence') AND m.name NOT LIKE '%_fts%' AND m.name NOT LIKE '%_fts5%' AND (m.sql NOT LIKE 'CREATE VIRTUAL TABLE%' OR m.name='elements') ORDER BY m.name")
             .fetch_all(&db.pool).await?
     };
     let mut result = Vec::new();
@@ -537,13 +585,21 @@ pub(super) async fn table_receipts(
                 )
             });
         }
+        columns.retain(|name| !name.starts_with("_archive_"));
+        let key = if db.storage.as_ref().is_some_and(|s| s.has_bulk())
+            && super::bulk::is_bulk_table(&table)
+        {
+            "id"
+        } else {
+            "rowid"
+        };
         let mut hash = Sha256::new();
         let mut count = 0;
         let mut last = i64::MIN;
         let mut first = true;
         loop {
             let sql = format!(
-                "SELECT rowid AS __storage_rowid,{} FROM {} WHERE rowid{}? ORDER BY rowid LIMIT 128",
+                "SELECT {key} AS __storage_rowid,{} FROM {} WHERE {key}{}? ORDER BY {key} LIMIT 128",
                 columns
                     .iter()
                     .map(|c| quote(c))
@@ -726,6 +782,7 @@ impl DatabaseManager {
         verify_integrity(&self.pool).await?;
         if let Some(storage) = &self.storage {
             storage.verify_catalog(&self.pool).await?;
+            storage.verify_bulk(&self.pool).await?;
             let mut after = i64::MIN;
             loop {
                 let ids: Vec<i64> =
@@ -792,9 +849,7 @@ impl DatabaseManager {
                 source_continuity: false,
                 index: directory.join("index.sqlite"),
                 payloads: directory.join("payloads"),
-                capabilities: ["parquet-frame-v1", "contentless-delete-fts5", "durable-wal"]
-                    .map(String::from)
-                    .to_vec(),
+                capabilities: super::capabilities(),
                 budget: options.budget,
                 privacy: options.privacy,
             };
@@ -809,15 +864,45 @@ impl DatabaseManager {
                 sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display()))
                     .await?;
             let count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM sqlite_master WHERE name='storage_metadata'",
+                "SELECT count(*) FROM sqlite_master WHERE name='_hybrid_migrations'",
             )
             .fetch_one(&mut conn)
             .await?;
+            let complete = if count != 0 {
+                let version = if descriptor
+                    .capabilities
+                    .iter()
+                    .any(|c| c == super::bulk::CAPABILITY)
+                {
+                    2
+                } else {
+                    1
+                };
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM _hybrid_migrations WHERE version=?",
+                )
+                .bind(version)
+                .fetch_one(&mut conn)
+                .await?
+                    != 0
+            } else {
+                false
+            };
             conn.close().await?;
-            count != 0
+            complete
         } else {
             false
         };
+        if !catalog_exists {
+            // Initialization owns an empty unpublished generation. Its schema
+            // completion receipt determines whether construction can be reused.
+            for suffix in ["", "-wal", "-shm"] {
+                let path = PathBuf::from(format!("{}{suffix}", index.display()));
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
+            }
+        }
         let candidate = Self::new_with_storage(
             index.to_str().unwrap(),
             config.clone(),
