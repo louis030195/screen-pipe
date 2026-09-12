@@ -27,6 +27,7 @@ import {
 
 interface ReplayStripProps {
   meetingId: number;
+  onOpenTranscript: () => void;
   /** "Notable quotes" sample from the activity summary — used purely to
    * derive the meeting time bounds when the full transcript is empty. */
   segments: AudioSegment[];
@@ -107,7 +108,12 @@ function releasePointer(el: Element, pointerId: number) {
   }
 }
 
-export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps) {
+export function ReplayStrip({
+  meetingId,
+  onOpenTranscript,
+  segments,
+  timeRange,
+}: ReplayStripProps) {
   // Bounds from notable-quotes sample (cheap, already loaded).
   const sampleSorted = useMemo(
     () =>
@@ -511,14 +517,37 @@ export function ReplayStrip({ meetingId, segments, timeRange }: ReplayStripProps
       className="border-t border-border pt-5"
       data-testid="meeting-replay-player"
     >
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground flex items-center gap-2">
-          <Rewind className="h-3 w-3" />
-          replay the moment
-        </h3>
+      <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1.5">
+          <h3 className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            <Rewind className="h-3 w-3" />
+            screen replay
+          </h3>
+          <p className="max-w-xl text-xs leading-relaxed text-muted-foreground">
+            screen images only — no audio plays here.
+          </p>
+          <p
+            className="max-w-xl text-xs leading-relaxed text-muted-foreground"
+            data-testid="replay-audio-guidance"
+          >
+            if audio was captured and is still available,{" "}
+            <button
+              type="button"
+              onClick={onOpenTranscript}
+              className="font-medium text-foreground underline underline-offset-2 transition-colors hover:text-foreground/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              open transcript
+            </button>{" "}
+            to play a speaker segment, or choose{" "}
+            <span className="font-medium text-foreground/80">
+              more meeting actions → export to mp4
+            </span>
+            .
+          </p>
+        </div>
         <button
           onClick={openInTimeline}
-          className="text-[11px] uppercase tracking-[0.15em] text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5"
+          className="flex shrink-0 items-center gap-1.5 self-start text-[11px] uppercase tracking-[0.15em] text-muted-foreground transition-colors hover:text-foreground"
           title="open this moment in the full timeline"
         >
           open in timeline

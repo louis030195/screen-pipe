@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   emit: vi.fn(),
   fetchFrameSamples: vi.fn(),
   fetchMeetingAudio: vi.fn(),
+  openTranscript: vi.fn(),
   push: vi.fn(),
   setPendingNavigation: vi.fn(),
 }));
@@ -68,6 +69,7 @@ function renderReplayStrip() {
   return render(
     <ReplayStrip
       meetingId={1}
+      onOpenTranscript={mocks.openTranscript}
       segments={[
         {
           transcription: "hello from the repro meeting",
@@ -193,6 +195,7 @@ describe("ReplayStrip", () => {
     const { container } = render(
       <ReplayStrip
         meetingId={42}
+        onOpenTranscript={mocks.openTranscript}
         segments={[]}
         timeRange={{ start: meetingStart, end: meetingEnd }}
       />,
@@ -207,6 +210,27 @@ describe("ReplayStrip", () => {
     expect(screen.getByRole("button", { name: "play silent replay" })).toBeEnabled();
     expect(screen.getByText("silent")).toBeInTheDocument();
     expect(container.querySelector("audio, video")).toBeNull();
+  });
+
+  it("explains screen-only playback and opens the supported audio path", async () => {
+    mocks.fetchFrameSamples.mockResolvedValue([]);
+    renderReplayStrip();
+
+    await screen.findByText(/no screen images available/i);
+
+    expect(
+      screen.getByText("screen images only — no audio plays here."),
+    ).toBeVisible();
+    expect(screen.getByTestId("replay-audio-guidance")).toHaveTextContent(
+      /if audio was captured and is still available/i,
+    );
+    expect(screen.getByTestId("replay-audio-guidance")).toHaveTextContent(
+      /more meeting actions → export to mp4/i,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "open transcript" }));
+
+    expect(mocks.openTranscript).toHaveBeenCalledOnce();
   });
 
   it("reserves a separate row for controls below the captured frame", async () => {
@@ -310,6 +334,7 @@ describe("ReplayStrip", () => {
     const { container } = render(
       <ReplayStrip
         meetingId={43}
+        onOpenTranscript={mocks.openTranscript}
         segments={[]}
         timeRange={{ start, end }}
       />,

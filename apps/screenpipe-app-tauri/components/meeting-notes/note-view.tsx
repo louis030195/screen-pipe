@@ -2566,6 +2566,7 @@ export function NoteView({
                   ) && (
                     <ReplayStrip
                       meetingId={meeting.id}
+                      onOpenTranscript={() => setTranscriptOpen(true)}
                       segments={
                         meetingCtx.activity.audio_summary.top_transcriptions
                       }
