@@ -1136,7 +1136,10 @@ impl PiExecutor {
             let _: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
                 project_dir.join(".screenpipe-learning-config.json"),
             )?)?;
-            std::fs::write(ext_dir.join("skill-learning.ts"), include_str!("../../assets/extensions/skill-learning.ts"))?;
+            std::fs::write(
+                ext_dir.join("skill-learning.ts"),
+                include_str!("../../assets/extensions/skill-learning.ts"),
+            )?;
         }
         Ok(())
     }

@@ -8950,7 +8950,8 @@ mod tests {
 
     #[test]
     fn skill_learning_is_opt_in_and_bounded() {
-        let (config, _) = parse_frontmatter(include_str!("../../assets/pipes/skill-learning/pipe.md")).unwrap();
+        let (config, _) =
+            parse_frontmatter(include_str!("../../assets/pipes/skill-learning/pipe.md")).unwrap();
         assert!(!config.enabled);
         assert_eq!(config.agent, "pi");
         assert_eq!(config.schedule, "every 6h");

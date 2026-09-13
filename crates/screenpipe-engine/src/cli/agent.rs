@@ -475,15 +475,15 @@ fn desktop_skills_current(layout: &AgentLayout) -> bool {
         bundled_skills(layout.client)
             .into_iter()
             .all(|(name, markdown)| {
-                std::fs::read_to_string(skills_dir.join(name).join("SKILL.md"))
-                    .is_ok_and(|body| {
-                        body == markdown.as_ref()
-                            || (screenpipe_core::starter_skills::STARTER_SKILLS
-                                .iter().any(|(key, _)| key == &name)
-                                && screenpipe_core::starter_skills::is_current_or_custom(
-                                    skills_dir, name, &markdown,
-                                ))
-                    })
+                std::fs::read_to_string(skills_dir.join(name).join("SKILL.md")).is_ok_and(|body| {
+                    body == markdown.as_ref()
+                        || (screenpipe_core::starter_skills::STARTER_SKILLS
+                            .iter()
+                            .any(|(key, _)| key == &name)
+                            && screenpipe_core::starter_skills::is_current_or_custom(
+                                skills_dir, name, &markdown,
+                            ))
+                })
             })
     })
 }
@@ -958,8 +958,13 @@ fn write_skill(skills_dir: &Path, name: &str, md: &str, api_url: &str) -> Result
     // Host-aware: the bundled skills say `localhost:3030`; rewrite to the
     // target host so an off-box agent hits the right screenpipe.
     let body = md.replace("localhost:3030", host_port(api_url));
-    if screenpipe_core::starter_skills::STARTER_SKILLS.iter().any(|(key, _)| *key == name) {
-        return Ok(screenpipe_core::starter_skills::install_one(skills_dir, name, &body)?);
+    if screenpipe_core::starter_skills::STARTER_SKILLS
+        .iter()
+        .any(|(key, _)| *key == name)
+    {
+        return Ok(screenpipe_core::starter_skills::install_one(
+            skills_dir, name, &body,
+        )?);
     }
     let dir = skills_dir.join(name);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -1055,7 +1060,9 @@ fn remove_skills_from(skills_dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     for (name, _) in screenpipe_core::starter_skills::STARTER_SKILLS {
-        if screenpipe_core::starter_skills::remove_one(skills_dir, name)? { removed.push(skills_dir.join(name)); }
+        if screenpipe_core::starter_skills::remove_one(skills_dir, name)? {
+            removed.push(skills_dir.join(name));
+        }
     }
     Ok(removed)
 }
@@ -1570,10 +1577,16 @@ mod tests {
             ("hermes", "hermes"),
         ] {
             let paths = install_skills_in(target, "http://localhost:3030", home.path()).unwrap();
-            assert_eq!(paths.len(), 2 + screenpipe_core::starter_skills::STARTER_SKILLS.len());
+            assert_eq!(
+                paths.len(),
+                2 + screenpipe_core::starter_skills::STARTER_SKILLS.len()
+            );
             for (name, markdown) in screenpipe_core::starter_skills::STARTER_SKILLS {
                 let root = layout_in(target, home.path()).unwrap().skills_dir.unwrap();
-                assert_eq!(std::fs::read_to_string(root.join(name).join("SKILL.md")).unwrap(), *markdown);
+                assert_eq!(
+                    std::fs::read_to_string(root.join(name).join("SKILL.md")).unwrap(),
+                    *markdown
+                );
             }
             let body = std::fs::read_to_string(&paths[0]).unwrap();
             assert!(body.contains(&format!("X-Screenpipe-Agent: {expected}")));
