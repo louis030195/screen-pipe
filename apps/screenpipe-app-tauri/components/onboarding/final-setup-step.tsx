@@ -149,7 +149,7 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
     } catch (failure) {
       if (controller.signal.aborted) return;
       posthog.capture("onboarding_default_setup_failed", { step: taskSlug, stage, setup_version: 2 });
-      setError(stage === "continue" ? "Your setup is saved. Screenpipe couldn't open. Try again." : "Screenpipe couldn't finish setup. Completed tasks are saved; retry or finish later in Settings.");
+      setError(stage === "continue" ? "Your setup is saved. Screenpipe couldn't open. Try again." : "Screenpipe couldn't finish setup. Completed tasks are saved; retry or finish later in Scheduled Tasks.");
     } finally {
       if (!controller.signal.aborted) { setBusy(false); setPhase(""); }
       running.current = false;
@@ -183,13 +183,13 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
             {presets.map(p => <option key={p.id} value={p.id}>{p.model} · {p.provider}</option>)}
           </select>
         </label>
-        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{preset?.provider === "native-ollama" ? "Uses your local model." : "Selected tasks send work context to this model provider."} You can change or pause these tasks in Settings.</p>
+        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{preset?.provider === "native-ollama" ? "Uses your local model." : "Selected tasks send work context to this model provider."} Change or pause these in Scheduled Tasks.</p>
       </div>
       {error && <div role="alert" className="mt-4 text-xs leading-relaxed text-destructive">{error}</div>}
       {busy && <p role="status" className="mt-4 text-xs text-muted-foreground">{phase}</p>}
       <Button className="mt-4 w-full" onClick={() => void start()} disabled={busy || connectionBusy || checkingGmail || needsModel && !preset} aria-busy={busy}>{busy && <Loader2 aria-hidden="true" className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />}{busy ? "setting up" : error ? "retry setup" : "start screenpipe"}</Button>
       {(error || needsModel && !preset) && <Button variant="ghost" className="mt-2 w-full" disabled={busy || connectionBusy} onClick={() => void finishLater()}>finish setup later</Button>}
-      <p className="mt-2 text-center text-[10px] text-muted-foreground">8 starter skills included. Change these anytime in Settings.</p>
+      <p className="mt-2 text-center text-[10px] text-muted-foreground">8 starter skills included.</p>
     </div>
   );
 }

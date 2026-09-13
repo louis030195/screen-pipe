@@ -39,8 +39,9 @@ its selected switch explains the dependency and setup skips the recap. Connectin
 Gmail later outside onboarding does not silently enable a skipped recap. No account
 connection is required to enter the app.
 
-Starter skills need no extra action. The full catalog, learning model, status,
-and pause controls remain in Settings. The learning task starts on its existing
+Starter skills need no extra action. The full skill catalog remains in Settings.
+Scheduled Tasks is where users manage these automations, their models, schedules,
+and enabled state. The Settings learning card also exposes its own pause control. The learning task starts on its existing
 Pipe schedule; pausing prevents future runs, while an in-flight run may finish.
 
 Setup pins the selected compatible Pi preset before enabling each new or paused
