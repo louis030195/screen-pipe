@@ -20,6 +20,21 @@ user's `<data_dir>/skills`, normally `~/.screenpipe/skills`. The existing CLI an
 desktop MCP setup paths use the same starter installer for Claude Code, Codex,
 Cursor, Gemini CLI, OpenClaw, and Hermes. MCP-only clients stay MCP-only.
 
+Grok Bot uses the same compiled public registry through its existing native/Bun
+gateway bridge. It receives the API skill plus eight separate device-specific
+workflow skills in its private shared store. Every workflow repeats the approved
+local-computer execution boundary; it does not schedule a cloud agent or copy
+private learned skills. This adapter supports macOS and Windows; Linux has no
+credential adapter and remains explicitly unsupported.
+
+Gateway setup verifies all nine entries before reporting connected. A partial
+install can be retried without duplicating completed entries. Starter copies
+carry a content/metadata digest; unchanged marked copies can be updated or
+removed. Unmarked or edited starter copies are preserved and reported for review.
+Disconnect removes this device's unchanged managed copies, keeps edited copies
+and other devices, and retains the existing durable auto-connect opt-out. The
+legacy API skill keeps its existing managed update/removal behavior.
+
 Existing skill files are never adopted. A managed starter updates only while its
 bytes still match its saved installed version. Manual edits revoke management.
 Removal keeps custom files and supplementary files. The local-store seed index
