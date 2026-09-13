@@ -210,6 +210,18 @@ pub async fn export_sqlite(
         sqlx::raw_sql("DROP VIEW IF EXISTS _bulk_element_search; DROP TABLE IF EXISTS _bulk_element_lookup; DROP TABLE IF EXISTS _storage_revocation;").execute(&mut output).await?;
         super::bulk::export(&source,&mut output).await?;
         sqlx::raw_sql("DROP TABLE frames_fts; DROP TABLE frame_payloads; DROP TABLE payload_files; DROP TABLE upload_bindings; DROP TABLE storage_metadata; DROP TABLE _hybrid_migrations;").execute(&mut output).await?;
+        // Hybrid construction adds these derived columns to the legacy schema.
+        // Remove them from the private export before restoring bulky payloads,
+        // so a later migration can construct its own catalog without collisions.
+        sqlx::raw_sql(
+            "ALTER TABLE frames DROP COLUMN payload_full_text_length;
+             ALTER TABLE frames DROP COLUMN payload_accessibility_length;
+             ALTER TABLE frames DROP COLUMN payload_full_text_present;
+             ALTER TABLE frames DROP COLUMN payload_accessibility_present;
+             ALTER TABLE frames DROP COLUMN payload_detail_present;",
+        )
+        .execute(&mut output)
+        .await?;
         let mut after=i64::MIN;
         loop {
             let ids:Vec<i64>=sqlx::query_scalar("SELECT id FROM frames WHERE id>? ORDER BY id LIMIT 128").bind(after).fetch_all(&source.pool).await?;

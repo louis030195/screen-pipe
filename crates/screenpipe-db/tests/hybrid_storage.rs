@@ -472,6 +472,52 @@ async fn compact_and_legacy_export_preserve_logical_records() {
 }
 
 #[tokio::test]
+async fn legacy_exports_can_be_migrated_again() {
+    for populated in [false, true] {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("source");
+        let db = DatabaseManager::new_hybrid(&root, Default::default(), Default::default())
+            .await
+            .unwrap();
+        if populated {
+            seed(&db, 1, Some("export café 東京"), Some("accessible text")).await;
+            db.seal_frame_payloads().await.unwrap();
+            seed(&db, 2, None, Some("")).await;
+        }
+        let expected_payloads = db.frame_payloads(&[1, 2], Projection::All).await.unwrap();
+        let expected_search = search(&db, "export").await;
+        db.close().await;
+
+        let exported_root = parent.path().join("exported");
+        std::fs::create_dir(&exported_root).unwrap();
+        let exported_path = exported_root.join("db.sqlite");
+        screenpipe_db::storage::export_sqlite(&root, &exported_path, Default::default())
+            .await
+            .unwrap();
+        let original = std::fs::read(&exported_path).unwrap();
+        migrate(&exported_root, Default::default(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&exported_path).unwrap(), original);
+
+        let remigrated = DatabaseManager::new(exported_path.to_str().unwrap(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(remigrated.storage_mode(), StorageMode::HybridParquetV1);
+        assert_eq!(
+            remigrated
+                .frame_payloads(&[1, 2], Projection::All)
+                .await
+                .unwrap(),
+            expected_payloads
+        );
+        assert_eq!(search(&remigrated, "export").await, expected_search);
+        remigrated.verify_storage().await.unwrap();
+        remigrated.close().await;
+    }
+}
+
+#[tokio::test]
 async fn storage_budget_rejects_before_acknowledging_and_accepts_after_reclamation() {
     let root = tempfile::tempdir().unwrap();
     let mut options = MigrationOptions::default();

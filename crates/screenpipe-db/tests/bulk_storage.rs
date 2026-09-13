@@ -363,6 +363,23 @@ async fn bulk_backup_export_and_snapshot_leases_preserve_records() {
         .unwrap();
     assert_eq!(logical(&exported).await, expected);
     exported.close().await;
+
+    let remigrated_root = tempfile::tempdir().unwrap();
+    let remigrated_path = remigrated_root.path().join("db.sqlite");
+    std::fs::copy(&export, &remigrated_path).unwrap();
+    screenpipe_db::storage::migrate(
+        remigrated_root.path(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let remigrated = DatabaseManager::new(remigrated_path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(logical(&remigrated).await, expected);
+    remigrated.verify_storage().await.unwrap();
+    remigrated.close().await;
 }
 
 #[cfg(feature = "storage-fault-injection")]
