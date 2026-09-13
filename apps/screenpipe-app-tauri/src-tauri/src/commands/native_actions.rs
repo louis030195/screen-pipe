@@ -254,8 +254,9 @@ fn native_timeline_action_callback_inner(action_ptr: *const std::os::raw::c_char
             // in the app that wants to react (toasts, analytics).
             let _ = app.emit("timeline-tag-applied", tag);
         }
-        TimelineAction::DeleteRange => {
-            let _ = app.emit("timeline-delete-range", ());
+        TimelineAction::DeleteRange { result } => {
+            // Swift already deleted the range; the webview only reports it.
+            emit_timeline_event(&app, target.as_deref(), "timeline-delete-range", result);
         }
         TimelineAction::Unknown { raw } => {
             // Forwarded rather than dropped so a newer Swift build is not

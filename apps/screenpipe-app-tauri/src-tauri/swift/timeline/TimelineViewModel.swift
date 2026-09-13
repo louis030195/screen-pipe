@@ -242,6 +242,8 @@ final class TimelineViewModel: ObservableObject {
     }
     @Published var filters = TimelineFilters()
     @Published var selection: TimelineSelection?
+    /// True while `POST /data/delete-range` is in flight for the selection.
+    @Published private(set) var isDeletingSelection = false
     @Published var searchReview: TimelineSearchReview?
     @Published var currentDate = Date()
     @Published private(set) var historyAccessRestricted: Bool
@@ -1237,6 +1239,71 @@ final class TimelineViewModel: ObservableObject {
 
     func clearSelection() {
         selection = nil
+    }
+
+    /// Deletes the selected range on the server, then drops those frames from
+    /// the loaded day so the scrubber reflects it without a reload. The
+    /// outcome goes over the action bridge so the webview can toast and clear
+    /// its own caches; the webview does not perform the delete.
+    func deleteSelectionRange() {
+        guard let selection, !isDeletingSelection else { return }
+        let start = selection.start
+        let end = selection.end
+        isDeletingSelection = true
+        Task { [rest] in
+            var payload = TimelineDeleteRangeResultPayload(
+                start: TimelineTime.iso(start),
+                end: TimelineTime.iso(end),
+                framesDeleted: 0,
+                audioTranscriptionsDeleted: 0,
+                error: nil
+            )
+            do {
+                let response = try await rest.deleteRange(start: start, end: end)
+                payload.framesDeleted = response.framesDeleted
+                payload.audioTranscriptionsDeleted = response.audioTranscriptionsDeleted
+            } catch {
+                payload.error = String(describing: error)
+            }
+            await MainActor.run {
+                self.isDeletingSelection = false
+                if payload.error == nil {
+                    self.removeLoadedFrames(from: start, to: end)
+                    self.selection = nil
+                }
+                if let action = payload.actionString {
+                    self.emitAction(action)
+                }
+            }
+        }
+    }
+
+    private func removeLoadedFrames(from start: Date, to end: Date) {
+        let currentTimestamp = frames.indices.contains(currentIndex)
+            ? TimelineTime.parse(frames[currentIndex].timestamp)
+            : nil
+        var removedIds = Set<String>()
+        let kept = frames.filter { frame in
+            guard let date = TimelineTime.parse(frame.timestamp),
+                  date >= start, date <= end else { return true }
+            for device in frame.devices { removedIds.insert(device.frameId) }
+            return false
+        }
+        guard kept.count != frames.count else { return }
+        frames = kept
+        for id in removedIds { tagsByFrameId[id] = nil }
+        // Keep the playhead on the same instant when it survived, otherwise
+        // land on the nearest remaining frame instead of a dangling index.
+        var next = 0
+        if let currentTimestamp,
+           let match = frames.firstIndex(where: { TimelineTime.parse($0.timestamp).map { $0 >= currentTimestamp } ?? false }) {
+            next = match
+        } else if !frames.isEmpty {
+            next = frames.count - 1
+        }
+        currentIndex = min(max(0, next), max(0, frames.count - 1))
+        loadCurrentImage()
+        scheduleMeetingDetection()
     }
 
     func askAISelectionAction() -> String? {

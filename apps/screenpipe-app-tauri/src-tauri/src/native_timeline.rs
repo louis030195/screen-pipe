@@ -163,6 +163,21 @@ pub struct TimelineExportSelection {
     pub end: String,
 }
 
+/// Outcome of a range deletion the Swift timeline already performed. The
+/// webview toasts and drops its caches; it must not issue the delete again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineDeleteRangeResult {
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub frames_deleted: u64,
+    #[serde(default)]
+    pub audio_transcriptions_deleted: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// What the Swift timeline asked the app to do. Parsed from the raw action
 /// string so callers match on a value rather than re-parsing text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,7 +194,7 @@ pub enum TimelineAction {
     AskAiSelection { selection: TimelineSelectionContext },
     ExportVideoSelection { selection: TimelineExportSelection },
     ApplyTag { tag: String },
-    DeleteRange,
+    DeleteRange { result: TimelineDeleteRangeResult },
     Unknown { raw: String },
 }
 
@@ -258,7 +273,14 @@ impl TimelineAction {
             ("apply_tag", Some(tag)) => Self::ApplyTag {
                 tag: tag.to_string(),
             },
-            ("delete_range", _) => Self::DeleteRange,
+            ("delete_range", Some(payload)) => {
+                match serde_json::from_str::<TimelineDeleteRangeResult>(payload) {
+                    Ok(result) => Self::DeleteRange { result },
+                    Err(_) => Self::Unknown {
+                        raw: raw.to_string(),
+                    },
+                }
+            }
             _ => Self::Unknown {
                 raw: raw.to_string(),
             },
@@ -516,11 +538,46 @@ mod tests {
             TimelineAction::OpenRecordingSettings
         );
         assert_eq!(TimelineAction::parse("copy_text"), TimelineAction::CopyText);
-        assert_eq!(TimelineAction::parse("delete_range"), TimelineAction::DeleteRange);
+        // A bare `delete_range` carries no outcome; older Swift builds sent
+        // it and nothing could act on it, so it is forwarded as unknown.
+        assert_eq!(
+            TimelineAction::parse("delete_range"),
+            TimelineAction::Unknown {
+                raw: "delete_range".to_string()
+            }
+        );
     }
 
     #[test]
     fn parses_actions_with_arguments() {
+        assert_eq!(
+            TimelineAction::parse(
+                r#"delete_range:{"start":"2026-08-16T22:00:00Z","end":"2026-08-16T22:05:00Z","framesDeleted":12,"audioTranscriptionsDeleted":3}"#
+            ),
+            TimelineAction::DeleteRange {
+                result: TimelineDeleteRangeResult {
+                    start: "2026-08-16T22:00:00Z".to_string(),
+                    end: "2026-08-16T22:05:00Z".to_string(),
+                    frames_deleted: 12,
+                    audio_transcriptions_deleted: 3,
+                    error: None,
+                }
+            }
+        );
+        assert_eq!(
+            TimelineAction::parse(
+                r#"delete_range:{"start":"2026-08-16T22:00:00Z","end":"2026-08-16T22:05:00Z","framesDeleted":0,"audioTranscriptionsDeleted":0,"error":"badStatus(500, \"\")"}"#
+            ),
+            TimelineAction::DeleteRange {
+                result: TimelineDeleteRangeResult {
+                    start: "2026-08-16T22:00:00Z".to_string(),
+                    end: "2026-08-16T22:05:00Z".to_string(),
+                    frames_deleted: 0,
+                    audio_transcriptions_deleted: 0,
+                    error: Some("badStatus(500, \"\")".to_string()),
+                }
+            }
+        );
         assert_eq!(
             TimelineAction::parse(
                 r#"ask_ai_selection:{"start":"2026-08-16T22:00:00Z","end":"2026-08-16T22:05:00Z","apps":["Mail"],"screenTextSamples":["hello"],"audioTranscriptions":["world"],"frameCount":4}"#

@@ -1181,12 +1181,12 @@ struct TimelineTagToolbar: View {
                     HStack {
                         Button("cancel") { confirmingDelete = false }
                             .buttonStyle(TimelineControlStyle())
-                        Button("delete permanently") {
-                            model.emitAction("delete_range")
+                        Button(model.isDeletingSelection ? "deleting…" : "delete permanently") {
+                            model.deleteSelectionRange()
                             confirmingDelete = false
-                            model.clearSelection()
                         }
                         .buttonStyle(TimelineControlStyle())
+                        .disabled(model.isDeletingSelection)
                     }
                 }
             } else {

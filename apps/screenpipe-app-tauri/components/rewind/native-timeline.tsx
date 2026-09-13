@@ -36,6 +36,8 @@ import {
 import { TimelineDailySummary } from "@/components/rewind/timeline/daily-summary";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
+import { clearTimelineCache } from "@/lib/hooks/use-timeline-cache";
+import { clearTextCache } from "@/lib/hooks/use-frame-text-data";
 import { toast } from "@/components/ui/use-toast";
 
 export interface NativeTimelineSelectionContext {
@@ -50,6 +52,15 @@ export interface NativeTimelineSelectionContext {
 export interface NativeTimelineExportSelection {
   start: string;
   end: string;
+}
+
+/** Outcome of a range deletion the Swift timeline performed itself. */
+export interface NativeTimelineDeleteRangeResult {
+  start: string;
+  end: string;
+  framesDeleted: number;
+  audioTranscriptionsDeleted: number;
+  error?: string;
 }
 
 export interface NativeTimelineDailySummaryRequest {
@@ -217,6 +228,34 @@ export function NativeTimelineBridge({
                 error,
               );
             });
+        },
+      ),
+      listen<NativeTimelineDeleteRangeResult>(
+        "timeline-delete-range",
+        (event) => {
+          const result = event.payload;
+          if (result.error) {
+            toast({
+              variant: "destructive",
+              title: "deletion failed",
+              description: result.error,
+            });
+            return;
+          }
+          toast({
+            title: "deleted",
+            description: `removed ${result.framesDeleted} frames, ${result.audioTranscriptionsDeleted} audio segments`,
+          });
+          // The React timeline shares these caches; a stale entry would
+          // resurrect deleted frames the next time it mounts.
+          clearTextCache();
+          void clearTimelineCache();
+          posthog.capture("timeline_range_deleted", {
+            duration_ms:
+              new Date(result.end).getTime() - new Date(result.start).getTime(),
+            frames_deleted: result.framesDeleted,
+            native_timeline: true,
+          });
         },
       ),
       listen<NativeTimelineExportSelection>(

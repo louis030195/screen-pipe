@@ -95,6 +95,16 @@ struct AudioUpdate: Equatable {
     static let matchWindow: TimeInterval = 60
 }
 
+struct DeleteRangeResponse: Decodable, Equatable {
+    var framesDeleted: Int
+    var audioTranscriptionsDeleted: Int
+
+    enum CodingKeys: String, CodingKey {
+        case framesDeleted = "frames_deleted"
+        case audioTranscriptionsDeleted = "audio_transcriptions_deleted"
+    }
+}
+
 struct SpeakerReassignResponse: Decodable, Equatable {
     var newSpeakerId: Int64
     var newSpeakerName: String
@@ -540,6 +550,22 @@ struct TimelineRESTClient {
         )
         _ = try await perform(req)
         return true
+    }
+
+    /// `POST /data/delete-range` — drops every frame, audio segment and media
+    /// file inside the range. Irreversible; the caller confirms first.
+    func deleteRange(start: Date, end: Date) async throws -> DeleteRangeResponse {
+        let body = try JSONSerialization.data(withJSONObject: [
+            "start": TimelineTime.iso(start),
+            "end": TimelineTime.iso(end),
+        ])
+        let req = authorized(
+            config.httpBase.appendingPathComponent("data/delete-range"),
+            method: "POST",
+            body: body
+        )
+        let data = try await perform(req)
+        return try JSONDecoder().decode(DeleteRangeResponse.self, from: data)
     }
 
     /// `POST /speakers/reassign` — the same intent-aware correction path used

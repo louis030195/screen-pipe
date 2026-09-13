@@ -1137,6 +1137,22 @@ struct TimelineExportSelectionPayload: Codable, Equatable {
     var end: String
 }
 
+/// Outcome of a range deletion the Swift timeline performed itself. The
+/// webview only toasts and drops its caches; it never re-issues the delete.
+struct TimelineDeleteRangeResultPayload: Codable, Equatable {
+    var start: String
+    var end: String
+    var framesDeleted: Int
+    var audioTranscriptionsDeleted: Int
+    var error: String?
+
+    var actionString: String? {
+        guard let data = try? JSONEncoder().encode(self),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "delete_range:\(json)"
+    }
+}
+
 // MARK: - Meetings
 
 struct TimelineMeeting: Equatable, Identifiable {
