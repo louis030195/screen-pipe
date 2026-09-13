@@ -437,7 +437,9 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     expect(text).toContain("remember my work");
     expect(text).toContain("recognize meeting speakers");
     expect(text).toContain("start screenpipe");
-    expect(text).not.toContain("connect gmail");
+    expect(text).toContain("connect gmail");
+    expect(text).toContain("connect calendar");
+    expect(text).toContain("email my daily recap");
     const match = text.match(/setup[^0-9]*(\d+)\s*of\s*(\d+)/);
     if (match) {
       const [, current, total] = match.map(Number);

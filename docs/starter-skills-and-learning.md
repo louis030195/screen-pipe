@@ -26,16 +26,22 @@ Removal keeps custom files and supplementary files. The local-store seed index
 remembers deleted names so restarting the app does not recreate them. External
 agent disconnection continues to use its existing opt-out mechanism.
 
-Onboarding replaces the five independent optional setup rows with one
-“start screenpipe” action. It sets up work memory and meeting-speaker suggestions
-by default after showing the model/provider. Nothing is enabled merely by
-rendering the screen. Gmail, Calendar, and daily email remain available after
-onboarding rather than requiring account connections before entering the app.
+Onboarding presents four on-by-default switches: work memory, meeting-speaker
+suggestions, skill learning, and a daily email recap. One “start screenpipe” action
+applies those choices using the displayed model/provider. Nothing is enabled merely
+by rendering the screen. Turning a switch off also pauses that task if it was
+already enabled, including after a partially completed setup.
 
-A single unchecked choice adds skill learning to that setup. Starter skills need
-no extra action. The full catalog, learning model, status, and pause controls
-remain in Settings. The learning task starts on its existing Pipe schedule;
-pausing prevents future runs, while an in-flight run may finish.
+Gmail and Calendar have explicit Connect buttons in a compact section. Their
+existing authorization paths run only after a click. Daily recap uses Gmail and
+is enabled only when Gmail is verified connected on this screen; without Gmail,
+its selected switch explains the dependency and setup skips the recap. Connecting
+Gmail later outside onboarding does not silently enable a skipped recap. No account
+connection is required to enter the app.
+
+Starter skills need no extra action. The full catalog, learning model, status,
+and pause controls remain in Settings. The learning task starts on its existing
+Pipe schedule; pausing prevents future runs, while an in-flight run may finish.
 
 Setup pins the selected compatible Pi preset before enabling each new or paused
 task and reads back enabled state. Already enabled tasks keep their existing
@@ -47,8 +53,10 @@ and recall. Tasks can be paused or changed later.
 Automatic defaults emit `onboarding_defaults_start_clicked`,
 `onboarding_default_setup_attempted`, `onboarding_default_setup_completed`,
 `onboarding_default_setup_failed`, `onboarding_defaults_completed`, and
-`onboarding_defaults_deferred`, all with `setup_version: 1`. They do not emit
-`first_run_next_step_selected`, which represents the previous explicit choices.
+`onboarding_defaults_deferred`, all with `setup_version: 2`. They do not emit
+`first_run_next_step_selected`, which represents the previous explicit choices. Per-task default events include
+`enabled`; completion can mean a verified opt-out. Selection telemetry lists the
+requested choices, while per-task events identify what was actually applied.
 This keeps future default adoption separate from historical opt-in comparisons.
 
 ## Learning contract

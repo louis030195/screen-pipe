@@ -4,6 +4,7 @@
 
 const mockOnboardingTasks = new Map([
   ["digital-clone", { enabled: false, preset: [] as string[] }],
+  ["daily-email-summary", { enabled: false, preset: [] as string[] }],
   ["speaker-reconciliation", { enabled: false, preset: [] as string[] }],
 ]);
 let mockLearningEnabled = false;
@@ -216,7 +217,7 @@ export function mockLocalApiResponse(
     mockLearningEnabled = parseJsonBody(init).enabled === true;
     return Response.json({ success: true });
   }
-  const onboardingMatch = url.pathname.match(/^\/pipes\/(digital-clone|speaker-reconciliation)(?:\/(config|enable))?$/);
+  const onboardingMatch = url.pathname.match(/^\/pipes\/(digital-clone|speaker-reconciliation|daily-email-summary)(?:\/(config|enable))?$/);
   if (onboardingMatch) {
     const task = mockOnboardingTasks.get(onboardingMatch[1])!;
     if (method === "POST") {
