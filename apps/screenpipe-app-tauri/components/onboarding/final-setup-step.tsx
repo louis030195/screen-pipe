@@ -14,10 +14,10 @@ import { publishPipeInstalledReceipt } from "@/lib/pipe-install-receipt";
 import { commands } from "@/lib/utils/tauri";
 
 const DEFAULTS = [
-  { slug: "digital-clone", label: "remember my work", description: "Build memory from your work, meetings, and people.", bundled: false },
-  { slug: "speaker-reconciliation", label: "recognize meeting speakers", description: "Suggest who spoke after meetings, for your review.", bundled: true },
-  { slug: "skill-learning", label: "improve my skills", description: "Learn from work and AI chat previews every 6 hours.", bundled: true },
-  { slug: "daily-email-summary", label: "email my daily recap", description: "Send a short recap each evening through Gmail.", bundled: false },
+  { slug: "digital-clone", label: "remember my work", description: "", bundled: false },
+  { slug: "speaker-reconciliation", label: "recognize meeting speakers", description: "", bundled: true },
+  { slug: "skill-learning", label: "improve my skills", description: "Learns from work and AI chat previews.", bundled: true },
+  { slug: "daily-email-summary", label: "email my daily recap", description: "Sent each evening.", bundled: false },
 ];
 
 
@@ -168,10 +168,10 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
   return (
     <div className="mx-auto w-full max-w-sm" data-testid="onboarding-final-setup">
       <h2 className="font-mono text-xl font-semibold lowercase">ready to remember</h2>
-      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">Ready when you start. Turn off anything you don't want.</p>
+      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">On by default. Change anytime.</p>
       <div className="mt-3 divide-y divide-border">
-        {DEFAULTS.map(task => <div key={task.slug} className="flex items-center justify-between gap-3 py-2">
-          <label htmlFor={`setup-${task.slug}`} className="cursor-pointer"><span className="block text-xs font-medium">{task.label}</span><span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{task.slug === "daily-email-summary" && !gmailConnected ? (gmailConnected === null ? "Checking Gmail connection…" : "Connect Gmail below for a recap each evening.") : task.description}</span></label>
+        {DEFAULTS.map(task => <div key={task.slug} className="flex items-center justify-between gap-3 py-3">
+          <label htmlFor={`setup-${task.slug}`} className="cursor-pointer"><span className="block text-xs font-medium">{task.label}</span>{task.description && <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{task.slug === "daily-email-summary" && !gmailConnected ? (gmailConnected === null ? "Checking Gmail…" : "Needs Gmail.") : task.description}</span>}</label>
           <Switch id={`setup-${task.slug}`} checked={selected[task.slug]} disabled={busy || connectionBusy} onCheckedChange={enabled => setSelected(previous => ({ ...previous, [task.slug]: enabled }))} />
         </div>)}
       </div>
@@ -183,13 +183,12 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
             {presets.map(p => <option key={p.id} value={p.id}>{p.model} · {p.provider}</option>)}
           </select>
         </label>
-        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{preset?.provider === "native-ollama" ? "Uses your local model." : "Selected tasks send work context to this model provider."} Change or pause these in Scheduled Tasks.</p>
+        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{preset?.provider === "native-ollama" ? "Uses your local model." : "Selected tasks send work context to this model provider."} Manage in Scheduled Tasks.</p>
       </div>
       {error && <div role="alert" className="mt-4 text-xs leading-relaxed text-destructive">{error}</div>}
       {busy && <p role="status" className="mt-4 text-xs text-muted-foreground">{phase}</p>}
       <Button className="mt-4 w-full" onClick={() => void start()} disabled={busy || connectionBusy || checkingGmail || needsModel && !preset} aria-busy={busy}>{busy && <Loader2 aria-hidden="true" className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />}{busy ? "setting up" : error ? "retry setup" : "start screenpipe"}</Button>
       {(error || needsModel && !preset) && <Button variant="ghost" className="mt-2 w-full" disabled={busy || connectionBusy} onClick={() => void finishLater()}>finish setup later</Button>}
-      <p className="mt-2 text-center text-[10px] text-muted-foreground">8 starter skills included.</p>
     </div>
   );
 }

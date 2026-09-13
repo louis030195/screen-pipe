@@ -100,7 +100,6 @@ export function SetupConnections({ userToken, disabled, onGmailChange, onBusyCha
   }
 
   return <div className="mt-3 border-t border-border pt-3">
-    <p className="mb-2 text-xs text-muted-foreground">connect your work</p>
     <div className="flex gap-2">
       {(["gmail", "google-calendar"] as const).map(id => <Button key={id} variant="outline" size="sm" className="h-8 flex-1 gap-2 text-[10px]" disabled={disabled || busy !== null || connected[id]} onClick={() => void connect(id)} aria-busy={busy === id}>
         <img src={id === "gmail" ? "/images/gmail.svg" : "/google-calendar-icon.svg"} alt="" className="h-3.5 w-3.5" />
