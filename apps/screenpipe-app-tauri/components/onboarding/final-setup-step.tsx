@@ -33,6 +33,8 @@ import { foregroundAfterOAuth } from "@/lib/connections/foreground-oauth";
 import { publishPipeInstalledReceipt } from "@/lib/pipe-install-receipt";
 import { commands } from "@/lib/utils/tauri";
 
+import { StarterSkillsCard } from "@/components/settings/starter-skills-card";
+
 const GMAIL_POLL_INTERVAL_MS = 2_000;
 const GMAIL_POLL_ATTEMPTS = 60;
 const PIPE_READY_POLL_INTERVAL_MS = 500;
@@ -680,6 +682,8 @@ export default function FinalSetupStep({
           onRetry={() => void refresh()}
         />
       </div>
+
+      <div className="mx-4 mt-4"><StarterSkillsCard /></div>
 
       {error && (
         <p

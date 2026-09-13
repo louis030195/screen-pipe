@@ -29,8 +29,8 @@ const API_SKILL_MD: &str =
 const CLI_SKILL_MD: &str =
     include_str!("../../../screenpipe-core/assets/skills/screenpipe-cli/SKILL.md");
 
-fn bundled_skills(client: AgentClient) -> [(&'static str, Cow<'static, str>); 2] {
-    [
+fn bundled_skills(client: AgentClient) -> Vec<(&'static str, Cow<'static, str>)> {
+    let mut skills = vec![
         (
             "screenpipe-api",
             Cow::Owned(API_SKILL_MD.replace(
@@ -39,7 +39,13 @@ fn bundled_skills(client: AgentClient) -> [(&'static str, Cow<'static, str>); 2]
             )),
         ),
         ("screenpipe-cli", Cow::Borrowed(CLI_SKILL_MD)),
-    ]
+    ];
+    skills.extend(
+        screenpipe_core::starter_skills::STARTER_SKILLS
+            .iter()
+            .map(|(name, md)| (*name, Cow::Borrowed(*md))),
+    );
+    skills
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -458,9 +464,9 @@ fn detected_desktop_agents_in(home: &Path) -> Vec<DesktopDetectedAgent> {
 
 fn skills_ready(layout: &AgentLayout) -> bool {
     layout.skills_dir.as_ref().is_none_or(|skills_dir| {
-        ["screenpipe-api", "screenpipe-cli"]
+        bundled_skills(layout.client)
             .iter()
-            .all(|name| skills_dir.join(name).join("SKILL.md").is_file())
+            .all(|(name, _)| skills_dir.join(name).join("SKILL.md").is_file())
     })
 }
 
@@ -470,7 +476,14 @@ fn desktop_skills_current(layout: &AgentLayout) -> bool {
             .into_iter()
             .all(|(name, markdown)| {
                 std::fs::read_to_string(skills_dir.join(name).join("SKILL.md"))
-                    .is_ok_and(|body| body == markdown.as_ref())
+                    .is_ok_and(|body| {
+                        body == markdown.as_ref()
+                            || (screenpipe_core::starter_skills::STARTER_SKILLS
+                                .iter().any(|(key, _)| key == &name)
+                                && screenpipe_core::starter_skills::is_current_or_custom(
+                                    skills_dir, name, &markdown,
+                                ))
+                    })
             })
     })
 }
@@ -945,6 +958,9 @@ fn write_skill(skills_dir: &Path, name: &str, md: &str, api_url: &str) -> Result
     // Host-aware: the bundled skills say `localhost:3030`; rewrite to the
     // target host so an off-box agent hits the right screenpipe.
     let body = md.replace("localhost:3030", host_port(api_url));
+    if screenpipe_core::starter_skills::STARTER_SKILLS.iter().any(|(key, _)| *key == name) {
+        return Ok(screenpipe_core::starter_skills::install_one(skills_dir, name, &body)?);
+    }
     let dir = skills_dir.join(name);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
@@ -992,7 +1008,7 @@ fn setup(target: &str, api_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Install the canonical screenpipe API and CLI skills for an external agent.
+/// Install the canonical API, CLI, and public starter skills for an external agent.
 ///
 /// This is separate from [`setup`] so the desktop app can keep using its
 /// bundled-bun MCP configuration (including the local API key) while sharing
@@ -1014,7 +1030,7 @@ fn install_skills_in(target: &str, api_url: &str, home: &Path) -> Result<Vec<Pat
         .collect()
 }
 
-/// Remove the two built-in screenpipe skills from an external agent.
+/// Remove built-in skills and unchanged managed starter skills from an external agent.
 ///
 /// Mirror of [`install_skills`]: deletes only `<skills_dir>/screenpipe-api`
 /// and `<skills_dir>/screenpipe-cli`, never the parent skills directory or any
@@ -1038,10 +1054,13 @@ fn remove_skills_from(skills_dir: &Path) -> Result<Vec<PathBuf>> {
             removed.push(dir);
         }
     }
+    for (name, _) in screenpipe_core::starter_skills::STARTER_SKILLS {
+        if screenpipe_core::starter_skills::remove_one(skills_dir, name)? { removed.push(skills_dir.join(name)); }
+    }
     Ok(removed)
 }
 
-/// `screenpipe agent remove <target>` — undo `setup`. Removes the two
+/// `screenpipe agent remove <target>` — undo `setup`. Removes built-in
 /// screenpipe skills and the screenpipe MCP entry; idempotent, missing
 /// files/entries are a no-op.
 fn remove(target: &str) -> Result<()> {
@@ -1551,6 +1570,11 @@ mod tests {
             ("hermes", "hermes"),
         ] {
             let paths = install_skills_in(target, "http://localhost:3030", home.path()).unwrap();
+            assert_eq!(paths.len(), 2 + screenpipe_core::starter_skills::STARTER_SKILLS.len());
+            for (name, markdown) in screenpipe_core::starter_skills::STARTER_SKILLS {
+                let root = layout_in(target, home.path()).unwrap().skills_dir.unwrap();
+                assert_eq!(std::fs::read_to_string(root.join(name).join("SKILL.md")).unwrap(), *markdown);
+            }
             let body = std::fs::read_to_string(&paths[0]).unwrap();
             assert!(body.contains(&format!("X-Screenpipe-Agent: {expected}")));
             assert!(!body.contains("X-Screenpipe-Agent: unknown"));

@@ -91,3 +91,5 @@ describe("SkillsCard organization skills", () => {
     ).toBeInTheDocument();
   });
 });
+
+vi.mock("@/components/settings/starter-skills-card", () => ({ StarterSkillsCard: () => <div data-testid="starter-skills-card" /> }));

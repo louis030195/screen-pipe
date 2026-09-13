@@ -4,6 +4,7 @@
 
 import { homeDir, join } from "@tauri-apps/api/path";
 import { readTextFile } from "@tauri-apps/plugin-fs";
+import { SCREENPIPE_STARTER_SKILLS } from "@/lib/generated/screenpipe-skills";
 import { commands } from "@/lib/utils/tauri";
 
 export type ExternalAgentWithSkills =
@@ -52,6 +53,7 @@ export async function areExternalAgentSkillsInstalled(
     await Promise.all([
       readTextFile(await join(skillsRoot, "screenpipe-api", "SKILL.md")),
       readTextFile(await join(skillsRoot, "screenpipe-cli", "SKILL.md")),
+      ...SCREENPIPE_STARTER_SKILLS.map(skill => join(skillsRoot, skill.name, "SKILL.md").then(readTextFile)),
     ]);
     return true;
   } catch {

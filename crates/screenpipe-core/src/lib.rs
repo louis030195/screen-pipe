@@ -44,6 +44,7 @@ pub mod paths;
 pub mod permissions;
 pub mod pipes;
 pub mod strings;
+pub mod starter_skills;
 pub mod thread_priority;
 pub mod window_pattern;
 // Thin ffmpeg encoder helpers — moved out of screenpipe-engine so that

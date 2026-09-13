@@ -378,3 +378,5 @@ describe("final onboarding setup", () => {
     );
   });
 });
+
+vi.mock("@/components/settings/starter-skills-card", () => ({ StarterSkillsCard: () => <div data-testid="starter-skills-card" /> }));

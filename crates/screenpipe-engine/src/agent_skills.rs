@@ -553,6 +553,30 @@ pub(crate) async fn manage_agent_skill_handler(
     }
 }
 
+/// Read-only, bounded reuse of the existing external-chat discovery path.
+/// Previews are leads only; local Screenpipe activity supplies corroboration.
+pub(crate) async fn learning_chats_handler(Json(input): Json<Value>) -> impl IntoResponse {
+    use screenpipe_core::agents::chat_control::{self, ChatSearchRequest, ChatSource};
+    let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+    if query.chars().count() > 100 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "query is too long"})));
+    }
+    let request = ChatSearchRequest {
+        query: query.to_string(),
+        sources: vec![ChatSource::Codex, ChatSource::Claude, ChatSource::Cursor, ChatSource::Gemini],
+        limit: Some(5),
+    };
+    let mut found = chat_control::search(request, &std::collections::HashSet::new()).await;
+    let since = Utc::now().timestamp_millis() - 86_400_000;
+    found.results.retain(|item| item.updated_at >= since && !matches!(item.state.as_str(), "running" | "active" | "inProgress") && !item.title.to_lowercase().contains("skill-learning"));
+    // No workspace paths or delivery capability cross this read-only surface.
+    let results: Vec<Value> = found.results.into_iter().map(|item| json!({
+        "source": item.source, "id": item.id, "preview": item.preview,
+        "updated_at": item.updated_at,
+    })).collect();
+    (StatusCode::OK, Json(json!({"results": results, "warnings": found.warnings})))
+}
+
 fn skill_summary(skill: AgentSkill) -> Value {
     json!({
         "key": skill.key,

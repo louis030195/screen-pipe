@@ -23,6 +23,7 @@ import {
   type ImportedSkill,
   type ManagedTeamSkillLocal,
 } from "@/lib/utils/tauri";
+import { StarterSkillsCard } from "./starter-skills-card";
 import { SkillsBrowser } from "./skills-browser";
 import { ProviderSkillCatalog } from "./provider-skill-catalog";
 
@@ -132,6 +133,7 @@ export function SkillsCard({ onChanged }: { onChanged?: () => void }) {
 
   return (
     <div className="space-y-4 text-sm">
+      <StarterSkillsCard />
       <p className="text-xs text-muted-foreground leading-relaxed">
         Skills are reusable{" "}
         <code className="text-[11px] bg-muted px-1 rounded">SKILL.md</code>{" "}
