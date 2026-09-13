@@ -2821,9 +2821,14 @@ mod tests {
 
     #[test]
     fn capture_pool_connections_live_until_authoritative_shutdown() {
-        let options = capture_pool_options();
-        assert_eq!(options.get_idle_timeout(), None);
-        assert_eq!(options.get_max_lifetime(), None);
+        for options in [
+            capture_pool_options(),
+            crate::storage::bulk::pool_options(None, true),
+            crate::storage::bulk::pool_options(None, false),
+        ] {
+            assert_eq!(options.get_idle_timeout(), None);
+            assert_eq!(options.get_max_lifetime(), None);
+        }
     }
     use sqlx::sqlite::SqlitePoolOptions;
 
