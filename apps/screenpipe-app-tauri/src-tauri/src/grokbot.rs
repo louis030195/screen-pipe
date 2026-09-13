@@ -29,7 +29,8 @@ async fn run_bridge(
     let data_dir = crate::log_files::get_active_data_dir(app.clone()).await?;
     let api = crate::recording::local_api_context_from_app(app);
     let input = json!({ "home": home, "bun": bun, "dataDir": data_dir,
-        "port": api.port, "skill": API_SKILL, "action": action });
+        "port": api.port, "skill": API_SKILL,
+        "starterSkills": screenpipe_core::starter_skills::STARTER_SKILLS, "action": action });
     run_bridge_input(bun, &input).await
 }
 

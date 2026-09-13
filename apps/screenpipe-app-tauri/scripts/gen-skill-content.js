@@ -59,6 +59,14 @@ async function main() {
 		)
 	}
 
+	const registry = await readFile(path.join(repoRoot, 'crates/screenpipe-core/src/starter_skills.rs'), 'utf8')
+	const starterNames = [...registry.matchAll(/"(screenpipe-[^"]+)",\s*include_str!\(/g)].map(match => match[1]).sort()
+	if (!starterNames.length) throw new Error('starter skill registry is empty')
+	const starters = await Promise.all(starterNames.map(async name => {
+		const md = await readFile(path.join(skillsRoot, name, 'SKILL.md'), 'utf8')
+		return { name, description: md.match(/^description: "(.*)"$/m)?.[1] ?? name }
+	}))
+	body += `export const SCREENPIPE_STARTER_SKILLS = ${JSON.stringify(starters, null, 2)} as const;\n`
 	await mkdir(path.dirname(outFile), { recursive: true })
 	await writeFile(outFile, `${HEADER}\n${body}`, 'utf8')
 	console.log(`[gen-skill-content] wrote ${path.relative(repoRoot, outFile)} from crates/screenpipe-core/assets/skills/*/SKILL.md`)

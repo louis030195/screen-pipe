@@ -1061,6 +1061,10 @@ impl SCServer {
             // native Pi and ACP share profile safety, prompt rendering, skill
             // provenance, optimistic concurrency, and bundled protection.
             .route(
+                "/agent/learning/chats",
+                axum::routing::post(crate::agent_skills::learning_chats_handler),
+            )
+            .route(
                 "/agent/skills/manage",
                 axum::routing::post(crate::agent_skills::manage_agent_skill_handler),
             )

@@ -43,6 +43,7 @@ pub mod no_window;
 pub mod paths;
 pub mod permissions;
 pub mod pipes;
+pub mod starter_skills;
 pub mod strings;
 pub mod thread_priority;
 pub mod window_pattern;

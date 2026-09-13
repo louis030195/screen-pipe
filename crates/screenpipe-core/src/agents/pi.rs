@@ -1127,6 +1127,20 @@ impl PiExecutor {
         let ext_path = ext_dir.join("self-improvement.ts");
         std::fs::write(&ext_path, ext_content)?;
         debug!("self-improvement extension installed at {:?}", ext_path);
+        if project_dir.file_name().and_then(|name| name.to_str()) == Some("skill-learning")
+            && project_dir.join("pipe.md").is_file()
+        {
+            // The task requires its restricted tool surface. Fail the run if
+            // configuration or installation is missing; never silently fall
+            // back to the general-purpose self-improvement tools.
+            let _: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+                project_dir.join(".screenpipe-learning-config.json"),
+            )?)?;
+            std::fs::write(
+                ext_dir.join("skill-learning.ts"),
+                include_str!("../../assets/extensions/skill-learning.ts"),
+            )?;
+        }
         Ok(())
     }
 
