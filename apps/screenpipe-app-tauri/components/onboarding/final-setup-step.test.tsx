@@ -42,15 +42,15 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 function writes() { return mocks.fetch.mock.calls.filter(([, init]) => init?.method === "POST"); }
-function start() { fireEvent.click(screen.getByRole("button", { name: "start screenpipe" })); }
+function start() { fireEvent.click(screen.getByRole("button", { name: "Start Screenpipe" })); }
 
 describe("default onboarding setup", () => {
   it("presents four opt-out defaults without OAuth or any writes on mount", () => {
     render(<FinalSetupStep handleNextSlide={vi.fn()} />);
-    expect(screen.getByText("remember my work")).toBeVisible();
-    expect(screen.getByText("recognize meeting speakers")).toBeVisible();
-    expect(screen.getByRole("button", { name: "connect gmail" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "connect calendar" })).toBeVisible();
+    expect(screen.getByText("Remember my work")).toBeVisible();
+    expect(screen.getByText("Recognize meeting speakers")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Connect Gmail" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Connect Calendar" })).toBeVisible();
     expect(screen.getAllByRole("switch")).toHaveLength(4);
     screen.getAllByRole("switch").forEach(control => expect(control).toBeChecked());
     expect(mocks.authorize).not.toHaveBeenCalled(); expect(mocks.calendarConnect).not.toHaveBeenCalled(); expect(mocks.fetch).not.toHaveBeenCalled();
@@ -64,7 +64,7 @@ describe("default onboarding setup", () => {
     expect(mocks.capture.mock.calls.some(([name]) => name === "first_run_next_step_selected")).toBe(false);
   });
   it("respects learning opt-out and never installs recap without Gmail", async () => {
-    const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); fireEvent.click(screen.getByRole("switch", { name: /improve my skills/ })); start();
+    const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); fireEvent.click(screen.getByRole("switch", { name: /Improve my skills/ })); start();
     await waitFor(() => expect(next).toHaveBeenCalled()); expect(tasks.has("skill-learning")).toBe(false);
     expect(writes().some(([path]) => /gmail|calendar|daily-email/.test(path))).toBe(false);
   });
@@ -78,23 +78,23 @@ describe("default onboarding setup", () => {
     mocks.fetch.mockImplementation((path, init) => path === "/pipes/speaker-reconciliation/config" && fail ? Promise.resolve(Response.json({ error: "failed" }, { status: 500 })) : normalFetch(path, init));
     const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); start(); await screen.findByRole("alert");
     expect(next).not.toHaveBeenCalled(); expect(tasks.get("digital-clone")?.enabled).toBe(true); expect(tasks.get("speaker-reconciliation")?.enabled).toBe(false);
-    fail = false; fireEvent.click(screen.getByRole("button", { name: "retry setup" }));
+    fail = false; fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
     await waitFor(() => expect(next).toHaveBeenCalledTimes(1)); expect(writes().filter(([path]) => path === "/pipes/digital-clone/enable")).toHaveLength(1);
   });
   it("requires enable read-back and offers a recovery exit", async () => {
     mocks.fetch.mockImplementation((path, init) => path.endsWith("/enable") ? Promise.resolve(Response.json({ success: true })) : normalFetch(path, init));
     const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); start(); await screen.findByRole("alert");
-    expect(next).not.toHaveBeenCalled(); fireEvent.click(screen.getByRole("button", { name: "finish setup later" }));
+    expect(next).not.toHaveBeenCalled(); fireEvent.click(screen.getByRole("button", { name: "Finish setup later" }));
     await waitFor(() => expect(next).toHaveBeenCalledTimes(1));
   });
   it("does not duplicate installation on a double click", async () => {
-    const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); const button = screen.getByRole("button", { name: "start screenpipe" }); fireEvent.click(button); fireEvent.click(button);
+    const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); const button = screen.getByRole("button", { name: "Start Screenpipe" }); fireEvent.click(button); fireEvent.click(button);
     await waitFor(() => expect(next).toHaveBeenCalledTimes(1)); expect(writes().filter(([path]) => path === "/pipes/store/install")).toHaveLength(1);
   });
   it("allows recovery without a compatible model", async () => {
     mocks.presets = []; const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />);
-    expect(screen.getByRole("button", { name: "start screenpipe" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "finish setup later" })); await waitFor(() => expect(next).toHaveBeenCalled()); expect(writes()).toEqual([]);
+    expect(screen.getByRole("button", { name: "Start Screenpipe" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Finish setup later" })); await waitFor(() => expect(next).toHaveBeenCalled()); expect(writes()).toEqual([]);
   });
   it("waits for a resumed engine without losing the consent click", async () => {
     vi.useFakeTimers(); let checks = 0;
@@ -114,25 +114,39 @@ describe("default onboarding setup", () => {
     await waitFor(() => expect(release).toBeDefined()); view.unmount(); await act(async () => { release(); });
     expect(writes()).toEqual([]); expect(next).not.toHaveBeenCalled();
   });
+  it.each([true, false])("pins the compatible default or first compatible fallback (default: %s)", async (hasDefault) => {
+    mocks.presets = [
+      { id: "acp", model: "agent", provider: "acp", defaultPreset: !hasDefault },
+      { id: "first", model: "first-model", provider: "native-ollama", defaultPreset: false },
+      { id: "preferred", model: "preferred-model", provider: "native-ollama", defaultPreset: hasDefault },
+    ];
+    const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />);
+    const expected = hasDefault ? "preferred" : "first";
+    expect(screen.getByText(text => text.includes(`Uses your local model (${expected}-model).`))).toBeVisible();
+    start(); await waitFor(() => expect(next).toHaveBeenCalledTimes(1));
+    const configs = writes().filter(([path]) => path.endsWith("/config"));
+    expect(configs).toHaveLength(3);
+    for (const [, init] of configs) expect(JSON.parse(init.body).preset).toEqual([expected]);
+  });
   it("discloses cloud processing before consent", () => {
     mocks.presets = [{ id: "cloud", model: "auto", provider: "screenpipe-cloud", defaultPreset: true }];
     render(<FinalSetupStep handleNextSlide={vi.fn()} />);
-    expect(screen.getByRole("combobox")).toHaveTextContent("auto · screenpipe-cloud");
-    expect(screen.getByText(/Selected tasks send work context to this model provider/)).toBeVisible(); expect(writes()).toEqual([]);
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.getByText(/Work context goes to screenpipe-cloud \(auto\)/)).toBeVisible(); expect(writes()).toEqual([]);
   });
   it("bounds an unavailable engine and leaves a way to finish later", async () => {
     vi.useFakeTimers(); mocks.fetch.mockRejectedValue(new Error("offline"));
     const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); start();
     await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
     expect(screen.getByRole("alert")).toBeVisible(); expect(next).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "finish setup later" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Finish setup later" })).toBeEnabled();
     expect(mocks.spawn).toHaveBeenCalledTimes(1); expect(writes()).toEqual([]);
   });
   it("keeps setup retryable if advancing onboarding fails", async () => {
     const next = vi.fn().mockRejectedValueOnce(new Error("save failed")).mockResolvedValue(undefined);
     render(<FinalSetupStep handleNextSlide={next} />); start(); await screen.findByRole("alert");
     expect(screen.getByRole("alert")).toHaveTextContent("Your setup is saved");
-    const previousWrites = writes().length; fireEvent.click(screen.getByRole("button", { name: "retry setup" }));
+    const previousWrites = writes().length; fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
     await waitFor(() => expect(next).toHaveBeenCalledTimes(2)); expect(writes()).toHaveLength(previousWrites);
   });
 
@@ -150,7 +164,7 @@ describe("default onboarding setup", () => {
     const next = vi.fn(); render(<FinalSetupStep userToken="synthetic-token" handleNextSlide={next} />);
     await waitFor(() => expect(mocks.gmailStatus).toHaveBeenCalledTimes(1));
     mocks.gmailStatus.mockResolvedValue({ gmail: { connected: true } });
-    fireEvent.click(screen.getByRole("button", { name: "connect gmail" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect Gmail" }));
     await screen.findByRole("button", { name: "Gmail connected" });
     expect(mocks.authorize).toHaveBeenCalledTimes(1); expect(mocks.open).toHaveBeenCalledTimes(1);
     expect(writes()).toEqual([]); start();
@@ -162,13 +176,13 @@ describe("default onboarding setup", () => {
     mocks.gmailStatus.mockResolvedValue({ gmail: { connected: true } });
     const next = vi.fn(); render(<FinalSetupStep userToken="synthetic-token" handleNextSlide={next} />);
     await screen.findByRole("button", { name: "Gmail connected" });
-    fireEvent.click(screen.getByRole("switch", { name: /email my daily recap/ })); start();
+    fireEvent.click(screen.getByRole("switch", { name: /Email my daily recap/ })); start();
     await waitFor(() => expect(next).toHaveBeenCalled()); expect(tasks.has("daily-email-summary")).toBe(false);
     expect(mocks.authorize).not.toHaveBeenCalled();
   });
   it("connects Calendar explicitly, without enabling tasks or Gmail", async () => {
     render(<FinalSetupStep handleNextSlide={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "connect calendar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect Calendar" }));
     await screen.findByRole("button", { name: "Calendar connected" });
     expect(mocks.calendarConnect).toHaveBeenCalledWith("google-calendar", null, null);
     expect(mocks.authorize).not.toHaveBeenCalled(); expect(writes()).toEqual([]);
@@ -176,16 +190,16 @@ describe("default onboarding setup", () => {
   it("shows connection failure and allows retry without blocking Start", async () => {
     mocks.calendarConnect.mockResolvedValueOnce({ status: "error", error: "unavailable" });
     render(<FinalSetupStep handleNextSlide={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "connect calendar" }));
-    await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "start screenpipe" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "connect calendar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect Calendar" }));
+    await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "Start Screenpipe" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Connect Calendar" }));
     await screen.findByRole("button", { name: "Calendar connected" });
   });
   it("does not register Gmail or update connections after unmount", async () => {
     let release!: (value: string) => void;
     mocks.authorize.mockImplementation(() => new Promise(resolve => { release = resolve; }));
     const view = render(<FinalSetupStep userToken="synthetic-token" handleNextSlide={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "connect gmail" })); view.unmount();
+    fireEvent.click(screen.getByRole("button", { name: "Connect Gmail" })); view.unmount();
     await act(async () => release("https://example.com/oauth"));
     expect(mocks.open).not.toHaveBeenCalled(); expect(mocks.register).not.toHaveBeenCalled();
   });
@@ -194,9 +208,9 @@ describe("default onboarding setup", () => {
     let release!: (value: unknown) => void;
     mocks.gmailStatus.mockImplementation(() => new Promise(resolve => { release = resolve; }));
     const next = vi.fn(); render(<FinalSetupStep userToken="synthetic-token" handleNextSlide={next} />);
-    expect(screen.getByRole("button", { name: "start screenpipe" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start Screenpipe" })).toBeDisabled();
     // Calendar authorization must not discard the pending Gmail status read.
-    fireEvent.click(screen.getByRole("button", { name: "connect calendar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Connect Calendar" }));
     await screen.findByRole("button", { name: "Calendar connected" });
     await act(async () => release({ gmail: { connected: true } })); start();
     await waitFor(() => expect(next).toHaveBeenCalled()); expect(tasks.get("daily-email-summary")?.enabled).toBe(true);
@@ -205,8 +219,8 @@ describe("default onboarding setup", () => {
     mocks.gmailStatus.mockImplementation(() => new Promise(() => {}));
     mocks.authorize.mockRejectedValue(new Error("cancelled"));
     render(<FinalSetupStep userToken="synthetic-token" handleNextSlide={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "connect gmail" }));
-    await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "start screenpipe" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Connect Gmail" }));
+    await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "Start Screenpipe" })).toBeEnabled();
   });
 
   it("tolerates unavailable Calendar status and malformed completion without crashing", async () => {
@@ -214,8 +228,8 @@ describe("default onboarding setup", () => {
     mocks.calendarConnect.mockResolvedValue({ status: "ok", data: null });
     render(<FinalSetupStep handleNextSlide={vi.fn()} />);
     await act(async () => {});
-    fireEvent.click(screen.getByRole("button", { name: "connect calendar" }));
-    await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "start screenpipe" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Connect Calendar" }));
+    await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "Start Screenpipe" })).toBeEnabled();
   });
 
 });

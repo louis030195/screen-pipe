@@ -42,8 +42,10 @@ remembers deleted names so restarting the app does not recreate them. External
 agent disconnection continues to use its existing opt-out mechanism.
 
 Onboarding presents four on-by-default switches: work memory, meeting-speaker
-suggestions, skill learning, and a daily email recap. One “start screenpipe” action
-applies those choices using the displayed model/provider. Nothing is enabled merely
+suggestions, skill learning, and a daily email recap. One “Start Screenpipe” action
+applies those choices using the default compatible preset (or the first compatible
+preset if no default is available). Concise text discloses the model/provider and
+points to Scheduled Tasks to use another AI provider; onboarding has no model dropdown. Nothing is enabled merely
 by rendering the screen. Turning a switch off also pauses that task if it was
 already enabled, including after a partially completed setup.
 
