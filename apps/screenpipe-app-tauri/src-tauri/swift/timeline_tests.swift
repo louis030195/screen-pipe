@@ -324,6 +324,46 @@ private func testLiveEdge() {
     expectEqual(TimelineLiveEdge.shiftIndex(7, newFramesAtFront: -2), 7, "negative counts are ignored")
 }
 
+// MARK: - Range removal
+
+private func testRangeRemoval() {
+    let base = Date(timeIntervalSince1970: 1_760_000_000)
+    // Newest-first: index 0 is `base`, index 9 is 90 s ago.
+    let frames = (0..<10).map {
+        makeFrame(secondsAgo: Double($0) * 10, app: "A", frameId: 100 + $0, base: base)
+    }
+    let at: (Int) -> Date = { base.addingTimeInterval(-Double($0) * 10) }
+
+    // Deleting up to and including the newest frame while the playhead is on
+    // it: land on the live edge, not the oldest frame.
+    var r = TimelineRangeRemoval.remove(from: at(3), to: at(0), frames: frames, currentIndex: 0)
+    expectEqual(r.frames.count, 6, "four newest frames removed")
+    expectEqual(r.nextIndex, 0, "playhead follows the live edge after deleting the head")
+    expectEqual(r.frames.first?.devices.first?.frameId, "104", "next-newest frame becomes the head")
+    expectEqual(r.removedFrameIds, Set(["100", "101", "102", "103"]), "removed ids are reported")
+
+    // Playhead outside the range keeps its frame even though its index shifts.
+    r = TimelineRangeRemoval.remove(from: at(5), to: at(3), frames: frames, currentIndex: 7)
+    expectEqual(r.frames.count, 7, "middle frames removed")
+    expectEqual(r.frames[r.nextIndex].devices.first?.frameId, "107", "playhead stays on its frame")
+    expectEqual(r.nextIndex, 4, "index shifts by the number of newer frames removed")
+
+    // Playhead inside a middle range: nearest surviving frame, not index 0.
+    r = TimelineRangeRemoval.remove(from: at(5), to: at(3), frames: frames, currentIndex: 4)
+    let landed = r.frames[r.nextIndex].devices.first?.frameId
+    expect(landed == "102" || landed == "106", "playhead lands on a neighbour, got \(landed ?? "nil")")
+
+    // Nothing in range: untouched.
+    r = TimelineRangeRemoval.remove(from: at(30), to: at(20), frames: frames, currentIndex: 2)
+    expectEqual(r.frames.count, 10, "out-of-range delete keeps every frame")
+    expectEqual(r.nextIndex, 2, "out-of-range delete keeps the playhead")
+
+    // Everything deleted: safe empty result.
+    r = TimelineRangeRemoval.remove(from: at(9), to: at(0), frames: frames, currentIndex: 5)
+    expect(r.frames.isEmpty, "full-range delete empties the day")
+    expectEqual(r.nextIndex, 0, "empty day clamps the playhead to zero")
+}
+
 // MARK: - Colours
 
 private func testColors() {
@@ -1249,6 +1289,7 @@ private let allTests: [(String, () -> Void)] = [
     ("merge audio upgrade", testMergeAudioUpgrade),
     ("audio update window", testAudioUpdateWindow),
     ("live edge", testLiveEdge),
+    ("range removal", testRangeRemoval),
     ("js int32", testJSToInt32),
     ("colours", testColors),
     ("categories", testCategories),

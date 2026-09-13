@@ -1279,29 +1279,19 @@ final class TimelineViewModel: ObservableObject {
     }
 
     private func removeLoadedFrames(from start: Date, to end: Date) {
-        let currentTimestamp = frames.indices.contains(currentIndex)
-            ? TimelineTime.parse(frames[currentIndex].timestamp)
-            : nil
-        var removedIds = Set<String>()
-        let kept = frames.filter { frame in
-            guard let date = TimelineTime.parse(frame.timestamp),
-                  date >= start, date <= end else { return true }
-            for device in frame.devices { removedIds.insert(device.frameId) }
-            return false
+        let result = TimelineRangeRemoval.remove(
+            from: start,
+            to: end,
+            frames: frames,
+            currentIndex: currentIndex
+        )
+        guard result.frames.count != frames.count else { return }
+        frames = result.frames
+        for id in result.removedFrameIds { tagsByFrameId[id] = nil }
+        if let preferredFrameId, result.removedFrameIds.contains(preferredFrameId) {
+            self.preferredFrameId = nil
         }
-        guard kept.count != frames.count else { return }
-        frames = kept
-        for id in removedIds { tagsByFrameId[id] = nil }
-        // Keep the playhead on the same instant when it survived, otherwise
-        // land on the nearest remaining frame instead of a dangling index.
-        var next = 0
-        if let currentTimestamp,
-           let match = frames.firstIndex(where: { TimelineTime.parse($0.timestamp).map { $0 >= currentTimestamp } ?? false }) {
-            next = match
-        } else if !frames.isEmpty {
-            next = frames.count - 1
-        }
-        currentIndex = min(max(0, next), max(0, frames.count - 1))
+        currentIndex = result.nextIndex
         loadCurrentImage()
         scheduleMeetingDetection()
     }
