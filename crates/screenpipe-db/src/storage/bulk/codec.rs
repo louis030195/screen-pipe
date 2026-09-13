@@ -213,7 +213,6 @@ pub(super) fn checked_reader(
     Ok(reader)
 }
 
-#[cfg(feature = "storage-bench-experiments")]
 pub(super) fn read_positions(
     path: &Path,
     hash: &str,

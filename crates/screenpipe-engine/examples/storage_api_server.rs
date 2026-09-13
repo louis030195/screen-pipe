@@ -30,11 +30,6 @@ async fn main() -> anyhow::Result<()> {
         root.join(".screenpipe-api-benchmark").is_file(),
         "root must be an explicitly prepared benchmark copy"
     );
-    #[cfg(feature = "storage-bench-experiments")]
-    screenpipe_db::storage::experiments::configure(
-        &root,
-        &std::env::var("SCREENPIPE_BENCH_METHODS").unwrap_or_default(),
-    )?;
     let db = Arc::new(
         DatabaseManager::new(root.join("db.sqlite").to_str().unwrap(), Default::default()).await?,
     );
@@ -82,73 +77,6 @@ async fn main() -> anyhow::Result<()> {
         let (child_user, child_system, _) = usage(libc::RUSAGE_CHILDREN);
         axum::Json(serde_json::json!({"user_ms":user,"system_ms":system,"child_cpu_ms":child_user+child_system,"peak_rss_native":rss}))
     }));
-    let router = if std::env::var("SCREENPIPE_BENCH_METHODS")
-        .unwrap_or_default()
-        .split(',')
-        .any(|s| s == "read-lock")
-    {
-        let lock = Arc::new(tokio::sync::RwLock::new(()));
-        router.layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let lock = Arc::clone(&lock);
-                async move {
-                    let path = request.uri().path();
-                    if path == "/__benchmark_metrics" {
-                        return next.run(request).await;
-                    }
-                    if path == "/add" || path.starts_with("/tags/") {
-                        let _guard = lock.write().await;
-                        next.run(request).await
-                    } else {
-                        let _guard = lock.read().await;
-                        next.run(request).await
-                    }
-                }
-            },
-        ))
-    } else {
-        router
-    };
-    #[cfg(feature = "storage-bench-experiments")]
-    let router = if std::env::var("SCREENPIPE_BENCH_METHODS")
-        .unwrap_or_default()
-        .split(',')
-        .any(|s| s == "snapshot")
-    {
-        let db = Arc::clone(&db);
-        router.layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let db = Arc::clone(&db);
-                async move {
-                    let path = request.uri().path();
-                    if (request.method() != axum::http::Method::GET && path != "/raw_sql")
-                        || path == "/__benchmark_metrics"
-                    {
-                        return next.run(request).await;
-                    }
-                    let read = async {
-                        let token = db.storage_read_token().await?;
-                        let response = next.run(request).await;
-                        let _admission = token.admit(&db.pool).await?;
-                        Ok::<_, sqlx::Error>(response)
-                    };
-                    match screenpipe_db::storage::experiments::snapshot(&db.pool, read).await {
-                        Ok(Ok(response)) => response,
-                        Ok(Err(error)) | Err(error) => {
-                            use axum::response::IntoResponse;
-                            (
-                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                axum::Json(serde_json::json!({"error":error.to_string()})),
-                            )
-                                .into_response()
-                        }
-                    }
-                }
-            },
-        ))
-    } else {
-        router
-    };
     println!(
         "{}",
         serde_json::json!({"base_url":format!("http://{addr}"),"storage_mode":db.storage_mode(),"pid":std::process::id()})

@@ -9,22 +9,26 @@ mod bindings;
 pub(crate) mod bulk;
 mod codec;
 mod command;
-#[cfg(feature = "storage-bench-experiments")]
-pub mod experiments;
 mod faults;
+mod import;
 mod inventory;
 mod lifecycle;
 mod maintenance;
+pub(crate) mod read_schema;
 mod reader;
 pub(crate) mod schema;
 mod sealing;
+pub(crate) mod snapshot;
 pub(crate) mod sql;
 mod validation;
 
 pub use backup::restore;
 pub use command::run_command;
 pub use inventory::{artifact_bytes, inventory};
-pub use lifecycle::{cancel_migration, migrate, MigrationOptions, MigrationReport};
+pub use lifecycle::{
+    cancel_migration, migrate, migrate_with_progress, migration_report,
+    pause_interrupted_migration, MigrationOptions, MigrationReport,
+};
 pub use maintenance::{compact, export_sqlite};
 pub use reader::StorageReadToken;
 use serde::{Deserialize, Serialize};
@@ -178,6 +182,7 @@ pub(crate) struct HybridStorage {
     pub leases: Arc<RwLock<()>>,
     pub decoder: Arc<Semaphore>,
     pub file_job: Mutex<()>,
+    pub read_lanes: std::sync::OnceLock<Arc<Semaphore>>,
     pub closing: tokio_util::sync::CancellationToken,
     pub privacy_ready: std::sync::atomic::AtomicBool,
     pub bulk: bulk::Runtime,
@@ -264,8 +269,10 @@ pub fn resolve_database_path(database: &Path) -> Result<PathBuf, sqlx::Error> {
                 "offline index maintenance pending; resume compact before opening",
             ));
         }
-        if (root.join("storage-migration.json").exists() || root.join("storage-init.json").exists())
-            && !root.join("storage.json").exists()
+        if !root.join("storage.json").exists()
+            && (root.join("storage-init.json").exists()
+                || (root.join("storage-migration.json").exists()
+                    && !lifecycle::migration_is_paused(root)?))
         {
             return Err(storage_error(
                 "offline migration pending; resume or cancel it before opening",
@@ -425,6 +432,7 @@ impl HybridStorage {
             gate: Arc::new(Mutex::new(())),
             leases: Arc::new(RwLock::new(())),
             file_job: Mutex::new(()),
+            read_lanes: std::sync::OnceLock::new(),
             closing: tokio_util::sync::CancellationToken::new(),
             privacy_ready: std::sync::atomic::AtomicBool::new(false),
             bulk: bulk::Runtime::default(),

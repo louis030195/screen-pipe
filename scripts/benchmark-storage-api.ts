@@ -27,7 +27,7 @@ const hotFrame = args.includes("--hot-frame");
 const concurrencyLevels = args.includes("--concurrency") ? arg("--concurrency").split(",").map(Number) : null;
 const requestCount = args.includes("--requests") ? Number(arg("--requests")) : null;
 const label = args.includes("--label") ? arg("--label") : "";
-const methods = args.includes("--methods") ? arg("--methods") : "";
+if (args.includes("--methods")) throw new Error("Storage methods are built into normal hybrid reads; benchmark the production implementation without --methods");
 const mixedWrite = args.includes("--mixed-write") ? arg("--mixed-write") : "audio_1k_write";
 const mixedDuration = args.includes("--mixed-ms") ? Number(arg("--mixed-ms")) : null;
 if (!["audio_1k_write","audio_16k_write","frame_ingest"].includes(mixedWrite) || (mixedDuration !== null && (!Number.isInteger(mixedDuration) || mixedDuration < 1 || mixedDuration > 300000))) throw new Error("invalid mixed write workload");
@@ -48,7 +48,7 @@ await Bun.write(log, "");
 await Bun.write(events, "");
 await Bun.write(join(root, `${suffix}-write-errors.jsonl`), "");
 const child = Bun.spawn(["/usr/bin/sandbox-exec", "-f", join(root, "server.sb"), binary, fixture], {
-  env: { ...process.env, SCREENPIPE_DISABLE_TELEMETRY: "1", SCREENPIPE_BENCH_METHODS: methods }, stdout: "pipe", stderr: Bun.file(log),
+  env: { ...process.env, SCREENPIPE_DISABLE_TELEMETRY: "1" }, stdout: "pipe", stderr: Bun.file(log),
 });
 const timeout = <T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> => new Promise((resolve, reject) => {
   const timer = setTimeout(() => { try { resolve(onTimeout()); } catch (e) { reject(e); } }, ms);
@@ -138,7 +138,7 @@ function writeSpec(name: string, index: number): Spec {
   if (name === "frame_ingest") return { name, path: "/add", write: true, body: { device_name: `${nonce}-frame-${seq}`, content: { content_type: "frames", data: [{ file_path: join(fixture,"fixture.png"), timestamp: "2030-01-01T00:00:00Z", app_name: "API benchmark", window_name: `${nonce}-${seq}`, ocr_results: [{ text: payload(seq, 16384), text_json: JSON.stringify([{text:"benchmark",confidence:1,left:0,top:0,width:1,height:1}]) }] }] } } };
   return { name, path: "/add", write: true, body: { device_name: nonce, content: { content_type: "transcription", data: { transcription: payload(seq, name === "audio_16k_write" ? 16384 : 1024), transcription_engine: "api-benchmark" } } } };
 }
-const report: any = { mode, smoke, phase, label, methods, mixed_cases: mixedCases, mixed_write: mixedWrite, mixed_duration_ms: mixedDuration, binary_sha256: createHash("sha256").update(new Uint8Array(await Bun.file(binary).arrayBuffer())).digest("hex"), concurrency_levels: concurrencyLevels, request_count: requestCount, hot_frame: hotFrame, revision: "51360ff60c + experiment changes identified by binary hash", platform: process.platform, http: "production router over loopback TCP; keep-alive; complete response body", cache: "untimed warmups; search uncached uses fields=type,content retaining complete rows and pagination; SQLite/OS caches shared", groups: [], probes: [], mixed: [], write_verification: [] };
+const report: any = { mode, smoke, phase, label, mixed_cases: mixedCases, mixed_write: mixedWrite, mixed_duration_ms: mixedDuration, binary_sha256: createHash("sha256").update(new Uint8Array(await Bun.file(binary).arrayBuffer())).digest("hex"), concurrency_levels: concurrencyLevels, request_count: requestCount, hot_frame: hotFrame, revision: "production implementation identified by binary hash", platform: process.platform, http: "production router over loopback TCP; keep-alive; complete response body", cache: "untimed warmups; search uncached uses fields=type,content retaining complete rows and pagination; SQLite/OS caches shared", groups: [], probes: [], mixed: [], write_verification: [] };
 async function batch(name: string, concurrency: number, specs: Spec[]) {
   let next = 0; const samples: Sample[] = [];
   const count = specs.length;

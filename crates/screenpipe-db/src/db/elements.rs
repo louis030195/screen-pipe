@@ -254,12 +254,9 @@ LIMIT ? OFFSET ?
 
         let hybrid = self.storage.as_ref().is_some_and(|s| s.has_bulk());
         let grouped = !use_fts && hybrid;
-        #[cfg(feature = "storage-bench-experiments")]
-        let lookup = hybrid && use_fts && crate::storage::experiments::enabled("element-lookup");
-        #[cfg(not(feature = "storage-bench-experiments"))]
-        let lookup = false;
+        let lookup = hybrid && use_fts;
         let from = if lookup {
-            "_benchmark_element_search e JOIN frames f ON f.id=e.frame_id"
+            "_bulk_element_search e JOIN frames f ON f.id=e.frame_id"
         } else if grouped {
             "frames f CROSS JOIN elements e ON e.frame_id=f.id"
         } else {
@@ -286,7 +283,7 @@ LIMIT ? OFFSET ?
                LIMIT ? OFFSET ?"#
         ) };
         let count_source = if lookup {
-            "_benchmark_element_search"
+            "_bulk_element_search"
         } else if grouped {
             "_bulk_element_counts"
         } else {

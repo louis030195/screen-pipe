@@ -64,6 +64,13 @@ compile() {
         -o "$output"
 }
 
+if [[ "${1:-}" == "--stream" ]]; then
+    compile "$out_dir/stream-tests" -parse-as-library \
+        "${app_sources[@]}" "$swift_dir/timeline_stream_tests.swift"
+    "$out_dir/stream-tests"
+    exit 0
+fi
+
 echo "==> building timeline core tests"
 compile "$out_dir/core-tests" "${core_sources[@]}" "$swift_dir/timeline_tests.swift"
 "$out_dir/core-tests"

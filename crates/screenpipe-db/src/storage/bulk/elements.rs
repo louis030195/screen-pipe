@@ -57,6 +57,32 @@ pub(super) fn declaration() -> String {
         .join(",")
 }
 
+/// Register an offline batch whose complete records are already staged. Parent
+/// references may point into a later batch; their original identities remain
+/// intact across those batch boundaries.
+pub(crate) async fn import_batch(
+    conn: &mut SqliteConnection,
+    first: i64,
+    last: i64,
+) -> Result<(), sqlx::Error> {
+    let range = "id BETWEEN ?1 AND ?2";
+    for statement in [
+        format!("INSERT OR IGNORE INTO _bulk_element_kinds(source,role) SELECT DISTINCT source,role FROM _bulk_element_rows WHERE {range}"),
+        format!("INSERT OR REPLACE INTO _bulk_element_lookup SELECT e.id,e.frame_id,e.sort_order,k.id,e.on_screen FROM _bulk_element_rows e JOIN _bulk_element_kinds k ON k.source=e.source AND k.role=e.role WHERE e.{range} AND e._archive_deleted=0"),
+        format!("INSERT INTO _bulk_element_groups SELECT e.frame_id,k.id,COALESCE(e.on_screen,0),e.on_screen IS NULL,count(*) FROM _bulk_element_rows e JOIN _bulk_element_kinds k ON k.source=e.source AND k.role=e.role WHERE e.{range} GROUP BY e.frame_id,k.id,COALESCE(e.on_screen,0),e.on_screen IS NULL ON CONFLICT(frame_id,kind_id,visibility,is_null) DO UPDATE SET rows=rows+excluded.rows"),
+        format!("INSERT INTO _bulk_element_parent_refs SELECT parent_id,count(*) FROM _bulk_element_rows WHERE {range} AND parent_id IS NOT NULL GROUP BY parent_id ON CONFLICT(parent_id) DO UPDATE SET rows=rows+excluded.rows"),
+        format!("INSERT INTO elements_fts(rowid,text,role,frame_id) SELECT id,text,role,frame_id FROM _bulk_element_rows WHERE {range} AND text IS NOT NULL AND text!=''"),
+        format!("UPDATE storage_metadata SET staging_bytes=staging_bytes+COALESCE((SELECT SUM({}) FROM _bulk_element_rows WHERE {range}),0),revision=revision+1", TABLE.all_bytes("")),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement)).bind(first).bind(last)
+            .execute(&mut *conn).await?;
+    }
+    sqlx::query("UPDATE _bulk_element_state SET version=version+1")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn bootstrap(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
     sqlx::raw_sql("CREATE TABLE _bulk_element_kinds(id INTEGER PRIMARY KEY,source TEXT NOT NULL,role TEXT NOT NULL,UNIQUE(source,role));").execute(&mut *conn).await?;
     let seq: Option<(i64, i64)> =

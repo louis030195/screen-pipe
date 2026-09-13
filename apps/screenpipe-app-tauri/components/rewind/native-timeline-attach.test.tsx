@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   listen: vi.fn(),
   ensureApiReady: vi.fn(),
   nativeTimelineIsAvailable: vi.fn(),
+  getStorageMigrationActivity: vi.fn(),
+  onMigrationActivity: (_: { payload: { busy: boolean; message: string } }) => {},
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -36,6 +38,13 @@ vi.mock("@/lib/utils/tauri", () => ({
     nativeTimelineNavigate: vi.fn(),
     openSearchWindow: vi.fn(),
     showWindow: vi.fn(),
+    getStorageMigrationActivity: mocks.getStorageMigrationActivity,
+  },
+}));
+
+vi.mock("@/lib/hooks/use-tauri-event", () => ({
+  useTauriEvent: (_: string, handler: typeof mocks.onMigrationActivity) => {
+    mocks.onMigrationActivity = handler;
   },
 }));
 
@@ -64,6 +73,7 @@ vi.mock("@/lib/chat-utils", () => ({ showChatWithPrefill: vi.fn() }));
 vi.mock("@/components/ui/use-toast", () => ({ toast: vi.fn() }));
 
 import { NativeTimeline, NativeTimelineBridge } from "./native-timeline";
+import { StorageMigrationGate } from "../storage-migration-gate";
 
 class ResizeObserverMock {
   observe() {}
@@ -78,6 +88,9 @@ describe("native timeline startup API config", () => {
     mocks.emit.mockReset().mockResolvedValue(undefined);
     mocks.listen.mockReset().mockResolvedValue(vi.fn());
     mocks.nativeTimelineIsAvailable.mockReset().mockResolvedValue(true);
+    mocks.getStorageMigrationActivity.mockReset().mockResolvedValue({ busy: false, message: "" });
+    HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+    HTMLDialogElement.prototype.close = function () { this.open = false; };
     mocks.ensureApiReady.mockReset().mockImplementation(
       () => new Promise<void>((resolve) => {
         resolveApiReady = resolve;
@@ -150,5 +163,21 @@ describe("native timeline startup API config", () => {
     act(() => handler?.());
 
     expect(onToggleSidebar).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the native timeline when the migration modal finishes", async () => {
+    render(<><StorageMigrationGate /><NativeTimeline fallback={<div>react fallback</div>} /></>);
+    await act(async () => { resolveApiReady?.(); });
+    await waitFor(() => expect(mocks.emit).toHaveBeenCalledWith("native-timeline-attach", expect.anything()));
+
+    act(() => mocks.onMigrationActivity({ payload: { busy: true, message: "compressing recordings" } }));
+    await waitFor(() => expect(mocks.emit).toHaveBeenCalledWith("native-timeline-detach", { windowLabel: "home" }));
+    mocks.emit.mockClear();
+
+    act(() => mocks.onMigrationActivity({ payload: { busy: false, message: "" } }));
+    await waitFor(() => expect(mocks.emit).toHaveBeenCalledWith(
+      "native-timeline-attach", expect.objectContaining({ windowLabel: "home", underlay: false }),
+    ));
+    expect(mocks.emit).not.toHaveBeenCalledWith("native-timeline-detach", expect.anything());
   });
 });

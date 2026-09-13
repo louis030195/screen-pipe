@@ -761,6 +761,9 @@ pub async fn start_capture(
     state: State<'_, RecordingState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    if crate::storage_migration::is_running(&app) {
+        return Err("Storage migration is running. Recording resumes when it finishes.".into());
+    }
     info!("Starting capture session");
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
     require_recording_access(&app, &store)?;
@@ -862,7 +865,7 @@ pub async fn stop_screenpipe(
     stop_screenpipe_inner(&state).await
 }
 
-async fn stop_screenpipe_inner(state: &RecordingState) -> Result<(), String> {
+pub(crate) async fn stop_screenpipe_inner(state: &RecordingState) -> Result<(), String> {
     info!("stop_screenpipe: stopping capture and server");
 
     // Stop capture first
@@ -954,6 +957,9 @@ pub async fn spawn_screenpipe(
     app: tauri::AppHandle,
     _override_args: Option<Vec<String>>,
 ) -> Result<(), String> {
+    if crate::storage_migration::is_running(&app) {
+        return Err("Storage migration is running. Recording resumes when it finishes.".into());
+    }
     // A summary-paywall install still needs the long-lived local read server
     // for Timeline, but it must not publish capture intent or restart capture.
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
@@ -1045,7 +1051,7 @@ pub(crate) async fn retry_screenpipe(
     spawn_screenpipe_inner(&state, app).await
 }
 
-async fn spawn_screenpipe_inner(
+pub(crate) async fn spawn_screenpipe_inner(
     state: &RecordingState,
     app: tauri::AppHandle,
 ) -> Result<(), String> {

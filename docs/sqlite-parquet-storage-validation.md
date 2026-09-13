@@ -1,13 +1,13 @@
 # SQLite and Parquet storage: implementation and validation
 
-> **Status: explicit CLI opt-in.** Existing SQLite roots retain their current mode. This implementation has local macOS validation; the architecture's cross-platform release qualification remains separate.
+> **Status: explicit opt-in through Storage settings or the CLI.** Existing SQLite roots retain their current mode. This implementation has local macOS validation; the architecture's cross-platform release qualification remains separate.
 
-<!-- doc-covers: crates/screenpipe-db/src/storage/, crates/screenpipe-db/tests/hybrid_storage.rs, crates/screenpipe-db/tests/bulk_storage.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/archive.rs, crates/screenpipe-engine/src/sync_provider.rs, crates/screenpipe-redact/src/worker/hybrid.rs, crates/screenpipe-redact/tests/hybrid_frames.rs, apps/screenpipe-app-tauri/src-tauri/src/data_sync.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs -->
+<!-- doc-covers: apps/screenpipe-app-tauri/components/storage-migration-gate.tsx, apps/screenpipe-app-tauri/src-tauri/src/server_core.rs, apps/screenpipe-app-tauri/components/settings/storage-migration-card.tsx, apps/screenpipe-app-tauri/src-tauri/src/storage_migration.rs, apps/screenpipe-app-tauri/src-tauri/src/recording.rs, crates/screenpipe-db/src/storage/, crates/screenpipe-db/tests/hybrid_storage.rs, crates/screenpipe-db/tests/bulk_storage.rs, crates/screenpipe-db/src/write_queue.rs, crates/screenpipe-engine/src/archive.rs, crates/screenpipe-engine/src/sync_provider.rs, crates/screenpipe-redact/src/worker/hybrid.rs, crates/screenpipe-redact/tests/hybrid_frames.rs, apps/screenpipe-app-tauri/src-tauri/src/data_sync.rs, apps/screenpipe-app-tauri/src-tauri/src/enterprise/sync.rs -->
 <!-- doc-verified: f4927e7821a7a615717e9c24da3a0b81be7b50c5 -->
 
 ## Operations
 
-The storage commands operate on one explicit logical root. Offline migration starts with `ROOT/db.sqlite` and prepares a separate generation. It verifies records, indexes, typed queries, and reopening before replacing `storage.json`. Source SQLite reclamation follows successful activation. Media path values retain their original meaning.
+The storage commands operate on one explicit logical root. Offline migration starts with `ROOT/db.sqlite` and prepares a separate generation. It verifies values as each batch is imported and each Parquet file is encoded, then checks reopening and sampled retrieval/search before replacing `storage.json`. The source SQLite database is retained after successful activation. Storage settings exposes a separate permanent-deletion action only after the running app has switched to the verified generation. Media path values retain their original meaning.
 
 Use `screenpipe storage OPERATION ROOT [DESTINATION]`, or the smaller standalone binary built with `cargo build -p screenpipe-db --bin screenpipe-storage --release`. Its equivalent invocation is `target/release/screenpipe-storage OPERATION ROOT [DESTINATION]`.
 
@@ -25,7 +25,45 @@ Use `screenpipe storage OPERATION ROOT [DESTINATION]`, or the smaller standalone
 | `compare` | Hybrid root plus original SQLite clone → logical/typed parity and timing report |
 | `status` | Root → persisted descriptor |
 
-An unactivated migration or unfinished index maintenance keeps normal writer admission paused until its lifecycle command resumes or cancels it. A committed migration descriptor remains authoritative during pending source cleanup.
+Migration reads the frozen original directly into an empty hybrid generation. Source and candidate rows are compared inside each construction transaction, and table receipts accumulate during this pass. Parquet publication performs its existing decoded-value comparison. Activation uses normal schema/catalog validation plus first/last frame retrieval and up to two sampled search pages. Full integrity scans and complete archive rechecks are available through the explicit `verify` operation. Each bounded batch is indexed, sealed, and reclaimed before the next batch. Incremental vacuum releases temporary SQLite pages in place. Required additional storage is the new generation plus batch/WAL workspace and the configured reserve. With the default budget, the next-batch admission floor is 2 GiB plus 32 MiB; available space is checked throughout conversion. The final generation size depends on recorded content and retained indexes.
+
+Storage settings starts recorder shutdown, conversion, and restart. A modal in every app webview blocks interaction throughout the native operation; Escape, backdrop clicks, and app shortcuts cannot dismiss it. The modal is mounted only while the operation is busy and unmounted on completion, restoring native Timeline placement. Interrupted conversions can resume or cancel before activation. The delete-original dialog requires explicit confirmation; native checks validate the selected directory, live generation, completed verification receipt, unchanged original file, and exclusive ownership of that original. Keeping the original is optional and retains only history up to migration.
+
+Reopening the desktop app clears the transient modal. Startup marks an interrupted, unactivated migration paused under lifecycle ownership and reopens the original storage for recording and search. Resume rebuilds its unpublished candidate from current history. A committed migration descriptor remains authoritative after restart. Unfinished index maintenance retains its separate admission guard.
+
+## Migration UI validation
+
+The Storage settings flow was checked in the browser preview using synthetic data, including the blocking progress modal, Escape and backdrop rejection, keyboard focus containment, restored navigation after completion, retained-original accounting, separate deletion confirmation, and light/dark layout. Native command registration and bindings were compiled through the app build queue. A complete recorder stop/restart with the installed desktop app has not been exercised by these checks.
+
+Post-migration regression checks passed 22 UI/bridge tests, including modal removal and native Timeline reattachment, and two raw-SQL tests, including a write committed during a read. Read-only probes of the running migrated API returned five historical Timeline frames and successful timestamp-only date lookups. These establish API and bridge behavior; the rebuilt desktop bundle has not been visually exercised. The broad bulk/hybrid suite initially passed 21/23 tests: crash recovery encountered a retained WAL and the bounded-space fixture observed a main file smaller than its expected checkpointed size. All four migration tests passed unchanged on a focused rerun; those intermittent fixture/shutdown failures remain a validation limitation.
+
+| Command | Result |
+|---|---|
+| `cargo test -p screenpipe-db --release --features storage-fault-injection --test hybrid_storage -- --test-threads=1` | 15 passed, including bounded-space streaming, interruption/resume, recording and search after restart, original retention, typed search parity, and explicit deletion |
+| `cargo test -p screenpipe-db --release --features storage-fault-injection --test hybrid_storage migration_preserves_original_until_explicit_deletion_on_live_generation -- --test-threads=1` | Passed after adding the original-owner guard; pending migration, stale generation, missing receipt, changed original, open original owner, and SQLite sidecars block deletion |
+| `bun x vitest run --config vitest.config.ts components/storage-migration-gate.test.tsx components/settings/storage-migration-card.test.tsx components/settings/storage-section.test.tsx lib/dev/browser-runtime.test.ts` (app directory) | 27 passed |
+| `bun run typecheck` (app directory) | Passed |
+| `bun run bindings:generate` / `bun run bindings:check` (app directory) | Passed through the native build queue |
+
+The direct-stream migration regression converted a 70,172,672-byte SQLite fixture while admitting only 50,331,648 bytes of additional space above its configured reserve. Candidate files, including WAL, peaked at 4,640,773 bytes; the final index was 1,163,264 bytes plus 155,131 Parquet bytes. The test verified full migration parity, forward element references across batches, original-file retention, trigger behavior after activation, and in-place page reclamation. `cargo test -p screenpipe-db --release --features storage-fault-injection --test hybrid_storage --test bulk_storage -- --test-threads=1 --nocapture` passed all 23 tests. These sizes describe a deliberately compressible fixture.
+
+Crash injection uses subprocesses. The serial test invocation avoids overlap with other live fixture managers during process creation. All database checks use disposable roots; the production database was not opened.
+
+## Default read paths and Timeline completion
+
+Normal hybrid builds now include the selected frame and element caches, selective decoding, resident element lookup, and response snapshots. Existing hybrid generations build the lookup in bounded startup batches. Timeline emits an explicit completion message for each requested range, including empty ranges, and both native and web clients clear the loading state for the matching range.
+
+The following checks ran during implementation; they were not repeated for PR preparation:
+
+| Command | Result |
+|---|---|
+| `cargo test -p screenpipe-db --release --test storage_snapshots` | 3 passed: concurrent writes and revocation, existing-generation lookup upgrade, manager isolation, cancellation and shutdown |
+| `bun run test:timeline --stream` (app directory) | Passed: native completion decoding, empty day, stale range, search window, navigation and error states |
+| `bun x vitest run --config vitest.config.ts lib/hooks/use-timeline-stream-completion.test.ts` (app directory) | 2 passed |
+
+A subsequent HTTP mixed-read/write run of the normal implementation terminated with a Tokio worker stack overflow. The final change boxes nested query futures; that change compiled in the native development bundle but has not been runtime-verified. The engine WebSocket regression and export regression runs were stopped before completion. No final concurrent-HTTP or installed-native-Timeline pass is claimed. The historical method benchmark results remain tied to their recorded binaries in [API method experiments](sqlite-parquet-api-method-experiments.md).
+
+The final `bun run tauri:build` invocation compiled the native application. Tauri packaging stopped while signing nested assets; the delivered development bundle was signed separately and passed `codesign --verify --deep --strict`. Cross-platform qualification remains outstanding.
 
 ## Supported integration
 
@@ -38,6 +76,8 @@ Hybrid writes use the existing single writer with durable WAL commits. Immutable
 The CLI's format conversion preserves existing recorded content and privacy stamps. Ordinary startup supplies the configured asynchronous privacy worker. Fresh roots can select a required surface policy through `MigrationOptions`; sealing waits for that completion. Vault protection uses SQLite mode. SSH directory sync consumes a materialized SQLite export; hybrid roots use the verified bundle/export operations. Migration retains existing consumer upload identity and checkpoints. Fresh independent consumer sources require a destination namespace before upload admission.
 
 Default limits are 128 rows per frame group and 8,192 rows per bulk group; frame files hold at most 1,024 rows and bulk files at most 32,768, with a shared 16 MiB batch target, 32 MiB per record, 128 MiB per decode/response, two decoders, 512 MiB staged payloads, and a 2 GiB disk reserve. Reads have a 60-second operation deadline and three revision attempts. Lifecycle copies use a one-hour deadline. These bounds apply to payload work; source capture, detector, HTTP cache, and media budgets remain with their existing owners.
+
+A later direct-stream test converted the existing 13,297,766,400-byte snapshot with candidate allocation peaking at 2,321,739,776 bytes. The run was stopped during the old exhaustive post-conversion audit when migration verification was changed to inline batch checks. It did not activate or complete that audit; this is a construction-space measurement only.
 
 ## Expanded production-clone storage measurement
 
@@ -93,7 +133,7 @@ Element-search/count cases took 2.72–5.04 seconds in hybrid mode and 20–1,28
 
 HTTP benchmarks using the production router, including latency, throughput, CPU, memory, and remaining deadline and mixed-read/write failures, are recorded in [Local HTTP API benchmarks](sqlite-parquet-api-benchmarks.md).
 
-Subsequent [API method experiments](sqlite-parquet-api-method-experiments.md) measure opt-in snapshot, cache, decoding, and element-lookup candidates against SQLite. These experiments are separate from the default implementation described here.
+Subsequent [API method experiments](sqlite-parquet-api-method-experiments.md) measure opt-in snapshot, cache, decoding, and element-lookup candidates against SQLite. The selected cache, decoding, lookup and snapshot combination now forms the normal hybrid read path; the experiment measurements retain their original date and binaries.
 
 On 2026-09-12, deterministic database tests verified independent cold-file decoding, same-file decode sharing, cached reads while both decoder slots are occupied, capture writes during a paused read, and SQL admission during file unlinking. The same transaction/stream scenario runs against SQLite and hybrid storage: an old snapshot begins with metadata only, replacements commit on another connection, new readers see replacements, old readers retain complete original records, and cleanup removes the originals after both the transaction and stream finish. Shutdown also releases SQL workers waiting for decoder admission.
 

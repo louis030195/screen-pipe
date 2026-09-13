@@ -5609,7 +5609,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </div>
         <ul>
           <li>&bull; Logical SQL merges immutable records and transactional replacements.</li>
-          <li>&bull; Migration: freeze → build → verify records and search → activate → clean up.</li>
+          <li>&bull; Migration streams bounded batches, verifies, and activates; the original stays until explicit deletion.</li>
           <li>&bull; Privacy completion gates sealing; retired files wait for SQL snapshots and readers.</li>
         </ul>
       </div>

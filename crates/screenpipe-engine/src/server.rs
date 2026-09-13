@@ -1486,6 +1486,10 @@ impl SCServer {
             .with_state(app_state.clone())
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),
+                crate::routes::search::storage_snapshot_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
                 crate::pipe_permissions_middleware::pipe_backpressure_layer,
             ))
             .layer(axum::middleware::from_fn_with_state(

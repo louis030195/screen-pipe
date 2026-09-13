@@ -49,17 +49,13 @@ impl DatabaseManager {
         if self.storage.is_some() {
             crate::storage::sql::validate_resident_query(&self.pool, query).await?;
         }
-        #[cfg(feature = "storage-bench-experiments")]
-        if crate::storage::experiments::response_admission() {
+        self.consistent_read(|| async {
             let rows = sqlx::query(sqlx::AssertSqlSafe(query))
                 .fetch_all(&mut *self.acquire_read().await?)
                 .await?;
-            return Ok(Self::raw_sql_rows(&rows));
-        }
-        let token = self.storage_read_token().await?;
-        let result = Self::raw_sql_on_pool(&self.pool, query).await;
-        let _admission = token.admit(&self.pool).await?;
-        result
+            Ok(Self::raw_sql_rows(&rows))
+        })
+        .await
     }
 
     /// Execute trusted dynamic SQL that may mutate the database through the
@@ -1742,6 +1738,68 @@ mod wal_maintenance_tests {
             .expect("query through reader API");
         assert_eq!(rows, serde_json::json!([{ "value": 42 }]));
 
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn raw_sql_retries_after_a_concurrent_storage_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DbConfig::for_tier(DeviceTier::Low);
+        config.read_pool_max = 1;
+        let db = Arc::new(
+            DatabaseManager::new_hybrid(dir.path(), config, Default::default())
+                .await
+                .unwrap(),
+        );
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp) VALUES(1,'2026-09-13')")
+            .await
+            .unwrap();
+
+        // Pause SQLite after the read token is taken, inside the SELECT itself.
+        let started = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&started);
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let mut paused = false;
+        {
+            let mut connection = db.pool.acquire().await.unwrap();
+            connection
+                .lock_handle()
+                .await
+                .unwrap()
+                .set_progress_handler(1_000, move || {
+                    if !paused {
+                        paused = true;
+                        signal.notify_one();
+                        return resumed.recv_timeout(Duration::from_secs(5)).is_ok();
+                    }
+                    true
+                });
+        }
+        let reader = Arc::clone(&db);
+        let reading = tokio::spawn(async move {
+            reader.query_raw_sql("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) SELECT (SELECT MAX(id) FROM frames) AS id,SUM(x) AS total FROM n").await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp) VALUES(2,'2026-09-13')")
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), reading)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, serde_json::json!([{"id":2,"total":2001000}]));
+        db.pool
+            .acquire()
+            .await
+            .unwrap()
+            .lock_handle()
+            .await
+            .unwrap()
+            .remove_progress_handler();
         db.close().await;
     }
 

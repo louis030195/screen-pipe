@@ -140,7 +140,6 @@ impl CancellableReadConnection {
         })
     }
 
-    #[cfg(feature = "storage-bench-experiments")]
     pub(crate) async fn discard(mut self) {
         self.lifetime.cancel();
         if let Some(c) = self.connection.take() {
@@ -234,31 +233,10 @@ impl DatabaseManager {
         CancellableReadConnection::acquire(&self.pool, deadline, request_cancellation).await
     }
 
-    #[cfg(feature = "storage-bench-experiments")]
     pub async fn acquire_search_read(
         &self,
-    ) -> Result<crate::storage::experiments::ReadConnection, sqlx::Error> {
-        crate::storage::experiments::search(&self.pool).await
-    }
-
-    #[cfg(not(feature = "storage-bench-experiments"))]
-    pub(crate) async fn acquire_read(&self) -> Result<PoolConnection<Sqlite>, sqlx::Error> {
-        self.pool.acquire().await
-    }
-
-    /// Acquire a read connection with the standard search-statement deadline.
-    ///
-    /// The fresh token is intentionally local: existing search helpers do not
-    /// need a signature change, and dropping their future still interrupts
-    /// SQLite through the connection guard's lifetime token. Callers that have
-    /// an explicit request token should use [`Self::acquire_cancellable_read`].
-    #[cfg(not(feature = "storage-bench-experiments"))]
-    pub async fn acquire_search_read(&self) -> Result<CancellableReadConnection, sqlx::Error> {
-        self.acquire_cancellable_read(
-            Instant::now() + SEARCH_QUERY_TIMEOUT,
-            CancellationToken::new(),
-        )
-        .await
+    ) -> Result<crate::storage::snapshot::ReadConnection, sqlx::Error> {
+        crate::storage::snapshot::search(&self.pool).await
     }
 }
 

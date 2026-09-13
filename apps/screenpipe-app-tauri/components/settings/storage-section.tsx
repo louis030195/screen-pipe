@@ -11,7 +11,9 @@ export const searchIndex: SettingsField[] = [
   { label: "Disk usage", keywords: ["disk", "space", "gb"] },
   { label: "Retention", keywords: ["cleanup", "delete old"] },
   { label: "Clear Cache" },
+  { label: "Database storage", keywords: ["migrate", "migration", "compression", "original database"] },
 ];
+import { StorageMigrationCard } from "./storage-migration-card";
 import { DiskUsageSection } from "./disk-usage-section";
 import { ApplyRestartBar } from "./apply-restart-bar";
 import { LockedSetting } from "@/components/enterprise-locked-setting";
@@ -45,6 +47,7 @@ function formatBytes(bytes: number): string {
 export function StorageSection() {
   const { settings, updateSettings, getDataDir } = useSettings();
   const { toast } = useToast();
+  const [storageOperationBusy, setStorageOperationBusy] = useState(false);
   const [cacheFiles, setCacheFiles] = useState<CacheFile[]>([]);
   const [showCacheDialog, setShowCacheDialog] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
@@ -124,6 +127,8 @@ export function StorageSection() {
         Local disk usage and storage controls
       </p>
 
+      <StorageMigrationCard dataDirectory={settings.dataDir} onBusyChange={setStorageOperationBusy} />
+
       {/* Data Directory */}
       <LockedSetting settingKey="data_directory">
         <Card className="border-border bg-card">
@@ -152,6 +157,7 @@ export function StorageSection() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      disabled={storageOperationBusy}
                       onClick={handleDataDirReset}
                       className="h-7 text-xs shrink-0"
                     >
@@ -161,6 +167,7 @@ export function StorageSection() {
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={storageOperationBusy}
                   onClick={handleDataDirChange}
                   className="h-7 text-xs shrink-0"
                 >

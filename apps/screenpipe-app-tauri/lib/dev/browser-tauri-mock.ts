@@ -4,6 +4,7 @@
 
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import type {
+  StorageMigrationStatus,
   BrainViewCanvasDocument,
   BrainViewDefinition,
   BrainViewTemplateKit,
@@ -31,6 +32,7 @@ export interface BrowserIpcMockOptions {
   apiPort: number;
   apiKey?: string;
   onStoreChange?: (change: StoreChange) => void;
+  onEvent?: (event: string, payload: unknown) => void;
   warn?: (message: string) => void;
 }
 
@@ -471,6 +473,12 @@ function handleWindowCommand(command: string): unknown {
 }
 
 export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
+  let storageMigration: StorageMigrationStatus = {
+    root: "/Users/screenpipe/.screenpipe", busy: false, message: "", error: null,
+    pending: false, completed: false, using_new_storage: false, generation: null,
+    source_bytes: 13_000_000_000, migrated_bytes: null, can_migrate: true,
+    can_cancel: false, can_delete_source: false, blocked_reason: null,
+  };
   const stores = new Map<number, Map<string, unknown>>();
   const storePaths = new Map<string, number>();
   const warned = new Set<string>();
@@ -637,6 +645,32 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     }
 
     switch (command) {
+      case "get_storage_migration_status":
+        return { ...storageMigration };
+      case "get_storage_migration_activity":
+        return { busy: storageMigration.busy, message: storageMigration.message };
+      case "start_storage_migration": {
+        storageMigration = { ...storageMigration, busy: true, can_migrate: false, pending: true, message: "compressing recordings" };
+        options.onEvent?.("storage-migration-activity", { busy: true, message: storageMigration.message });
+        setTimeout(() => {
+          if (options.scenario === "backend-error") {
+            storageMigration = { ...storageMigration, busy: false, can_migrate: true, can_cancel: true, message: "", error: "Migration paused because verification could not finish. Your original database has been kept." };
+          } else {
+            storageMigration = { ...storageMigration, busy: false, pending: false, completed: true, using_new_storage: true, generation: "browser-migration", migrated_bytes: 2_130_000_000, message: "", can_delete_source: true };
+          }
+          options.onEvent?.("storage-migration-activity", { busy: false, message: "" });
+        }, 4000);
+        return null;
+      }
+      case "cancel_storage_migration":
+        storageMigration = { ...storageMigration, pending: false, error: null, can_cancel: false, can_migrate: true };
+        return null;
+      case "delete_original_storage_database": {
+        if (!input.confirmPermanentDeletion || !storageMigration.can_delete_source || input.generation !== storageMigration.generation) throw new Error("Complete migration and confirm permanent deletion first.");
+        const removed = storageMigration.source_bytes;
+        storageMigration = { ...storageMigration, source_bytes: 0, can_delete_source: false };
+        return removed;
+      }
       case "plugin:store|load": {
         const path = String(input.path ?? "browser-dev-store");
         const existing = storePaths.get(path);

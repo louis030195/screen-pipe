@@ -138,11 +138,8 @@ pub fn read_selected(
     if count < 0 || count as usize > budget.file_rows {
         return Err(storage_error("payload row budget exceeded"));
     }
-    #[cfg(feature = "storage-bench-experiments")]
-    if super::experiments::enabled("selective-decode") {
-        if let Some(requested) = requested {
-            return selected_columns(&reader, projection, requested, budget);
-        }
+    if let Some(requested) = requested {
+        return selected_columns(&reader, projection, requested, budget);
     }
     let mut rows = Vec::with_capacity(requested.map_or(count as usize, |ids| ids.len()));
     let mut bytes = 0;
@@ -202,7 +199,6 @@ pub fn read_selected(
 
 /// Decode selected flat records directly from their columns. Skipped records
 /// do not allocate strings or row objects; Parquet still decompresses pages.
-#[cfg(feature = "storage-bench-experiments")]
 pub(super) fn column_positions(
     group: &dyn parquet::file::reader::RowGroupReader,
     column: usize,
@@ -293,7 +289,6 @@ pub(super) fn column_positions(
     }
 }
 
-#[cfg(feature = "storage-bench-experiments")]
 fn selected_columns(
     file: &SerializedFileReader<File>,
     projection: Projection,

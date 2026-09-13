@@ -346,6 +346,9 @@ impl ServerCore {
             message
         })?;
 
+        screenpipe_db::storage::pause_interrupted_migration(&local_data_dir)
+            .map_err(|error| format!("Failed to resume storage after interruption: {error}"))?;
+
         // A crash during repair may leave the committed WAL archived separately
         // from the main file. Reconcile the swap before ordinary DB diagnosis.
         let startup_guard = screenpipe_engine::cli::db::prepare_database_startup(&local_data_dir)

@@ -2661,3 +2661,32 @@ mod tests {
         assert!(result.contains("...(truncated"));
     }
 }
+
+/// A response shares one snapshot across candidate selection, pagination counts,
+/// and payload hydration. WebSocket history reads own their scope in the DB.
+pub(crate) async fn storage_snapshot_middleware(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = request.uri().path();
+    let read = (request.method() == axum::http::Method::GET
+        && (matches!(path, "/search" | "/search/keyword" | "/elements")
+            || (path.starts_with("/frames/")
+                && ["/text", "/ocr", "/context", "/metadata", "/elements"]
+                    .iter()
+                    .any(|suffix| path.ends_with(suffix)))))
+        || (request.method() == axum::http::Method::POST && path == "/raw_sql");
+    if !read {
+        return next.run(request).await;
+    }
+    match state.db.read_snapshot(next.run(request)).await {
+        Ok(response) => response,
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}

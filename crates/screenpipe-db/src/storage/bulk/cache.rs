@@ -21,7 +21,6 @@ struct State {
 impl Cached {
     fn bytes(&self) -> usize {
         match self {
-            #[cfg(feature = "storage-bench-experiments")]
             Self::Frames(rows) => {
                 rows.capacity() * std::mem::size_of::<super::super::FramePayload>()
                     + rows

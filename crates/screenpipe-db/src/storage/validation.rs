@@ -312,13 +312,6 @@ async fn compare_open(
     Ok(report)
 }
 
-pub(super) async fn verify_typed_parity(
-    source: &DatabaseManager,
-    target: &DatabaseManager,
-) -> Result<(), sqlx::Error> {
-    compare_queries(source, target, false).await.map(|_| ())
-}
-
 async fn compare_queries(
     source: &DatabaseManager,
     target: &DatabaseManager,

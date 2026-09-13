@@ -45,6 +45,32 @@ pub struct StreamFramesRequest {
     limit: Option<usize>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct StreamCompletion {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl StreamCompletion {
+    fn new(request: &StreamFramesRequest) -> Self {
+        Self {
+            kind: "stream_complete",
+            start_time: request.start_time,
+            end_time: request.end_time,
+            error: None,
+        }
+    }
+}
+
+enum StreamEvent {
+    Frame(TimeSeriesFrame),
+    Complete(StreamCompletion),
+}
+
 /// Clamp a timeline request to the rolling history window. Returns `true`
 /// when the requested range is wholly before the accessible window.
 fn apply_stream_history_access(
@@ -368,7 +394,7 @@ async fn handle_stream_frames_socket(
         Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     // Channel for initial batch results (from cache or DB)
-    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<TimeSeriesFrame>(100);
+    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
     // Shared flag: should we subscribe to live cache updates?
     let live_subscribe: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
@@ -386,6 +412,7 @@ async fn handle_stream_frames_socket(
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<StreamFramesRequest>(&text) {
                     Ok(mut request) => {
+                        let mut completion = StreamCompletion::new(&request);
                         let now = Utc::now();
                         if apply_stream_history_access(
                             &receive_history_access,
@@ -394,6 +421,7 @@ async fn handle_stream_frames_socket(
                         ) {
                             sent_ids_clone.lock().await.clear();
                             *live_sub_clone.lock().await = Some(false);
+                            let _ = frame_tx.send(StreamEvent::Complete(completion)).await;
                             continue;
                         }
                         let start_time = request.start_time;
@@ -485,7 +513,7 @@ async fn handle_stream_frames_socket(
                             } // lock dropped
 
                             for frame in sorted {
-                                let _ = frame_tx.send(frame).await;
+                                let _ = frame_tx.send(StreamEvent::Frame(frame)).await;
                             }
 
                             let backfill_limit = limit.saturating_sub(initial_count);
@@ -528,16 +556,21 @@ async fn handle_stream_frames_socket(
                                                 if frame.frame_data.is_empty() {
                                                     continue;
                                                 }
-                                                if frame_tx_db.send(frame).await.is_err() {
+                                                if frame_tx_db.send(StreamEvent::Frame(frame)).await.is_err() {
                                                     break;
                                                 }
                                             }
                                             info!("Today DB backfill complete");
                                         }
-                                        Err(e) => warn!("Today DB backfill failed: {}", e),
+                                        Err(e) => {
+                                            warn!("Today DB backfill failed: {}", e);
+                                            completion.error = Some(e.to_string());
+                                        },
                                     }
+                                    let _ = frame_tx_db.send(StreamEvent::Complete(completion)).await;
                                 });
                             } else {
+                                let _ = frame_tx.send(StreamEvent::Complete(completion)).await;
                                 info!(
                                     "skipping DB backfill — hot cache covers full range or stream limit reached"
                                 );
@@ -555,7 +588,7 @@ async fn handle_stream_frames_socket(
                                         db,
                                         start_time,
                                         end_time,
-                                        frame_tx,
+                                        frame_tx.clone(),
                                         is_descending,
                                         limit,
                                         sent_ids,
@@ -565,9 +598,16 @@ async fn handle_stream_frames_socket(
 
                                 match fetch_result {
                                     Ok(Ok(_)) => info!("Past-day fetch complete"),
-                                    Ok(Err(e)) => error!("Past-day fetch failed: {}", e),
-                                    Err(_) => warn!("Past-day fetch timed out after 120s"),
+                                    Ok(Err(e)) => {
+                                        error!("Past-day fetch failed: {}", e);
+                                        completion.error = Some(e.to_string());
+                                    },
+                                    Err(_) => {
+                                        warn!("Past-day fetch timed out after 120s");
+                                        completion.error = Some("Timeline request timed out".into());
+                                    },
                                 }
+                                let _ = frame_tx.send(StreamEvent::Complete(completion)).await;
                             });
                         }
                     }
@@ -601,7 +641,15 @@ async fn handle_stream_frames_socket(
                     }
                 } => {
                     match frame {
-                        Some(tsf) => {
+                        Some(StreamEvent::Complete(completion)) => {
+                            // The same channel orders completion after every frame
+                            // in this range, including a range with no frames.
+                            if send_batch(&mut sender, &mut frame_buffer).await.is_err() { break; }
+                            next_batch_flush_at = None;
+                            let text = serde_json::to_string(&completion).expect("stream completion");
+                            if sender.send(Message::Text(text)).await.is_err() { break; }
+                        }
+                        Some(StreamEvent::Frame(tsf)) => {
                             if let Some(ref error) = tsf.error {
                                 let _ = sender
                                     .send(Message::Text(format!("{{\"error\": \"{}\"}}", error)))
@@ -796,7 +844,7 @@ async fn fetch_and_process_frames_with_tracking(
     db: Arc<DatabaseManager>,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
-    frame_tx: mpsc::Sender<TimeSeriesFrame>,
+    frame_tx: mpsc::Sender<StreamEvent>,
     is_descending: bool,
     limit: usize,
     sent_frame_ids: Arc<Mutex<std::collections::HashSet<i64>>>,
@@ -834,7 +882,7 @@ async fn fetch_and_process_frames_with_tracking(
         if latest_timestamp.is_none() || ts > latest_timestamp.unwrap() {
             latest_timestamp = Some(ts);
         }
-        frame_tx.send(frame).await?;
+        frame_tx.send(StreamEvent::Frame(frame)).await?;
     }
 
     Ok(latest_timestamp)
@@ -923,6 +971,107 @@ fn encode_stream_batches(
 mod tests {
     use super::*;
     use screenpipe_db::{AudioEntry as DbAudioEntry, FrameData, OCREntry, OcrEngine};
+
+    #[tokio::test]
+    async fn timeline_websocket_completes_empty_cached_and_database_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default())
+                .await
+                .unwrap(),
+        );
+        let today = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let previous = today - chrono::Duration::minutes(1);
+        let mut tx = db.begin_immediate_with_retry().await.unwrap();
+        sqlx::query("INSERT INTO frames(id,timestamp,full_text,snapshot_path,device_name) VALUES(1,?,'previous day','/tmp/synthetic-timeline.jpg','monitor')")
+            .bind(previous).execute(&mut **tx.conn()).await.unwrap();
+        tx.commit().await.unwrap();
+        db.seal_frame_payloads().await.unwrap();
+        let cache = Arc::new(crate::hot_frame_cache::HotFrameCache::new());
+        cache.warm_from_db(&db, 24).await;
+        assert!(cache.earliest_coverage().await.unwrap() < today);
+        let audio = Arc::new(
+            screenpipe_audio::audio_manager::AudioManagerBuilder::new()
+                .is_disabled(true)
+                .output_path(root.path().join("audio"))
+                .build(Arc::clone(&db))
+                .await
+                .unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut server = crate::SCServer::new(
+            Arc::clone(&db),
+            address,
+            root.path().to_path_buf(),
+            true,
+            true,
+            audio,
+            false,
+            "balanced".into(),
+        );
+        server.timeline_disabled = true;
+        server.advertise_mdns = false;
+        server.hot_frame_cache = Some(cache);
+        let router = server.try_create_router().await.unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(crate::SCServer::serve_router_with_listener_graceful(
+            address,
+            listener,
+            router,
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/stream/frames"))
+                .await
+                .unwrap();
+        // Today's cache covers the range but contains zero frames. Past days
+        // exercise the DB branch with both zero and one sealed frame.
+        for (day, expected) in [
+            (today, 0),
+            (today - chrono::Duration::days(2), 0),
+            (today - chrono::Duration::days(1), 1),
+        ] {
+            let end = day + chrono::Duration::days(1) - chrono::Duration::milliseconds(1);
+            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({"start_time":day,"end_time":end,"order":"descending","limit":2500}).to_string().into())).await.unwrap();
+            let mut received = 0;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if !message.is_text() {
+                        continue;
+                    }
+                    let value: serde_json::Value =
+                        serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    if let Some(batch) = value.as_array() {
+                        received += batch.len();
+                    }
+                    if value["type"] == "stream_complete" {
+                        assert!(value.get("error").is_none(), "{value}");
+                        assert_eq!(value["start_time"], serde_json::to_value(day).unwrap());
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("every range must finish without waiting for keepalive");
+            assert_eq!(received, expected);
+        }
+        socket.close(None).await.unwrap();
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), serving)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        db.close().await;
+    }
 
     fn create_test_frame_data(num_ocr_entries: usize, num_audio_entries: usize) -> FrameData {
         let ocr_entries: Vec<OCREntry> = (0..num_ocr_entries)
@@ -1262,7 +1411,7 @@ mod tests {
         .expect("timeline fetch should succeed");
 
         let mut streamed_frames = Vec::new();
-        while let Some(frame) = frame_rx.recv().await {
+        while let Some(StreamEvent::Frame(frame)) = frame_rx.recv().await {
             streamed_frames.push(frame);
         }
 

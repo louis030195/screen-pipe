@@ -1,8 +1,8 @@
 # SQLite and Parquet API method experiments
 
-> **Experiments on disposable copies, 2026-09-12.** The methods below are opt-in benchmark prototypes. Measurements identify a candidate implementation; normal application builds do not enable it.
+> **Historical experiments on disposable copies, 2026-09-12.** These measurements selected the cache, decoding, lookup and snapshot combination now used by normal hybrid builds. The values below describe the original measured binaries.
 
-<!-- doc-covers: crates/screenpipe-db/src/storage/, crates/screenpipe-db/src/cancellable_query.rs, crates/screenpipe-db/src/db/, crates/screenpipe-db/tests/storage_snapshot_experiments.rs, crates/screenpipe-engine/examples/storage_api_server.rs, scripts/benchmark-storage-api.ts, scripts/prepare-storage-api-experiment -->
+<!-- doc-covers: crates/screenpipe-db/src/storage/, crates/screenpipe-db/src/cancellable_query.rs, crates/screenpipe-db/src/db/, crates/screenpipe-db/tests/storage_snapshots.rs, crates/screenpipe-engine/examples/storage_api_server.rs, scripts/benchmark-storage-api.ts -->
 <!-- doc-verified: 51360ff60c0dd071fa91d8b720b4b51361f5e74f -->
 
 These are working-tree experiments based on the revision above. Binary and driver hashes identify the measured builds. The [original HTTP benchmark](sqlite-parquet-api-benchmarks.md) records the earlier implementation's failures.
@@ -124,31 +124,24 @@ SQLite also exposed all 40 records and returned no visibility errors, but 41 of 
 
 The extended frame-ingestion run exposed two additional problems. Its first version incorrectly treated ordinary OCR completion as a revocation, producing 982 read conflicts, and an FTS startup-check failure stopped ingestion after 254 of 602 writes. All 254 acknowledgements were persisted; 348 writes returned errors. Three Parquet frame-file pairs were published before the stop. This failed run is retained in the aggregate results.
 
-A standalone reproduction using the same **SQLite 3.51.3** library isolates the startup failure without Parquet: after another connection writes, `PRAGMA quick_check` on a connection that previously searched FTS can report a missing index blob. A fresh connection, and a refreshed search within an explicit snapshot, both report `ok` on the same database. The startup check now owns a dedicated query-only connection with the existing VFS and hybrid functions. It still runs the integrity check, participates in recovery connection tracking, and cancels when its manager shuts down. This is the one fix in this experiment that also applies to normal builds.
+A standalone reproduction using the same **SQLite 3.51.3** library isolates the startup failure without Parquet: after another connection writes, `PRAGMA quick_check` on a connection that previously searched FTS can report a missing index blob. A fresh connection, and a refreshed search within an explicit snapshot, both report `ok` on the same database. The startup check now owns a dedicated query-only connection with the existing VFS and hybrid functions. It still runs the integrity check, participates in recovery connection tracking, and cancels when its manager shuts down. This shared SQLite fix also applies to SQLite-only builds.
 
-The fixture's revocation trigger now distinguishes ordinary OCR completion from privacy/policy replacement. The concurrent snapshot regression exercises the actual `insert_ocr_text` path, along with replacement/deletion rejection. This classification remains a prototype pending complete production privacy integration.
+The selected frame cache, element cache, selective decoding, element lookup and snapshot combination is now integrated into normal hybrid builds. Database managers own snapshot capacity, queries share a pinned read transaction, and startup builds the resident lookup for existing hybrid generations. Deletion and privacy admission use a separate revocation revision. The historical measurements above describe their original binaries; current regression results are recorded in the storage validation document.
 
-The focused snapshot test verifies stable sealed and staged records across concurrent writes and sealing, a consistent raw-SQL count, sparse nullable selections across row groups, 10,000 elements across bulk row groups, more readers than connection-pool slots, replacement/deletion admission rejection, and cancellation cleanup. The existing hybrid/bulk tests additionally cover reopening, relationships, overrides, exports, and detecting corruption after a cache hit.
-
-The prototype's task-local connection plumbing and process-level admission semaphore belong to the marked benchmark host. Production adoption needs the same ownership at the database-manager/request boundary, complete privacy and lifecycle integration, and coverage of readers outside these HTTP handlers. The benchmark lookup is prepared from the original snapshot and maintained by fixture triggers; it is not yet a shipping migration. Hundreds-of-gigabytes datasets, cache eviction under a much larger working set, prolonged native capture with deferred element insertion, and concurrent privacy/backup workloads remain unmeasured.
+Hundreds-of-gigabytes datasets, cache eviction under a much larger working set, prolonged native capture with deferred element insertion, and concurrent privacy/backup workloads remain unmeasured.
 
 ## Reproduction
 
-Use a new private root for each method. Prepare closed, consistent source and migrated copies as described in the [original benchmark](sqlite-parquet-api-benchmarks.md#reproduction-and-artifacts). Each mode directory requires `.screenpipe-api-benchmark` and a synthetic `fixture.png`; its parent supplies `workload.json` and the sandbox profile. Never clone a live SQLite database by copying only its main file.
+Prepare closed, consistent source and migrated copies as described in the [original benchmark](sqlite-parquet-api-benchmarks.md#reproduction-and-artifacts). Normal hybrid startup installs its read indexes. The driver uses the production implementation in both modes.
 
 ```sh
-cargo build -p screenpipe-engine --example storage_api_server --release --no-default-features --features storage-bench-experiments
-cargo test -p screenpipe-db --release --features storage-bench-experiments --test storage_snapshot_experiments --test hybrid_storage --test bulk_storage
-cargo test -p screenpipe-db --release --features storage-bench-experiments --lib startup_integrity_uses_fresh_fts_state_after_concurrent_writes
-cargo check -p screenpipe-db --quiet
-bun build scripts/benchmark-storage-api.ts --target=bun --outfile="$BENCH_ROOT/benchmark.js"
-scripts/prepare-storage-api-experiment --fixture "$BENCH_ROOT/hybrid" --source-snapshot "$CLOSED_SNAPSHOT" --lookup
-
-bun "$BENCH_ROOT/benchmark.js" --root "$BENCH_ROOT" --mode hybrid --phase reads --concurrency 1,8 --methods frame-cache,element-cache,selective-decode,element-lookup,snapshot,snapshot-admission
-bun "$BENCH_ROOT/benchmark.js" --root "$BENCH_ROOT" --mode hybrid --phase mixed --mixed-ms 60000 --mixed-write frame_ingest --mixed-cases search_all_uncached,search_ocr_uncached,frame_text,frame_elements,bulk_sql --methods frame-cache,element-cache,selective-decode,element-lookup,snapshot,snapshot-admission
-bun "$BENCH_ROOT/benchmark.js" --root "$BENCH_ROOT" --mode hybrid --phase visibility --methods frame-cache,element-cache,selective-decode,element-lookup,snapshot,snapshot-admission
+cargo build -p screenpipe-engine --example storage_api_server --release --no-default-features
+cargo test -p screenpipe-db --release --test storage_snapshots
+bun scripts/benchmark-storage-api.ts --root "$BENCH_ROOT" --mode hybrid --phase reads --concurrency 1,8
+bun scripts/benchmark-storage-api.ts --root "$BENCH_ROOT" --mode hybrid --phase mixed --mixed-ms 60000 --mixed-write frame_ingest --mixed-cases search_all_uncached,search_ocr_uncached,frame_text,frame_elements,bulk_sql
+bun scripts/benchmark-storage-api.ts --root "$BENCH_ROOT" --mode hybrid --phase visibility
 ```
 
-Run each corresponding SQLite workload with `--mode sqlite` and no method flags. Separate output directories or `--label` values preserve each run. The preparation helper accepts `--cache-mib`, `--decoders`, and `--retries` for resource controls; it is intended for a fresh marked clone and does not run idempotently. Complete HTTP samples and fixture contents remain private; aggregate measurements and response hashes accompany this report.
+Run the corresponding SQLite workloads with `--mode sqlite`. Separate directories or `--label` values preserve each run. The former benchmark-only feature and method switches have been removed. The historical comparison can be reproduced from commit `ca38092cfc8ae23eeb419d8554be289e9eed3457` and its instructions.
 
-[Aggregate results, binary/driver hashes, and response hashes](benchmarks/sqlite-parquet-api-methods-2026-09-12.json) preserve the control runs, rejected candidates, and later fixes. Validation passed the 7 bulk-storage tests, 10 hybrid-storage tests, the expanded snapshot/OCR regression, and the fresh-connection FTS regression. The DB check with normal features, release HTTP-host build, driver bundle build, preparation helper on a fresh clone, and `git diff --check` also passed.
+[Historical aggregate results, binary/driver hashes, and response hashes](benchmarks/sqlite-parquet-api-methods-2026-09-12.json) preserve the control runs and method comparisons. Complete HTTP samples and fixture contents remain private.

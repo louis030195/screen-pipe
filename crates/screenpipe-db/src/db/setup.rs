@@ -320,7 +320,11 @@ impl DatabaseManager {
 
         // Read pool: handles all SELECT queries (search, timeline, API, pipes).
         let read_pool = crate::storage::bulk::pool_options(storage.clone(), true)
-            .max_connections(config.read_pool_max)
+            .max_connections(if storage.is_some() {
+                config.read_pool_max.max(2)
+            } else {
+                config.read_pool_max
+            })
             .min_connections(config.read_pool_min)
             .acquire_timeout(Duration::from_secs(5))
             .connect_with(read_connect_options)
@@ -490,6 +494,7 @@ impl DatabaseManager {
                     construction?;
                 }
                 crate::storage::schema::verify(&mut conn, &storage.descriptor).await?;
+                crate::storage::read_schema::upgrade(&mut conn, storage).await?;
                 storage.verify_catalog(&db_manager.pool).await?;
             }
             Ok::<(), sqlx::Error>(())

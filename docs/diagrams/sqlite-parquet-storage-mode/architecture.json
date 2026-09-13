@@ -314,7 +314,7 @@
       "title": "Complete records throughout the lifecycle",
       "items": [
         "Logical SQL merges immutable records and transactional replacements.",
-        "Migration: freeze \u2192 build \u2192 verify records and search \u2192 activate \u2192 clean up.",
+        "Migration streams bounded batches, verifies, and activates; the original stays until explicit deletion.",
         "Privacy completion gates sealing; retired files wait for SQL snapshots and readers."
       ]
     }

@@ -66,6 +66,7 @@ mod deep_link;
 mod dev_isolation;
 mod diagnostic_logs;
 mod disk_usage;
+mod storage_migration;
 mod disk_pressure_notifications;
 #[cfg(feature = "e2e")]
 mod e2e;
@@ -1164,6 +1165,7 @@ async fn main() {
     let sync_scheduler = screenpipe_connect::sync_scheduler::SyncScheduler::new();
 
     let app = app.manage(recording_state)
+        .manage(storage_migration::StorageMigrationState::default())
         .manage(activity_history::ActivityHistoryState::default())
         .manage(first_run_summary::FirstRunSummaryState::default())
         .manage(disk_pressure_notifications::DiskPressureNotificationState::default())
