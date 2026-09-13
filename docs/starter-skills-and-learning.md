@@ -26,13 +26,30 @@ Removal keeps custom files and supplementary files. The local-store seed index
 remembers deleted names so restarting the app does not recreate them. External
 agent disconnection continues to use its existing opt-out mechanism.
 
-The onboarding and Skills surfaces share one component. The default view keeps
-the workflow list collapsed. Model choice, provider disclosure, off/on status,
-and pause remain visible. Smaller windows stack the model and action so the
-selected provider stays legible. The learning task is installed disabled and
-requires a separate “turn on learning” action. It starts on its existing Pipe
-schedule, not as a separate OS job. Pausing prevents future runs; an in-flight
-run may finish.
+Onboarding replaces the five independent optional setup rows with one
+“start screenpipe” action. It sets up work memory and meeting-speaker suggestions
+by default after showing the model/provider. Nothing is enabled merely by
+rendering the screen. Gmail, Calendar, and daily email remain available after
+onboarding rather than requiring account connections before entering the app.
+
+A single unchecked choice adds skill learning to that setup. Starter skills need
+no extra action. The full catalog, learning model, status, and pause controls
+remain in Settings. The learning task starts on its existing Pipe schedule;
+pausing prevents future runs, while an in-flight run may finish.
+
+Setup pins the selected compatible Pi preset before enabling each new or paused
+task and reads back enabled state. Already enabled tasks keep their existing
+configuration. Retry checks each task again, preserving completed work. Requests
+have cancellation and time limits; unavailable engines and missing models expose
+“finish setup later” so an optional automation cannot prevent access to recording
+and recall. Tasks can be paused or changed later.
+
+Automatic defaults emit `onboarding_defaults_start_clicked`,
+`onboarding_default_setup_attempted`, `onboarding_default_setup_completed`,
+`onboarding_default_setup_failed`, `onboarding_defaults_completed`, and
+`onboarding_defaults_deferred`, all with `setup_version: 1`. They do not emit
+`first_run_next_step_selected`, which represents the previous explicit choices.
+This keeps future default adoption separate from historical opt-in comparisons.
 
 ## Learning contract
 

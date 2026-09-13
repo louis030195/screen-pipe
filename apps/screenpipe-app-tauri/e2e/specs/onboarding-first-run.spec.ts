@@ -433,9 +433,11 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     expect(text).not.toContain("what do you want first");
     expect(text).not.toContain("build my first live view");
 
-    // An authenticated Free install must still encounter final connection
-    // setup instead of depending on Home's learning timer.
-    expect(text).toContain("connect gmail");
+    // Final setup explains the defaults without requiring account connections.
+    expect(text).toContain("remember my work");
+    expect(text).toContain("recognize meeting speakers");
+    expect(text).toContain("start screenpipe");
+    expect(text).not.toContain("connect gmail");
     const match = text.match(/setup[^0-9]*(\d+)\s*of\s*(\d+)/);
     if (match) {
       const [, current, total] = match.map(Number);
