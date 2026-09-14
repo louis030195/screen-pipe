@@ -339,6 +339,12 @@ export function AiToolsCard({ onChanged }: { onChanged?: () => void }) {
         )}
       </div>
 
+      {detected.includes("grokbot") && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Connecting Grok Bot reads its saved connection credential and contacts its service.
+        </p>
+      )}
+
       {expanded && (
         <div className="mt-3 border-t border-border">
           <p className="text-xs text-muted-foreground pt-3 pb-1">

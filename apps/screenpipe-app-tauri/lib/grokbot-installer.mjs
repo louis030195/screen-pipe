@@ -225,7 +225,9 @@ export async function reconcileSkills(call, specs, action) {
 }
 
 export async function runInstaller(input) {
-  if (!["status", "connect", "disconnect"].includes(input.action)) throw new Error("Invalid Grok Bot connection action.");
+  // Status belongs to the native credential-free cache. Reject it here before
+  // looking at any Grok Bot files, even if an older caller invokes the bridge.
+  if (!["connect", "disconnect"].includes(input.action)) throw new Error("Grok Bot credential access requires an explicit connect or disconnect action.");
   const dir = appDataPath(input.home, process.platform, input.home === homedir() ? process.env : {});
   if (!existsSync(dir)) return { detected: false, connected: false, message: "Install and open Grok Bot to connect automatically." };
   const gateway = loadGateway(dir, process.platform);

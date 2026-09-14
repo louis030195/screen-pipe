@@ -75,75 +75,84 @@ async fn connection_in(
     home: &Path,
     bun: &Path,
     action: &str,
-    automatic: bool,
 ) -> Result<Value, String> {
+    let _guard = GROKBOT_CONNECTION_LOCK.lock().await;
+    connection_with_bridge(
+        home,
+        &crate::skills::ai_tool_auto_connect_opt_out_dir(),
+        action,
+        || run_bridge(app, home, bun, action),
+    )
+    .await
+}
+
+// Keep the credential operation behind an injectable boundary so passive
+// status and failure ordering can be tested without another app's secrets.
+async fn connection_with_bridge<F, Fut>(
+    home: &Path,
+    opt_out_dir: &Path,
+    action: &str,
+    bridge: F,
+) -> Result<Value, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
     if !["status", "connect", "disconnect"].contains(&action) {
         return Err("Invalid Grok Bot connection action.".into());
     }
-    let _guard = GROKBOT_CONNECTION_LOCK.lock().await;
-    let opt_out_dir = crate::skills::ai_tool_auto_connect_opt_out_dir();
     let opted_out = opt_out_dir.join("grokbot").is_file();
-    if automatic && opted_out {
-        return Ok(json!({"detected": true, "connected": false, "optedOut": true}));
+    let connected_marker = opt_out_dir.join("grokbot-last-connected");
+    if action == "status" {
+        // Reading status must not spawn Bun, decrypt another app's credential,
+        // or contact its gateway. This marker records only our last result.
+        return Ok(cached_connection_status(
+            grokbot_app_data_in(home).is_dir(),
+            connected_marker.is_file(),
+            opted_out,
+        ));
     }
-    // Save intent before deletion. Even a failed remote removal must never
-    // allow a background retry to silently reinstall the skill.
-    if action == "disconnect" || (action == "connect" && !automatic) {
-        crate::skills::set_ai_tool_auto_connect_opt_out_in(
-            &opt_out_dir,
-            "grokbot",
-            action == "disconnect",
-        )?;
+    // Only explicit Connect/Disconnect reaches the credential bridge. Clear
+    // the last result first so a failed/partial operation cannot claim success.
+    if connected_marker.exists() {
+        std::fs::remove_file(&connected_marker)
+            .map_err(|_| "Could not clear the previous Grok Bot connection status.")?;
     }
-    let mut result = run_bridge(app, home, bun, action).await?;
-    result["optedOut"] = json!(if action == "status" {
-        opted_out
-    } else {
-        action == "disconnect"
-    });
+    crate::skills::set_ai_tool_auto_connect_opt_out_in(
+        opt_out_dir,
+        "grokbot",
+        action == "disconnect",
+    )?;
+    let mut result = bridge().await?;
+    if action == "connect" && result["connected"] == true {
+        std::fs::create_dir_all(opt_out_dir)
+            .and_then(|_| std::fs::write(&connected_marker, b""))
+            .map_err(|_| "Connected, but could not save Grok Bot's last connection status.")?;
+    }
+    result["optedOut"] = json!(action == "disconnect");
     Ok(result)
+}
+
+fn cached_connection_status(detected: bool, last_connected: bool, opted_out: bool) -> Value {
+    json!({
+        "detected": detected,
+        "connected": detected && last_connected && !opted_out,
+        "optedOut": opted_out,
+        "cached": true,
+        "message": "Status is saved locally. Connect to verify the installation in Grok Bot."
+    })
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn grokbot_connection(app: AppHandle, action: String) -> Result<Value, String> {
     let home = dirs::home_dir().ok_or("Home directory is unavailable.")?;
-    let bun =
-        crate::pi::find_bun_executable().ok_or("Screenpipe's bundled runtime is unavailable.")?;
-    connection_in(&app, &home, Path::new(&bun), &action, false).await
-}
-
-pub fn start_background(app: AppHandle, home: PathBuf, bun: PathBuf) {
-    if !cfg!(any(target_os = "macos", target_os = "windows")) {
-        return; // The installer has no credential adapter for other platforms.
-    }
-    tauri::async_runtime::spawn(async move {
-        let app_data = grokbot_app_data_in(&home);
-        let mut last_error = None;
-        // Retry absent/signed-out installations for this session, stopping only
-        // on confirmed setup or opt-out. Every app launch verifies setup again.
-        for delay in [Duration::ZERO, Duration::from_secs(15)]
-            .into_iter()
-            .chain(std::iter::repeat(crate::skills::AI_TOOL_CHECK_INTERVAL))
-        {
-            tokio::time::sleep(delay).await;
-            // No Bun process, keychain access or network request while the app
-            // hasn't created its account files. Honor isolated dev/E2E homes.
-            if !grokbot_account_files_exist(&app_data).await {
-                continue;
-            }
-            match connection_in(&app, &home, &bun, "connect", true).await {
-                Ok(result) if background_setup_finished(&result) => return,
-                Ok(_) => last_error = None,
-                Err(error) => {
-                    if last_error.as_ref() != Some(&error) {
-                        tracing::info!("Grok Bot automatic skill installation is waiting for the app; retry is available in Connections");
-                    }
-                    last_error = Some(error);
-                }
-            }
-        }
-    });
+    let bun = if action == "status" {
+        String::new()
+    } else {
+        crate::pi::find_bun_executable().ok_or("Screenpipe's bundled runtime is unavailable.")?
+    };
+    connection_in(&app, &home, Path::new(&bun), &action).await
 }
 
 fn grokbot_app_data_in(home: &Path) -> PathBuf {
@@ -164,51 +173,61 @@ fn grokbot_app_data_in(home: &Path) -> PathBuf {
     config.join("Grok Bot")
 }
 
-async fn grokbot_account_files_exist(app_data: &Path) -> bool {
-    for name in ["sand-secrets.json", "gateway-descriptor.json"] {
-        if !tokio::fs::try_exists(app_data.join(name))
-            .await
-            .unwrap_or(false)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn background_setup_finished(result: &Value) -> bool {
-    result["connected"] == true || result["optedOut"] == true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn later_grokbot_install_waits_for_account_files_in_the_isolated_home() {
+    async fn status_never_calls_the_credential_bridge_even_with_an_existing_install() {
         let home = tempfile::tempdir().unwrap();
-        let app_data = grokbot_app_data_in(home.path());
-        assert!(app_data.starts_with(home.path()));
-        assert!(!grokbot_account_files_exist(&app_data).await);
-        std::fs::create_dir_all(&app_data).unwrap();
-        std::fs::write(app_data.join("sand-secrets.json"), "{}").unwrap();
-        assert!(!grokbot_account_files_exist(&app_data).await);
-        std::fs::write(app_data.join("gateway-descriptor.json"), "{}").unwrap();
-        assert!(grokbot_account_files_exist(&app_data).await);
+        let intent = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(grokbot_app_data_in(home.path())).unwrap();
+        for last_connected in [false, true] {
+            if last_connected {
+                std::fs::write(intent.path().join("grokbot-last-connected"), b"").unwrap();
+            }
+            let result = connection_with_bridge(home.path(), intent.path(), "status", || async {
+                panic!("passive status accessed Grok Bot credentials")
+            }).await.unwrap();
+            assert_eq!(result["connected"], last_connected);
+            assert_eq!(result["cached"], true);
+        }
+        std::fs::write(intent.path().join("grokbot"), b"").unwrap();
+        let result = connection_with_bridge(home.path(), intent.path(), "status", || async {
+            panic!("opted-out status accessed Grok Bot credentials")
+        }).await.unwrap();
+        assert_eq!(result["connected"], false);
+        assert_eq!(result["optedOut"], true);
     }
 
-    #[test]
-    fn grokbot_background_stops_only_after_confirmation_or_opt_out() {
-        assert!(!background_setup_finished(
-            &json!({"detected": false, "connected": false})
-        ));
-        assert!(!background_setup_finished(
-            &json!({"detected": true, "connected": false})
-        ));
-        assert!(background_setup_finished(&json!({"connected": true})));
-        assert!(background_setup_finished(
-            &json!({"connected": false, "optedOut": true})
-        ));
+    #[tokio::test]
+    async fn only_verified_explicit_connect_records_success_and_failure_clears_it() {
+        let home = tempfile::tempdir().unwrap();
+        let intent = tempfile::tempdir().unwrap();
+        let marker = intent.path().join("grokbot-last-connected");
+        connection_with_bridge(home.path(), intent.path(), "connect", || async {
+            Ok(json!({"detected": true, "connected": true}))
+        }).await.unwrap();
+        assert!(marker.is_file());
+        let result = connection_with_bridge(home.path(), intent.path(), "connect", || async {
+            Err("gateway unavailable".into())
+        }).await;
+        assert!(result.is_err());
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_disconnect_saves_opt_out_before_accessing_the_gateway() {
+        let home = tempfile::tempdir().unwrap();
+        let intent = tempfile::tempdir().unwrap();
+        std::fs::write(intent.path().join("grokbot-last-connected"), b"").unwrap();
+        let result = connection_with_bridge(home.path(), intent.path(), "disconnect", || async {
+            assert!(intent.path().join("grokbot").is_file());
+            assert!(!intent.path().join("grokbot-last-connected").exists());
+            Err("gateway unavailable".into())
+        }).await;
+        assert!(result.is_err());
+        assert!(intent.path().join("grokbot").is_file());
     }
 
     #[tokio::test]

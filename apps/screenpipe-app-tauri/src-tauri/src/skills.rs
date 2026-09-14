@@ -171,7 +171,7 @@ async fn wait_for_background_api_key(api_auth_enabled: bool) -> Option<String> {
 /// targets are cached for this session; an explicit Settings disconnect still
 /// wins. Filesystem work stays off the async/UI threads.
 pub fn connect_detected_ai_tools_in_background(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     api_auth_enabled: bool,
     api_port: u16,
 ) {
@@ -183,7 +183,8 @@ pub fn connect_detected_ai_tools_in_background(
         warn!("AI tool background setup skipped: bundled Bun was not found");
         return;
     };
-    crate::grokbot::start_background(app, home.clone(), bun_path.clone());
+    // Grok Bot requires explicit credential access from Connections.
+    // Keep ordinary local MCP/skill configuration automatic.
     tauri::async_runtime::spawn(async move {
         let api_key = wait_for_background_api_key(api_auth_enabled).await;
         connect_detected_ai_tools_in(

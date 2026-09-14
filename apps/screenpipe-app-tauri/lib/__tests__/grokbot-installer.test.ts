@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createCipheriv, pbkdf2Sync } from "node:crypto";
 import { SCREENPIPE_API_SKILL_MD, SCREENPIPE_STARTER_SKILLS } from "../generated/screenpipe-skills";
-import { activeDescriptor, decryptMacDescriptor, decryptWindowsDescriptor, validateGateway, skillSpec, skillSpecs, reconcileSkill, reconcileSkills, appDataPath, GATEWAY_MAX_AGE_MS } from "../grokbot-installer.mjs";
+import { activeDescriptor, decryptMacDescriptor, decryptWindowsDescriptor, validateGateway, skillSpec, skillSpecs, reconcileSkill, reconcileSkills, appDataPath, GATEWAY_MAX_AGE_MS, runInstaller } from "../grokbot-installer.mjs";
 
 const input = { home: "/home/test", bun: "/Applications/screenpipe/bun", dataDir: "/data/custom profile", port: 3137, skill: "API reference\n" };
 const spec = skillSpec(input, "Test Mac");
@@ -25,6 +25,15 @@ function fixture(initial: any[] = [], ignoreWrites = false) {
   });
   return { call, rows: () => rows };
 }
+
+describe("Grok Bot credential consent", () => {
+  it.each(["status", "automatic", "", undefined])("rejects %s before discovering another app's files", async action => {
+    const home = vi.fn(() => { throw new Error("Grok Bot files were touched"); });
+    await expect(runInstaller({ action, get home() { return home(); } }))
+      .rejects.toThrow("requires an explicit connect or disconnect action");
+    expect(home).not.toHaveBeenCalled();
+  });
+});
 
 describe("Grok Bot automatic skill installation", () => {
   it("attributes REST retrievals in the installed canonical skill to Grok Bot", () => {
