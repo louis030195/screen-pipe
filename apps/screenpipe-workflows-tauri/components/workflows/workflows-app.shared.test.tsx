@@ -8,7 +8,55 @@ import { WorkflowsApp } from "@screenpipe/workflows-ui";
 import { createFixtureEnterpriseWorkflowsPlatform, createFixtureWorkflowsPlatform, fixtureWorkflowAnalysis } from "@screenpipe/workflows-ui/fixture";
 
 describe("shared workflows experience", () => {
-  beforeEach(() => window.history.replaceState(null, "", "/"));
+  beforeEach(() => { window.history.replaceState(null, "", "/"); window.localStorage.removeItem("workflows:navigation-collapsed"); });
+
+  it("collapses both panes independently and preserves the chat draft", async () => {
+    const platform = createFixtureWorkflowsPlatform();
+    const view = render(<WorkflowsApp platform={platform} initialAnalysis={fixtureWorkflowAnalysis} storageKey={null} />);
+    await screen.findByRole("heading", { name: "Your workflows" });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse left sidebar" }));
+    expect(screen.queryByRole("navigation", { name: "Primary navigation" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open left sidebar" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Open right sidebar" }));
+    const input = await screen.findByRole("textbox", { name: "Ask Screenpipe" });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "Keep this unfinished question" } });
+    fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true });
+    expect(screen.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
+    expect(input).toHaveValue("Keep this unfinished question");
+    fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+    expect(screen.queryByRole("region", { name: "Screenpipe assistant" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open right sidebar" }));
+    expect(screen.getByRole("textbox", { name: "Ask Screenpipe" })).toHaveValue("Keep this unfinished question");
+    fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true, repeat: true });
+    expect(screen.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
+    fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true, isComposing: true });
+    expect(screen.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse left sidebar" }));
+    view.unmount();
+    render(<WorkflowsApp platform={platform} initialAnalysis={fixtureWorkflowAnalysis} storageKey={null} />);
+    expect(await screen.findByRole("button", { name: "Open left sidebar" })).toHaveAttribute("aria-expanded", "false");
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
+    expect(screen.getByText("Toggle left sidebar")).toBeVisible();
+    expect(screen.getByText("Toggle right sidebar")).toBeVisible();
+  });
+
+  it("ignores workspace shortcuts while inactive and retains the draft when returning", async () => {
+    const platform = createFixtureWorkflowsPlatform();
+    const view = render(<WorkflowsApp platform={platform} initialAnalysis={fixtureWorkflowAnalysis} storageKey={null} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open right sidebar" }));
+    const input = await screen.findByRole("textbox", { name: "Ask Screenpipe" });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "A question to come back to" } });
+    view.rerender(<WorkflowsApp platform={platform} initialAnalysis={fixtureWorkflowAnalysis} storageKey={null} active={false} />);
+    fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(screen.queryByRole("dialog", { name: /command/i })).not.toBeInTheDocument();
+    view.rerender(<WorkflowsApp platform={platform} initialAnalysis={fixtureWorkflowAnalysis} storageKey={null} />);
+    expect(screen.getByRole("textbox", { name: "Ask Screenpipe" })).toHaveValue("A question to come back to");
+    expect(screen.getByRole("button", { name: "Collapse left sidebar" })).toHaveAttribute("aria-expanded", "true");
+  });
 
   it("persists a user correction without putting it into an analysis request", async () => {
     const platform = createFixtureWorkflowsPlatform();

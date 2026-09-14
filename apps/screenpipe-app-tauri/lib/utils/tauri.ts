@@ -15,6 +15,14 @@ export const commands = {
 async activateAppAfterOauth() : Promise<void> {
     await TAURI_INVOKE("activate_app_after_oauth");
 },
+async analyzeWorkflows(days: number | null, profile: JsonValue | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_workflows", { days, profile }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Reconcile the live app + the next-boot config with the current enterprise
  * hidden-UI policy. The frontend calls this right after pushing a freshly
@@ -461,6 +469,14 @@ async ensureWebviewFocus() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async ensureWorkflowsRuntime() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ensure_workflows_runtime") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Export a recording to `output_path` (an .mp4).
  *
@@ -504,6 +520,14 @@ async forceRegenerateSuggestions() : Promise<Result<CachedSuggestions, string>> 
 async generateActivityHistory(start: string, end: string, idempotencyKey: string) : Promise<Result<PersistedActivityHistory, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_activity_history", { start, end, idempotencyKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async generateWorkflowSkill(workflow: JsonValue, profile: JsonValue | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_workflow_skill", { workflow, profile }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -830,6 +854,9 @@ async getSyncStatus() : Promise<Result<SyncStatusResponse, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getWorkflowsRuntime() : Promise<JsonValue> {
+    return await TAURI_INVOKE("get_workflows_runtime");
 },
 async hideMainWindow() : Promise<void> {
     await TAURI_INVOKE("hide_main_window");
@@ -1160,6 +1187,14 @@ async loadBrainViewCanvas(viewId: string) : Promise<Result<BrainViewCanvasDocume
     else return { status: "error", error: e  as any };
 }
 },
+async loadWorkflowRecording(timestamp: string, appName: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_workflow_recording", { timestamp, appName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Lock sync (clear keys from memory and stop server sync service).
  */
@@ -1353,6 +1388,14 @@ async openViewerWindow(path: string) : Promise<Result<null, string>> {
 async openWindowsShellTarget(target: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_windows_shell_target", { target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openWorkflowCapturedMoment(frameId: number, timestamp: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_workflow_captured_moment", { frameId, timestamp }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2043,6 +2086,9 @@ async registerWindowShortcuts() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async releaseWorkflowRecording(url: string) : Promise<void> {
+    await TAURI_INVOKE("release_workflow_recording", { url });
+},
 async remoteSyncDiscoverHosts() : Promise<Result<DiscoveredHost[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("remote_sync_discover_hosts") };
@@ -2348,6 +2394,14 @@ async saveEnterpriseLicenseKey(licenseKey: string) : Promise<Result<null, string
 async saveEnterpriseTeamConfig(isAdmin: boolean | null, licenseActive: boolean | null, teamApiToken: string | null, gatewayUrl: string | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_enterprise_team_config", { isAdmin, licenseActive, teamApiToken, gatewayUrl }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveWorkflowSkill(draft: JsonValue) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_workflow_skill", { draft }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3650,10 +3704,10 @@ useSystemDefaultAudio: boolean;
  */
 experimentalCoreaudioSystemAudio?: boolean;
 /**
- * Beta ("Smart recording" in the app): during detected meetings, capture
+ * Automatic meeting capture: during detected meetings, capture
  * the meeting app's own audio via a per-process tap plus the microphone
  * that app actually has open (instead of the global mix + assumed-default
- * mic). Default `false`. Takes precedence over everything: it engages in
+ * mic). Default `true`. Takes precedence over everything: it engages in
  * ANY `audio_capture_mode` (continuous or meetings-only) and displaces
  * the configured devices for the meeting's duration. Requires macOS 14.4+
  * or Windows, plus the meeting detector (with `disable_meeting_detector`
@@ -3668,10 +3722,10 @@ experimentalMeetingPiggyback?: boolean;
  * link out of A2DP into SCO, degrading the user's headphone/speaker
  * output quality (48kHz stereo -> 24kHz stereo or mono HFP, depending on
  * hardware) — a macOS/OS-level tradeoff with no external workaround
- * (issue #3750). Default `false`: Bluetooth input devices are only
- * actually opened while a meeting is detected; outside a meeting they
- * stay enabled-but-gated (selected in settings, not streaming) so the
- * Bluetooth link stays in A2DP. Set `true` to always record Bluetooth
+ * (issue #3750). Default `false`: automatically selected Bluetooth inputs
+ * are opened only during meetings, keeping A2DP outside meetings. A
+ * manually selected device or explicit device-start request is exempt.
+ * Set `true` to always record automatically selected Bluetooth
  * mics regardless of meeting state (prior behavior). Has no effect on
  * wired/built-in/unrecognized mics, on Bluetooth output devices, or on a
  * dedicated Bluetooth microphone with no output side of its own (macOS:

@@ -868,3 +868,26 @@
 .replay blockquote { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }
 .depthNotice textarea { display: block; width: 100%; min-height: 90px; padding: 10px; margin: 8px 0; background: transparent; color: inherit; border: 1px solid currentColor; border-radius: 6px; resize: vertical; }
 @media (max-width: 640px) { .replay header { align-items: flex-start; flex-direction: column; } }
+
+/* Both panes have a visible path back without taking space from the canvas. */
+.sidebar[hidden] { display: none; }
+.app.navigationCollapsed { grid-template-columns: minmax(0, 1fr); }
+.panelToggle { display: inline-flex; flex: 0 0 32px; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
+.panelToggle:hover { color: var(--ink); background: var(--soft); }
+.panelToggle:focus-visible { outline: 1px solid var(--ink); outline-offset: 3px; }
+@media (min-width: 960px) {
+  .app.appDocked.navigationCollapsed { grid-template-columns: minmax(0, 1fr) min(var(--assistant-width, 420px), calc(100vw - 360px)); }
+}
+@media (max-width: 680px) {
+  .app:not(.appEmbedded) .sidebar:not([hidden]) { display: flex; position: absolute; top: 59px; left: 0; width: 222px; height: calc(100vh - 59px); box-shadow: 4px 0 12px #0000000d; }
+  .topbar { gap: 6px; }
+  .topbar > .pill { display: none; }
+}
+
+.app[data-native-window="true"].navigationCollapsed .topbar { padding-left: 84px; }
+@media (max-width: 680px) {
+  .app[data-native-window="true"] .topbar { padding-left: 84px; }
+}
+
+/* The host supplies the same product menu in both workspaces. */
+.integratedBrand { padding: 12px 0 20px; }

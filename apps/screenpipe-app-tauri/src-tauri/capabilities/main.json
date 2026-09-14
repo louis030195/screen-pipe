@@ -41,6 +41,9 @@
         },
         {
           "url": "^x-apple-reminderkit://.*"
+        },
+        {
+          "url": "^screenpipe://(frame/[0-9]+|timeline\\?timestamp=).*"
         }
       ]
     },

@@ -1062,6 +1062,30 @@ pub(crate) async fn run_background_pi(
 ) -> Result<String, String> {
     let settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
     let (config, token) = provider_config(&settings, selected_preset_key, task_system_prompt)?;
+    run_background_pi_with_config(
+        app,
+        session_prefix,
+        project_directory_name,
+        prompt,
+        timeout,
+        config,
+        token,
+    )
+    .await
+}
+
+/// Run a private, headless turn through the same Pi/ACP harness, command queue,
+/// and completion events used by Chat. Callers with a fixed product-owned
+/// model can supply that configuration without writing a fake user preset.
+pub(crate) async fn run_background_pi_with_config(
+    app: &AppHandle,
+    session_prefix: &str,
+    project_directory_name: &str,
+    prompt: String,
+    timeout: Option<std::time::Duration>,
+    config: PiProviderConfig,
+    token: Option<String>,
+) -> Result<String, String> {
     let is_agent = config.backend.is_some();
     let session_id = format!("__title:{session_prefix}-{}", uuid::Uuid::new_v4());
     let project_dir = screenpipe_core::paths::default_screenpipe_data_dir()

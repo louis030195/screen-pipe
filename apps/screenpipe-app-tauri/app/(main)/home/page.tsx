@@ -131,6 +131,10 @@ import {
 } from "@/components/first-run/learning-banner";
 import { blocksTrialActivationApp } from "@/lib/first-run/trial-activation";
 
+import { ProductSwitcher, type ProductMode } from "@/components/workflows/product-switcher";
+import { IntegratedWorkflows } from "@/components/workflows/integrated-workflows";
+import { readProductMode, saveProductMode } from "@/lib/workflows/entry-preference";
+
 type MainSection = "home" | "timeline" | "activity" | "brain" | "pipes" | "connections" | "meetings" | "help";
 const TRIAL_ACTIVATION_ALLOWED_SECTIONS = new Set<MainSection>([
   "home",
@@ -161,6 +165,20 @@ const isSettingsRoute = (value: string) => resolveSettingsSection(value) !== nul
 
 function HomeContent() {
   const router = useRouter();
+  const [requestedMode, setRequestedMode] = useQueryState("mode", { defaultValue: "screenpipe", history: "push" });
+  const [workflowsVisited, setWorkflowsVisited] = useState(false);
+  const modeInteraction = useRef(false);
+  const changeMode = useCallback((next: ProductMode) => {
+    modeInteraction.current = true;
+    void setRequestedMode(next);
+    void saveProductMode(next).catch(() => {});
+  }, [setRequestedMode]);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("mode")) return;
+    void readProductMode().then(saved => {
+      if (!modeInteraction.current && saved === "workflows") void setRequestedMode(saved);
+    }).catch(() => {});
+  }, [setRequestedMode]);
   const {
     learning: firstRunLearning,
     openTrialActivationPaywall,
@@ -302,7 +320,10 @@ function HomeContent() {
     void updateSettings({ firstRunGuideDone: true });
   }, [updateSettings]);
 
-  const { isSectionHidden, isSettingLocked } = useManagedPolicy();
+  const { isSectionHidden, isSettingLocked, isManagedDeployment, isManagedDeploymentResolved } = useManagedPolicy();
+  const workflowsAvailable = isManagedDeploymentResolved && !isManagedDeployment && !trialActivationLocked;
+  const workflowsActive = workflowsAvailable && requestedMode === "workflows";
+  useEffect(() => { if (workflowsActive) setWorkflowsVisited(true); }, [workflowsActive]);
   const runningPipes = useRunningPipes();
   const runningPipeCount = runningPipes.length;
   const selectChatConversation = useCallback((id: string) => {
@@ -549,17 +570,19 @@ function HomeContent() {
   // Cmd+B / Ctrl+B to toggle sidebar
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (workflowsActive) return;
       if (!matchesInAppShortcut(e, "toggle_sidebar", isMac)) return;
       e.preventDefault();
       toggleSidebar();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [isMac, toggleSidebar]);
+  }, [isMac, toggleSidebar, workflowsActive]);
 
   // Cmd+N / Ctrl+N to start a new chat (matches the "New chat" sidebar button)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (workflowsActive) return;
       if (!matchesInAppShortcut(e, "new_chat", isMac)) return;
       e.preventDefault();
       setActiveSection("home");
@@ -571,13 +594,14 @@ function HomeContent() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [isMac, setActiveSection, startNewChat]);
+  }, [isMac, setActiveSection, startNewChat, workflowsActive]);
 
   // Own portal-only shortcut surfaces in the hydrated Home shell. Static
   // WKWebView exports can otherwise defer a closed dialog subtree long enough
   // for its first keyboard event to be missed.
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (workflowsActive) return;
       if (matchesInAppShortcut(event, "command_menu", isMac)) {
         event.preventDefault();
         if (!commandPaletteOpen) commandPaletteAnalytics.opened("keyboard");
@@ -594,7 +618,7 @@ function HomeContent() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [commandPaletteOpen, experimentalFeaturesEnabled, isMac]);
+  }, [commandPaletteOpen, experimentalFeaturesEnabled, isMac, workflowsActive]);
   // Fetch actual recording devices. Audio comes from /audio/device/status so
   // user-paused devices stay visible and can be resumed from the same control.
   interface AudioDeviceStatus {
@@ -1207,6 +1231,8 @@ function HomeContent() {
   useTauriEvent<{ url: string }>("navigate", (event) => {
     const url = new URL(event.payload.url, window.location.origin);
     const section = url.searchParams.get("section");
+    if (url.searchParams.get("mode") === "workflows") changeMode("workflows");
+    else if (section) changeMode("screenpipe");
     if (!section) return;
     const settingsSection = resolveSettingsSection(section);
     if (settingsSection) {
@@ -1354,6 +1380,7 @@ function HomeContent() {
               // matching the vertical center of the macOS traffic lights
               // (which sit at y≈14).
               "fixed top-1 z-[46] flex items-center gap-1.5",
+              workflowsActive && "hidden",
               reserveTrafficLights ? "left-[78px]" : "left-2"
             )}
           >
@@ -1496,7 +1523,7 @@ function HomeContent() {
           {/* Collapsed = hidden. No icon-rail fallback — the floating
               sidebar toggle above is the entire collapsed chrome,
               Claude-style. */}
-          {!sidebarCollapsed && (
+          {!workflowsActive && !sidebarCollapsed && (
           <AppSidebar className="pl-1">
             {/* Navigation.
                 Outer flex column has no overflow — the chat-list section
@@ -1504,6 +1531,7 @@ function HomeContent() {
                 bottom items would be pushed below the fold by long
                 conversation lists. */}
             <div className="pt-2 pr-2 pb-2 flex-1 flex flex-col min-h-0">
+              {workflowsAvailable && <div className="mb-3 px-1"><ProductSwitcher mode="screenpipe" onChange={changeMode} /></div>}
               {/* Main sections. Order and visibility are the user's — drag a
                   row or right-click it; enterprise policy still decides
                   eligibility. */}
@@ -1653,6 +1681,7 @@ function HomeContent() {
           </AppSidebar>
           )}
           </TooltipProvider>
+          {!workflowsActive && sidebarCollapsed && workflowsAvailable && <div className="fixed left-3 top-10 z-40"><ProductSwitcher mode="screenpipe" compact onChange={changeMode} /></div>}
 
           {/* Content.
               min-w-0 matters: without it this flex item refuses to shrink
@@ -1660,7 +1689,7 @@ function HomeContent() {
               nowrap, so that's the FULL untruncated text width), and in a
               narrow window with the sidebar open the whole pane gets
               clipped at the right window edge instead of truncating. */}
-          <div className={cn("flex-1 min-w-0 flex flex-col h-full bg-background min-h-0 relative", isTranslucent ? "rounded-none" : "rounded-tr-lg")} data-testid="home-page">
+          <div className={cn("flex-1 min-w-0 flex flex-col h-full bg-background min-h-0 relative", workflowsActive && "hidden", isTranslucent ? "rounded-none" : "rounded-tr-lg")} data-testid="home-page">
             {/* ALWAYS-MOUNTED chat layer.
                 Hidden via CSS (display:none) when the user is on a non-chat
                 section, so the StandaloneChat component never unmounts. This
@@ -1685,7 +1714,7 @@ function HomeContent() {
                 <StandaloneChat
                   className="h-full"
                   hideInlineHistory
-                  chatShortcutsEnabled={activeSection === "home"}
+                  chatShortcutsEnabled={!workflowsActive && activeSection === "home"}
                   sidebarCollapsed={sidebarCollapsed}
                   firstRunLearningEnabled
                 />
@@ -1727,7 +1756,8 @@ function HomeContent() {
 
           </div>
 
-          {showFirstRunGuide && (
+          {workflowsAvailable && (workflowsActive || workflowsVisited) && <div className={cn("flex-1 min-w-0 h-full", !workflowsActive && "hidden")}><IntegratedWorkflows active={workflowsActive} onModeChange={changeMode} /></div>}
+          {!workflowsActive && showFirstRunGuide && (
             <FirstRunGuide
               onDone={markFirstRunGuideDone}
               onGoToAutomations={() => setActiveSection("pipes")}
