@@ -61,7 +61,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Native Windows APIs - no rdev dependency
-windows-core = "0.58"
+windows-core = "0.62"
 windows = { workspace = true, features = [
     "implement",
     "Win32_Foundation",

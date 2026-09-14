@@ -8609,7 +8609,7 @@ dependencies = [
  "tracing",
  "url",
  "windows 0.58.0",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
  "zbus",
 ]
 
@@ -8678,7 +8678,7 @@ dependencies = [
  "which 7.0.3",
  "whisper-rs",
  "windows 0.58.0",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -9032,7 +9032,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "windows 0.58.0",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
