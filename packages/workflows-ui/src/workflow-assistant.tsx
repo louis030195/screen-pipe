@@ -4,19 +4,25 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowUp, Check, ChevronDown, Copy, MessageCircle, PanelRight, Plus, Search, Square, SquarePen, RotateCcw, X, Maximize2 } from "lucide-react";
+import { ArrowLeft, ArrowUp, Check, ChevronDown, Copy, MessageCircle, Minus, PanelRight, PanelRightClose, Plus, Search, Square, SquarePen, RotateCcw, X, Maximize2 } from "lucide-react";
 import { assistantContextSnapshot, emptyAssistantState, newAssistantConversation, isAssistantLink, type AssistantContext, type AssistantMessage, type AssistantState, type WorkflowsAssistantPlatform } from "./assistant";
 import { ChatMarkdown, ComposerTextArea, ChatJumpToLatest } from "./chat-primitives";
+import { matchesSidebarShortcut, useSidebarShortcuts } from "./sidebar-shortcuts";
 import styles from "./workflow-assistant.module.css";
 
-export function WorkflowAssistant({ platform, context, onDockChange, onWidthChange }: {
+export function WorkflowAssistant({ platform, context, onDockChange, onWidthChange, onOpenChange, onModeChange, headerToggle = false, active = true }: {
   platform: WorkflowsAssistantPlatform;
   context: AssistantContext;
   onDockChange: (docked: boolean) => void;
   onWidthChange?: (width: number) => void;
+  onOpenChange?: (open: boolean) => void;
+  onModeChange?: (mode: AssistantState["mode"]) => void;
+  headerToggle?: boolean;
+  active?: boolean;
 }) {
+  const shortcuts = useSidebarShortcuts();
   const [open, setOpen] = useState(false);
-  const [state, setState] = useState<AssistantState>(emptyAssistantState);
+  const [state, setState] = useState<AssistantState>(() => ({ ...emptyAssistantState(), mode: headerToggle ? "sidebar" : "floating" }));
   const stateRef = useRef(state);
   const [loaded, setLoaded] = useState(false);
   const loadedRef = useRef(false);
@@ -80,6 +86,8 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   useEffect(() => { if (open && !loadedRef.current && !loadError) void restore(); }, [open, restore, loadError]);
   useEffect(() => { onDockChange(open && state.mode === "sidebar"); }, [open, state.mode, onDockChange]);
   useEffect(() => { onWidthChange?.(width); }, [width, onWidthChange]);
+  useEffect(() => { onOpenChange?.(open); }, [open, onOpenChange]);
+  useEffect(() => { onModeChange?.(state.mode); }, [state.mode, onModeChange]);
   useEffect(() => { if (open && loaded) (historyOpen ? historyInput.current : input.current)?.focus(); }, [open, loaded, historyOpen]);
   useEffect(() => {
     if (displayOpen) displayMenu.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
@@ -106,12 +114,13 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
     setOpen(false);
     setDisplayOpen(false);
     if (loadedRef.current) void persist(stateRef.current).catch(() => {});
-    requestAnimationFrame(() => launcher.current?.focus());
-  }, [persist]);
+    requestAnimationFrame(() => (headerToggle ? document.querySelector<HTMLButtonElement>("[data-workflows-assistant-toggle]") : launcher.current)?.focus());
+  }, [persist, headerToggle]);
   useEffect(() => {
+    if (!active) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing) return;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
+      if (event.defaultPrevented || event.isComposing || event.repeat) return;
+      if (matchesSidebarShortcut(event, "right")) {
         event.preventDefault();
         if (open) close(); else setOpen(true);
       } else if (event.key === "Escape" && open && panel.current?.contains(event.target as Node)) {
@@ -123,9 +132,15 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
     };
     window.addEventListener("keydown", onKey);
     const openChat = () => setOpen(true);
+    const toggleChat = () => { if (open) close(); else setOpen(true); };
     window.addEventListener("workflows:open-assistant", openChat);
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("workflows:open-assistant", openChat); };
-  }, [open, close, historyOpen, displayOpen]);
+    window.addEventListener("workflows:toggle-assistant", toggleChat);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("workflows:open-assistant", openChat);
+      window.removeEventListener("workflows:toggle-assistant", toggleChat);
+    };
+  }, [active, open, close, historyOpen, displayOpen]);
 
   const patchMessage = (conversationId: string, messageId: string, patch: Partial<AssistantMessage>) => update((current) => ({
     ...current, conversations: current.conversations.map((c) => c.id !== conversationId ? c : { ...c, messages: c.messages.map((m) => m.id === messageId ? { ...m, ...patch } : m) }),
@@ -205,10 +220,10 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   }
 
   return <>
-    {!open && <button ref={launcher} className={styles.launcher} onClick={() => setOpen(true)} title="Ask Screenpipe (⌘ J)" aria-label="Ask Screenpipe" aria-expanded={false}>
-      <MessageCircle size={20} strokeWidth={1.65} /><span>Ask Screenpipe<kbd>⌘ J</kbd></span>{busy && <i aria-label="Answer in progress" />}
+    {!open && !headerToggle && <button ref={launcher} className={styles.launcher} onClick={() => setOpen(true)} title={`Ask Screenpipe (${shortcuts.right.keys.join(" ")})`} aria-keyshortcuts={shortcuts.right.aria} aria-label="Ask Screenpipe" aria-expanded={false}>
+      <MessageCircle size={20} strokeWidth={1.65} /><span>Ask Screenpipe<kbd>{shortcuts.right.keys.join(" ")}</kbd></span>{busy && <i aria-label="Answer in progress" />}
     </button>}
-    <aside ref={panel} hidden={!open} className={[styles.panel, state.mode === "sidebar" ? styles.docked : styles.floating].join(" ")}
+    <aside id="workflows-assistant" ref={panel} hidden={!open} className={[styles.panel, state.mode === "sidebar" ? styles.docked : styles.floating].join(" ")}
       style={{ "--assistant-width": width + "px" } as React.CSSProperties}
       data-empty={!conversation.messages.length && !historyOpen} data-mode={state.mode} role="region" aria-label="Screenpipe assistant">
       <div className={styles.resizeHandle} role="separator" tabIndex={0} aria-label="Resize chat" aria-orientation="vertical"
@@ -229,7 +244,7 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
             <button ref={displayTrigger} aria-label="Chat display" title="Chat display" aria-haspopup="menu" aria-expanded={displayOpen}
               disabled={!loaded} onClick={() => setDisplayOpen(!displayOpen)} onKeyDown={(event) => {
                 if (["ArrowDown", "ArrowUp"].includes(event.key)) { event.preventDefault(); setDisplayOpen(true); }
-              }}><PanelRight size={16} /></button>
+              }}><Maximize2 size={16} /></button>
             {displayOpen && <div className={styles.displayMenu} role="menu" aria-label="Chat display" onKeyDown={(event) => {
               if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
               event.preventDefault();
@@ -242,7 +257,8 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
               <button role="menuitemradio" aria-checked={state.mode === "sidebar"} onClick={() => chooseMode("sidebar")}><PanelRight size={15} /><span>Sidebar</span>{state.mode === "sidebar" && <Check size={14} />}</button>
             </div>}
           </div>
-          <button aria-label="Close assistant" title="Close (Esc)" onClick={close}><X size={17} /></button>
+          <button aria-label={state.mode === "floating" ? "Minimize chat" : "Collapse right sidebar"} title={`${state.mode === "floating" ? "Minimize chat" : "Collapse right sidebar"} (${shortcuts.right.keys.join(" ")})`} aria-expanded={true}
+            aria-controls="workflows-assistant" aria-keyshortcuts={shortcuts.right.aria} onClick={close}>{state.mode === "floating" ? <Minus size={18} /> : <PanelRightClose size={18} />}</button>
         </div>
       </header>
       <div className={styles.body} ref={scroll} data-workflows-chat-scroll role={historyOpen ? undefined : "log"} aria-label={historyOpen ? undefined : "Conversation"} aria-live="off"

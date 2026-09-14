@@ -35,7 +35,7 @@ describe("secondary workflow assistant", () => {
     fireEvent.click(screen.getByRole("button", { name: "Chat display" }));
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Sidebar" }));
     expect(props.onDockChange).toHaveBeenLastCalledWith(true);
-    fireEvent.click(screen.getByRole("button", { name: "Close assistant" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse right sidebar" }));
     expect(screen.queryByRole("region", { name: "Screenpipe assistant" })).not.toBeInTheDocument();
     rerender(<WorkflowAssistant {...props} context={{ key: "profile", title: "Work profile" }} />);
     await act(async () => finish("The handoff is the observed friction."));
@@ -100,7 +100,7 @@ describe("secondary workflow assistant", () => {
   });
 
   it("uses only local shortcuts, preserves multiline input, and strips screenshot payloads", async () => {
-    setup(); fireEvent.keyDown(window, { key: "j", metaKey: true }); await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+    setup(); fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true, altKey: true }); await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
     const box = screen.getByRole("textbox"); fireEvent.change(box, { target: { value: "Question" } });
     fireEvent.keyDown(box, { key: "Enter", shiftKey: true }); expect(screen.queryByLabelText("Your question")).not.toBeInTheDocument();
     await act(async () => fireEvent.keyDown(box, { key: "Escape" })); expect(screen.queryByRole("region")).not.toBeInTheDocument();
@@ -148,7 +148,7 @@ describe("secondary workflow assistant", () => {
     fireEvent.keyDown(screen.getByRole("menuitemradio", { name: "Sidebar" }), { key: "Escape" });
     expect(screen.getByRole("button", { name: "Chat display" })).toHaveFocus();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Close assistant" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse right sidebar" }));
     await waitFor(() => expect(platform.save).toHaveBeenCalledWith(expect.objectContaining({ mode: "sidebar", sidebarWidth: 420 })));
   });
 

@@ -32,6 +32,7 @@ import {
 } from "./qualified-value";
 import { discoverTeamApiBase, discoverTeamToken } from "./team-config";
 import { teamFrameContent, teamFramePath } from "./team-frame";
+import { WORKFLOW_TOOLS, readWorkflowTool, frameAutomationContent, inputEventContent } from "./workflow-tools";
 import { PKG_VERSION } from "./version";
 import { formatForElementPurpose } from "./element-format";
 import { buildActivitySummaryResult } from "./activity-summary-tool";
@@ -337,6 +338,7 @@ const server = new Server(
 // Tools
 // ---------------------------------------------------------------------------
 const TOOLS: Tool[] = [
+  ...WORKFLOW_TOOLS,
   {
     name: "search-content",
     description:
@@ -520,12 +522,15 @@ const TOOLS: Tool[] = [
     name: "frame-context",
     description:
       "Get full accessibility text, parsed tree nodes, and URLs for a specific frame ID. " +
-      "Use after search-content to get detailed context for a specific moment.",
+      "Use after search-content or get-workflow for a specific moment. Set purpose=automation for paginated nodes preserving exact captured bounds and automation properties; these are historical, not live targets.",
     annotations: { title: "Frame Context", readOnlyHint: true, openWorldHint: false, idempotentHint: true },
     inputSchema: {
       type: "object",
       properties: {
         frame_id: { type: "integer", description: "Frame ID from search-content results (content.frame_id field)" },
+        purpose: { type: "string", enum: ["read", "automation"], description: "Automation preserves raw captured node fields, including properties and bounds." },
+        node_offset: { type: "integer", minimum: 0, description: "Automation node pagination offset" },
+        node_limit: { type: "integer", minimum: 1, maximum: 500, default: 100, description: "Automation nodes per response" },
       },
       required: ["frame_id"],
     },
@@ -1683,6 +1688,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `${content.timestamp || ""}\n` +
                 `${truncateMiddle(content.text || "", effectiveCap)}`
             );
+          } else if (result.type === "Input") {
+            formattedResults.push(inputEventContent(content, effectiveCap));
           } else if (result.type === "Memory") {
             const tagsStr = content.tags?.length ? ` [${content.tags.join(", ")}]` : "";
             const importance =
@@ -1831,9 +1838,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: "Error: frame_id is required" }] };
         }
 
-        const response = await callAPI(`/frames/${frameId}/context`);
+        const response = await callAPI(`/frames/${frameId}/context${args.purpose === "automation" ? "?include_empty=true" : ""}`);
 
         const data = await response.json();
+        if (args.purpose === "automation") return frameAutomationContent(data, args);
         const lines = [`Frame ${data.frame_id} (source: ${data.text_source})`];
 
         if (data.text || data.nodes?.length || data.urls?.length) {
@@ -2320,6 +2328,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: "text", text: `Results: ${results.length}\n\n${formatted.join("\n---\n")}` }],
         };
       }
+
+      case "list-workflows":
+      case "get-workflow":
+        return await readWorkflowTool(name, args, callAPI);
 
       case "get-frame-elements": {
         const frameId = args.frame_id as number;

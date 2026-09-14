@@ -636,6 +636,12 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     }
 
     switch (command) {
+      case "get_onboarding_status":
+        return {
+          isCompleted: true, completedAt: "2026-09-01T12:00:00Z",
+          currentStep: "completed", firstRunSummaryPhase: "idle",
+          firstRunSummaryStartedAt: null, firstRunSummaryChatId: null,
+        };
       case "plugin:store|load": {
         const path = String(input.path ?? "browser-dev-store");
         const existing = storePaths.get(path);

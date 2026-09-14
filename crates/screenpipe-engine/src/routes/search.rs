@@ -19,7 +19,7 @@ use super::response_format::{
 /// Extracts an optional `Arc<PipePermissions>` from request extensions.
 /// Wrapper exists because `Option<Extension<T>>` falls back to oasgen's
 /// `impl<A: OaSchema> OaParameter for A` and `Extension<T>` is not OaSchema.
-pub(crate) struct OptionalPipePerms(Option<std::sync::Arc<PipePermissions>>);
+pub(crate) struct OptionalPipePerms(pub(crate) Option<std::sync::Arc<PipePermissions>>);
 
 impl<S: Send + Sync> FromRequestParts<S> for OptionalPipePerms {
     type Rejection = std::convert::Infallible;

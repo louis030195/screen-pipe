@@ -80,7 +80,8 @@
     "bundle:persistence-installer": "bun scripts/native-build-queue.ts persistence-bundle",
     "bundle:enterprise-test-installer": "bun scripts/native-build-queue.ts enterprise-bundle",
     "tauri:build": "bun scripts/native-build-queue.ts signed",
-    "clean": "rm -rf out && cargo clean --manifest-path src-tauri/Cargo.toml && rm -rf src-tauri/{screenpipe-*,tesseract-*,ffmpeg*,openblas*,bun*,ollama*,ui_monitor*} node_modules"
+    "clean": "rm -rf out && cargo clean --manifest-path src-tauri/Cargo.toml && rm -rf src-tauri/{screenpipe-*,tesseract-*,ffmpeg*,openblas*,bun*,ollama*,ui_monitor*} node_modules",
+    "eval:workflows": "bun scripts/eval-workflows.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

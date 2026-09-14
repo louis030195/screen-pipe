@@ -255,13 +255,14 @@ static REQUIRED_PI_PACKAGE_INSTALL_LOCK: std::sync::OnceLock<Mutex<()>> =
 static PI_EXTENSION_SAFE_MODE_PROJECTS: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::OnceLock::new();
 
-const MANAGED_PI_EXTENSION_FILES: [&str; 6] = [
+const MANAGED_PI_EXTENSION_FILES: [&str; 7] = [
     "web-search.ts",
     "mcp-bridge.ts",
     "save-artifact.ts",
     "live-views.ts",
     "connection-gate.ts",
     "context-pruning.ts",
+    "workflow-memory.ts",
 ];
 
 fn extension_safe_mode_projects() -> &'static std::sync::Mutex<HashSet<String>> {
@@ -1811,6 +1812,7 @@ fn ensure_shared_pi_extensions(project_dir: &str) -> Result<(), String> {
     ensure_chat_control_extension(project_dir)?;
     ensure_context_usage_extension(project_dir)?;
     ensure_context_pruning_extension(project_dir)?;
+    ensure_workflow_memory_extension(project_dir)?;
     // MCP bridge: lets the agent reach user-registered MCP servers.
     ensure_mcp_bridge_extension(project_dir)?;
     // Save artifact: lets the agent register deliverables in the Artifacts library.
@@ -1832,11 +1834,20 @@ const SHARED_PI_EXTENSION_FILES: &[&str] = &[
     "chat-control.ts",
     "context-usage.ts",
     "context-pruning.ts",
+    "workflow-memory.ts",
     "mcp-bridge.ts",
     "save-artifact.ts",
     "live-views.ts",
     "connection-gate.ts",
 ];
+
+fn ensure_workflow_memory_extension(project_dir: &str) -> Result<(), String> {
+    let ext_dir = std::path::Path::new(project_dir).join(".pi").join("extensions");
+    std::fs::create_dir_all(&ext_dir).map_err(|e| e.to_string())?;
+    std::fs::write(ext_dir.join("workflow-memory.ts"),
+        include_str!("../../../screenpipe-workflows-tauri/src-tauri/assets/extensions/workflow-memory.ts"))
+        .map_err(|e| format!("Failed to install memory lookup tools: {}", e))
+}
 
 /// Stage the Enterprise-only team skill outside Pi's auto-discovery tree.
 /// Consumer builds return `None` without touching this path; the Enterprise
@@ -2842,6 +2853,13 @@ pub async fn pi_start_inner(
     coding_workspace: Option<crate::coding_workspace::CodingWorkspaceLaunch>,
 ) -> Result<PiInfo, String> {
     info!("pi_start stage=requested session='{}'", session_id);
+    let assistant_context = if session_id.starts_with("__title:workflow-assistant-") {
+        Some(crate::workflows_runtime::assistant_agent_context(&app).await?)
+    } else { None };
+    let user_token = assistant_context.as_ref().map(|(_, token)| token.clone()).or(user_token);
+    let workflow_api = if session_id.starts_with("__title:workflows-") {
+        Some(crate::workflows_runtime::workflow_recorder_context(&app).await?)
+    } else { None };
     let project_dir = project_dir.trim().to_string();
     if project_dir.is_empty() {
         return Err("Project directory is required".to_string());
@@ -3540,7 +3558,8 @@ pub async fn pi_start_inner(
     // Pass local API config so the Pi agent can authenticate to the runtime local API.
     {
         use crate::recording::local_api_context_from_app;
-        let api = local_api_context_from_app(&app);
+        let api = assistant_context.as_ref().map(|(api, _)| api.clone()).or(workflow_api)
+            .unwrap_or_else(|| local_api_context_from_app(&app));
         apply_local_api_context(&mut cmd, &api);
     }
 

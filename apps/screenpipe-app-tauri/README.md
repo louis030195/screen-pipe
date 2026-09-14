@@ -13,6 +13,23 @@ Use the source-build instructions in [`CONTRIBUTING.md`](../../CONTRIBUTING.md):
 Run the Tauri commands from this directory, not the repository root. Product
 usage documentation is available at [docs.screenpi.pe](https://docs.screenpi.pe/getting-started).
 
+## Workflows integration preview
+
+The workspace menu in `/home` switches between Chat and Workflows. In the
+browser-mock build (`bun run dev:web`), Workflows uses synthetic data and its
+build-catalog action does not call the engine or an AI provider. Packaged builds
+use the main app's recorder, account, and app-local workflow storage.
+
+For first-task onboarding and empty/existing-history UI review, open
+`/dev/workflows-ux` in that same mock build. This maintained preview renders the
+production components with fictional fixtures and is blank outside mock mode.
+Consumer onboarding shows the first-task choice after recommended setup. Managed
+deployments and the summary-first activation experiment keep their existing flow.
+
+Mac shortcuts: `Cmd+B` toggles navigation; `Option+Cmd+B` toggles the assistant.
+Windows/Linux use `Ctrl+B` and `Ctrl+Alt+B`. Switching modes keeps both chat
+components mounted, but only the visible workspace handles its shortcuts.
+
 ## fast browser UI development
 
 From this directory, run:

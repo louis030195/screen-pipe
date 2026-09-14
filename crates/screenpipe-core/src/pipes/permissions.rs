@@ -125,6 +125,8 @@ fn parse_bare_api(s: &str) -> Option<PermissionRule> {
 pub const DEFAULT_ALLOWED_ENDPOINTS: &[&str] = &[
     "GET /search",
     "GET /activity-summary",
+    "GET /workflows",
+    "GET /workflows/*",
     "GET /elements",
     "GET /frames/*",
     "GET /meetings",
@@ -766,6 +768,9 @@ mod tests {
         p.use_default_allowlist = true;
         assert!(p.is_endpoint_allowed("GET", "/search"));
         assert!(p.is_endpoint_allowed("GET", "/meetings/42"));
+        assert!(p.is_endpoint_allowed("GET", "/workflows"));
+        assert!(p.is_endpoint_allowed("GET", "/workflows/wf-example"));
+        assert!(!p.is_endpoint_allowed("POST", "/workflows"));
         assert!(p.is_endpoint_allowed("POST", "/notify"));
         assert!(p.is_endpoint_allowed("GET", "/feedback"));
         assert!(p.is_endpoint_allowed("GET", "/outputs/targets"));

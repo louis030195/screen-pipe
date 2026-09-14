@@ -251,6 +251,8 @@ pub struct AppState {
 }
 
 pub struct SCServer {
+    /// Exact catalog directory supplied by the desktop owner; never inferred from another app.
+    pub workflow_catalog_dir: Option<PathBuf>,
     db: Arc<DatabaseManager>,
     /// Rolling history policy. Standalone/headless construction is unrestricted;
     /// the consumer desktop app explicitly supplies its live account policy.
@@ -385,6 +387,7 @@ impl SCServer {
     ) -> Self {
         let audio_metrics = audio_manager.metrics.clone();
         SCServer {
+            workflow_catalog_dir: None,
             db,
             history_access: HistoryAccessPolicy::unrestricted(),
             addr,
@@ -983,6 +986,8 @@ impl SCServer {
             )
             .get("/elements", search_elements)
             .get("/frames/:frame_id/elements", get_frame_elements)
+            .get("/workflows", crate::routes::workflows::list_workflows)
+            .get("/workflows/:id", crate::routes::workflows::get_workflow)
             .get("/activity-summary", get_activity_summary)
             .get("/activity-ledger", get_activity_ledger)
             .get(
@@ -1483,6 +1488,7 @@ impl SCServer {
                     }
                 }),
             )
+            .layer(Extension(crate::routes::workflows::WorkflowCatalogSource(self.workflow_catalog_dir.clone())))
             .with_state(app_state.clone())
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),

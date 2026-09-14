@@ -514,7 +514,7 @@ fn settings_restrict_activity_history(settings: &SettingsStore, is_enterprise_bu
     !is_enterprise_build && settings.is_free_or_unattributed_user()
 }
 
-fn provider_config(
+pub(crate) fn provider_config(
     settings: &SettingsStore,
     selected_preset_key: Option<&str>,
     task_system_prompt: &str,

@@ -1,0 +1,28 @@
+{
+  "native": {
+    "command": "bun run test:tauri workflows_runtime:: -- --nocapture",
+    "passed": 37
+  },
+  "frontend": {
+    "command": "bun run test:vitest scripts/workflows-eval/cases.test.ts components/workflows/workflows-app.shared.test.tsx lib/workflows/runtime.test.ts lib/workflows/catalog.test.ts lib/workflows/desktop-platform.test.ts src-tauri/assets/extensions/__tests__/workflow-memory.test.ts",
+    "passed": 44
+  },
+  "typecheck": {
+    "main": "passed",
+    "companion": "passed"
+  },
+  "contextBenchmark": {
+    "fixture": "90 days, 30 synthetic snippets/day",
+    "eagerFixtureBytes": 3416131,
+    "promptBytes": 15480,
+    "preparationMicroseconds": 458,
+    "meaning": "Input preparation only, not LLM latency or accuracy"
+  },
+  "modelEval": {
+    "status": "blocked",
+    "cases": 5,
+    "reason": "Standalone Pi screenpipe provider has no usable API credential. No model response or tool call ran. Desktop encrypted token was not exported.",
+    "model": "auto",
+    "provider": "screenpipe"
+  }
+}

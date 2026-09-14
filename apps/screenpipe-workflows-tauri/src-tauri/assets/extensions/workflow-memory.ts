@@ -18,7 +18,7 @@ export function memoryPath(name: string, args: Record<string, unknown>): string 
   if (name === "get-meeting") return `/meetings/${idPath(args.id)}${args.include_transcript ? "/transcript" : ""}`;
   const params = new URLSearchParams();
   params.set("limit", String(Math.max(1, boundedNumber(args.limit, 12, 30))));
-  params.set("offset", String(boundedNumber(args.offset, 0, 2000)));
+  params.set("offset", String(boundedNumber(args.offset, 0, Number.MAX_SAFE_INTEGER)));
   for (const key of ["q", "app_name", "window_name", "content_type", "start_time", "end_time"]) {
     if (typeof args[key] === "string" && args[key]) params.set(key, (args[key] as string).slice(0, 512));
   }
@@ -45,7 +45,7 @@ export default function workflowMemory(pi: ExtensionAPI) {
     start_time: { type: "string", description: "Inclusive ISO 8601 timestamp with timezone. Start with a narrow relevant range." },
     end_time: { type: "string", description: "Exclusive ISO 8601 timestamp with timezone." },
     app_name: { type: "string" }, window_name: { type: "string" },
-    limit: { type: "integer", minimum: 1, maximum: 30 }, offset: { type: "integer", minimum: 0, maximum: 2000 },
+    limit: { type: "integer", minimum: 1, maximum: 30 }, offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
   };
   for (const tool of [
     { name: "search-content", description: "Search this employee’s locally captured screen text, audio transcripts, memories and parsed app data. Returns actual timestamps and evidence ids. Sparse matches are not a complete time ledger. Follow pagination or narrow terms before claiming absence.", properties: fields, required: [] },
