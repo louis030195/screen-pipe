@@ -800,16 +800,19 @@ async fn resume_after_failed_migration(app: &tauri::AppHandle, root: &Path) -> R
 /// Retaining the migration preference would overwrite a subsequent user pause.
 pub(crate) async fn finish_recording_recovery(app: &tauri::AppHandle) -> Result<(), String> {
     let root = selected_root(app)?;
-    if saved_migration_error(&root).is_none()
-        || saved_recording_preference(app, &root)?.is_none()
-    {
+    if saved_migration_error(&root).is_none() || saved_recording_preference(app, &root)?.is_none() {
         return Ok(());
     }
     let recording = app.state::<RecordingState>();
-    let ready = recording.server.lock().await.as_ref().is_some_and(|server| {
-        server.data_dir.canonicalize().ok().as_ref() == Some(&root)
-            && !server.db.pool.is_closed()
-    });
+    let ready = recording
+        .server
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|server| {
+            server.data_dir.canonicalize().ok().as_ref() == Some(&root)
+                && !server.db.pool.is_closed()
+        });
     if ready && (!recording.capture_intended() || recording.capture.lock().await.is_some()) {
         save_recording_preference(app, &root, None)?;
     }
