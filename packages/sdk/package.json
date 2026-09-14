@@ -130,8 +130,8 @@
     "version": "napi version"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
-    "@types/node": "^22.10.1"
+    "@napi-rs/cli": "^3.9.1",
+    "@types/node": "^26.5.1"
   },
   "packageManager": "bun@1.3.10"
 }
