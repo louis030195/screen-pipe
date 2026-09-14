@@ -21,7 +21,7 @@ export async function isGrokBotDetected(): Promise<boolean> {
   }
 }
 
-export type GrokBotConnection = { detected: boolean; connected: boolean; optedOut?: boolean; message?: string };
+export type GrokBotConnection = { detected: boolean; connected: boolean; optedOut?: boolean; cached?: boolean; message?: string };
 let pendingStatus: Promise<GrokBotConnection> | undefined;
 export async function grokBotConnection(action: "status" | "connect" | "disconnect" = "status"): Promise<GrokBotConnection> {
   if (action === "status" && pendingStatus) return pendingStatus;

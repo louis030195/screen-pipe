@@ -11,12 +11,26 @@ beforeEach(() => { vi.resetAllMocks(); });
 afterEach(cleanup);
 
 describe("Grok Bot connection panel", () => {
-  it("shows the verified automatic installation without a setup prompt", async () => {
+  it("shows an explicit connection result", async () => {
     mocks.connection.mockResolvedValue({ detected: true, connected: true });
     render(<GrokBotPanel />);
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Screenpipe skill installed"));
     expect(mocks.connection).toHaveBeenCalledWith("status");
     expect(screen.queryByText(/copy setup prompt/i)).toBeNull();
+  });
+  it("only checks passive status on mount and labels a saved result", async () => {
+    mocks.connection.mockResolvedValue({ detected: true, connected: true, cached: true });
+    render(<GrokBotPanel />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("last confirmed installed"));
+    expect(mocks.connection.mock.calls).toEqual([["status"]]);
+    expect(screen.getByText(/saved connection credential/)).toBeInTheDocument();
+    expect(screen.queryByText(/automatically installs/)).toBeNull();
+  });
+  it("does not claim remote removal from a cached local opt-out", async () => {
+    mocks.connection.mockResolvedValue({ detected: true, connected: false, optedOut: true, cached: true });
+    render(<GrokBotPanel />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Remote removal not verified"));
+    expect(mocks.connection.mock.calls).toEqual([["status"]]);
   });
   it("connects, reports the verified result, and disconnects", async () => {
     mocks.connection.mockImplementation(async action => ({ detected: true, connected: action === "connect", optedOut: action === "disconnect" }));
@@ -26,7 +40,7 @@ describe("Grok Bot connection panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "connect Grok Bot" }));
     await waitFor(() => expect(onChanged).toHaveBeenLastCalledWith(true));
     fireEvent.click(screen.getByRole("button", { name: "disconnect" }));
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Automatic installation is off"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Disconnected"));
     expect(onChanged).toHaveBeenLastCalledWith(false);
   });
   it("keeps setup failures visible and allows retry or opting out", async () => {

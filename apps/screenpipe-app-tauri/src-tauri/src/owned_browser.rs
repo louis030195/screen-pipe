@@ -1987,6 +1987,19 @@ async fn inject_cookies_for_url_for_state(
         }
     }
 
+    if GLOBAL_SESSION_ACCESS_DISABLED.load(Ordering::SeqCst)
+        || !GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst)
+        || !browser_session_available_for_url(app, url, state).await
+    {
+        return Ok(());
+    }
+    // Consent may have been revoked while the filesystem/extension probe ran.
+    if GLOBAL_SESSION_ACCESS_DISABLED.load(Ordering::SeqCst)
+        || !GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst)
+    {
+        return Ok(());
+    }
+
     info!(host, "owned-browser cookies: pre-navigate inject starting");
     let cookies = crate::owned_browser_cookies::cookies_for_host(host).await;
     #[cfg(target_os = "windows")]
@@ -2215,16 +2228,16 @@ async fn extension_cookies_for_host(
         .collect())
 }
 
-async fn browser_session_decision_for_url(
+// Probe real browser stores only after the user has allowed session access.
+async fn browser_session_available_for_url(
     app: &AppHandle,
     url: &url::Url,
     state: &Arc<OwnedBrowserState>,
-) -> BrowserSessionDecision {
+) -> bool {
     let Some(host) = url.host_str() else {
-        return BrowserSessionDecision::ContinueLoggedOut;
+        return false;
     };
     let host_key = session_host_key(host);
-
     if !crate::owned_browser_cookies::has_cookies_for_host(&host_key).await {
         // Browser may be running with its DB locked.
         #[cfg(target_os = "windows")]
@@ -2242,7 +2255,7 @@ async fn browser_session_decision_for_url(
                     host = host_key.as_str(),
                     "owned-browser: browser DB locked but extension is connected — using extension cookies"
                 );
-                return BrowserSessionDecision::UseBrowserSession;
+                return true;
             }
             let context = state.context_for_url(url.as_str());
             let payload = V20CookieBlockPayload {
@@ -2259,8 +2272,21 @@ async fn browser_session_decision_for_url(
                 warn!("owned-browser: failed to emit locked-browser event: {e}");
             }
         }
-        return BrowserSessionDecision::ContinueLoggedOut;
+        return false;
     }
+
+    true
+}
+
+async fn browser_session_decision_for_url(
+    app: &AppHandle,
+    url: &url::Url,
+    state: &Arc<OwnedBrowserState>,
+) -> BrowserSessionDecision {
+    let Some(host) = url.host_str() else {
+        return BrowserSessionDecision::ContinueLoggedOut;
+    };
+    let host_key = session_host_key(host);
 
     if GLOBAL_SESSION_ACCESS_DISABLED.load(Ordering::SeqCst) {
         info!(
@@ -2272,16 +2298,10 @@ async fn browser_session_decision_for_url(
 
     let already_granted = GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst);
 
-    // On Windows there is no OS-level permission dialog (unlike macOS Keychain),
-    // so we don't need an explicit consent step. DPAPI cookies inject silently;
-    // if they are v20-encrypted inject_cookies_for_url will show the single
-    // "Browser login is protected" card which already acts as consent + setup.
-    //
-    // `cfg!` rather than `#[cfg]`: an attribute-gated `return` here makes the
-    // whole consent flow below unreachable on Windows, which also hides
-    // `already_granted` from liveness analysis. The runtime constant keeps the
-    // non-Windows path intact and still compiles the branch away.
-    if cfg!(target_os = "windows") {
+    // Windows DPAPI has no OS prompt. That makes the app's explicit grant
+    // necessary, not optional. Never infer consent from successful decryption.
+    #[cfg(not(target_os = "macos"))]
+    if already_granted {
         return BrowserSessionDecision::UseBrowserSession;
     }
 
@@ -2304,6 +2324,13 @@ async fn browser_session_decision_for_url(
     // instead of spawning a second card. compare_exchange makes prompt ownership
     // atomic so two parallel navigations can't both show cards.
     loop {
+        if GLOBAL_SESSION_ACCESS_DISABLED.load(Ordering::SeqCst) {
+            return BrowserSessionDecision::ContinueLoggedOut;
+        }
+        #[cfg(not(target_os = "macos"))]
+        if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
+            return BrowserSessionDecision::UseBrowserSession;
+        }
         #[cfg(target_os = "macos")]
         if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
             if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
@@ -2323,6 +2350,13 @@ async fn browser_session_decision_for_url(
         }
         let wait_deadline = Instant::now() + SESSION_ACCESS_TIMEOUT;
         while SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst) {
+            if GLOBAL_SESSION_ACCESS_DISABLED.load(Ordering::SeqCst) {
+                return BrowserSessionDecision::ContinueLoggedOut;
+            }
+            #[cfg(not(target_os = "macos"))]
+            if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
+                return BrowserSessionDecision::UseBrowserSession;
+            }
             #[cfg(target_os = "macos")]
             if GLOBAL_SESSION_ACCESS_GRANTED.load(Ordering::SeqCst) {
                 if SESSION_ACCESS_PRIMED_THIS_RUN.load(Ordering::SeqCst) {
