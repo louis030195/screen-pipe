@@ -198,7 +198,23 @@ pub(crate) fn server_access_allowed(app: &tauri::AppHandle, store: &SettingsStor
 /// Consumer builds allow signed-in accounts to record on the free plan.
 /// Enterprise builds keep their native entitlement guard, and consumer builds
 /// still reject accounts that are required to use an enterprise binary.
-pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsStore) -> bool {
+fn recording_access_denial_message(
+    trial_activation_paywall: bool,
+    authentication_status: crate::startup_auth::AuthenticationStatus,
+) -> &'static str {
+    if authentication_status != crate::startup_auth::AuthenticationStatus::LoggedOut
+        && trial_activation_paywall
+    {
+        "trial_activation_required: finish setup to start screenpipe recording"
+    } else {
+        "account_required: sign in to start screenpipe recording"
+    }
+}
+
+fn recording_access_decision(
+    app: &tauri::AppHandle,
+    store: &SettingsStore,
+) -> Result<(), &'static str> {
     let trial_activation_paywall = !crate::should_skip_onboarding()
         && OnboardingStore::get(app)
             .ok()
@@ -219,13 +235,12 @@ pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsS
             crate::enterprise_policy::recording_authorized()
         } else {
             store.has_cloud_authentication()
-        }
-    {
+        } {
         crate::startup_auth::AuthenticationStatus::Authenticated
     } else {
         resolved_authentication
     };
-    recording_access_policy(
+    if recording_access_policy(
         cfg!(feature = "enterprise-build"),
         cfg!(debug_assertions),
         store.local_plan_policy() != LocalPlanPolicy::Unknown,
@@ -233,16 +248,25 @@ pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsS
         !cfg!(debug_assertions) && store.requires_enterprise_app_for_consumer(),
         trial_activation_paywall,
         authentication_status,
-    )
+    ) {
+        Ok(())
+    } else {
+        Err(recording_access_denial_message(
+            trial_activation_paywall,
+            authentication_status,
+        ))
+    }
+}
+
+pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsStore) -> bool {
+    recording_access_decision(app, store).is_ok()
 }
 
 fn require_recording_access(app: &tauri::AppHandle, store: &SettingsStore) -> Result<(), String> {
-    if recording_access_allowed(app, store) {
-        return Ok(());
-    }
-
-    crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
-    Err("account_required: sign in to start screenpipe recording".to_string())
+    recording_access_decision(app, store).map_err(|error| {
+        crate::health::set_recording_status(crate::health::RecordingStatus::Paused);
+        error.to_string()
+    })
 }
 
 fn require_server_access(app: &tauri::AppHandle, store: &SettingsStore) -> Result<(), String> {
@@ -1762,7 +1786,7 @@ mod local_api_auth_tests {
 
 #[cfg(test)]
 mod recording_access_tests {
-    use super::{recording_access_policy, server_access_policy};
+    use super::{recording_access_denial_message, recording_access_policy, server_access_policy};
     use crate::startup_auth::{AuthenticationStatus, DeferredAccountStart};
     use crate::store::{LocalPlanPolicy, SettingsStore};
 
@@ -1946,6 +1970,25 @@ mod recording_access_tests {
             true,
             AuthenticationStatus::Authenticated,
         ));
+    }
+
+    #[test]
+    fn authenticated_trial_activation_denial_does_not_request_sign_in() {
+        let error = recording_access_denial_message(true, AuthenticationStatus::Authenticated);
+
+        assert_eq!(
+            error,
+            "trial_activation_required: finish setup to start screenpipe recording"
+        );
+        assert!(!error.contains("sign in"));
+    }
+
+    #[test]
+    fn signed_out_trial_activation_denial_still_requests_sign_in_first() {
+        assert_eq!(
+            recording_access_denial_message(true, AuthenticationStatus::LoggedOut),
+            "account_required: sign in to start screenpipe recording"
+        );
     }
 
     #[test]
