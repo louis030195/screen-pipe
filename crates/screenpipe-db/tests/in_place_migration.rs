@@ -68,6 +68,12 @@ async fn migration_completes_with_less_free_space_than_its_final_payloads() {
         sqlx::query("INSERT INTO frames(id,timestamp,full_text,accessibility_tree_json) VALUES(?,'2026-09-14','constrained disk history',?)").bind(id).bind(&detail).execute(&mut **tx.conn()).await.unwrap();
         sqlx::query("INSERT INTO elements(id,frame_id,source,role,properties) VALUES(?,?,'accessibility','AXText',?)").bind(id).bind(id).bind(&detail).execute(&mut **tx.conn()).await.unwrap();
         tx.commit().await.unwrap();
+        // Keep fixture generation from accumulating a second multi-GiB WAL
+        // before the constrained migration itself has even started.
+        if id % 128 == 0 || id == count {
+            let (busy, logged, checkpointed) = db.wal_checkpoint().await.unwrap();
+            assert_eq!((busy, logged), (0, checkpointed));
+        }
     }
     db.close().await;
     let mut filler = std::fs::File::create(root.path().join("unrelated-data")).unwrap();
