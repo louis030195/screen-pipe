@@ -337,6 +337,41 @@ async fn legacy_migration_preserves_original_until_explicit_deletion_on_live_gen
         "after activation"
     );
     db.close().await;
+    // Automatic hidden-UI cleanup must also survive the next app launch:
+    // opening the legacy path follows the active generation even when the
+    // original file is gone, preserving old history and subsequent writes.
+    let reopened = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert!(!path.exists());
+    let payloads = reopened
+        .frame_payloads(&[7, 8], Projection::Search)
+        .await
+        .unwrap();
+    assert_eq!(payloads[&7].text(), "migration café");
+    assert_eq!(payloads[&8].text(), "after activation");
+    assert_eq!(
+        search(&reopened, "migration")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    seed(&reopened, 9, Some("after cleanup restart"), None).await;
+    assert_eq!(
+        reopened
+            .frame_payloads(&[9], Projection::Search)
+            .await
+            .unwrap()[&9]
+            .text(),
+        "after cleanup restart"
+    );
+    assert_eq!(
+        search(&reopened, "cleanup").await.as_array().unwrap().len(),
+        1
+    );
+    reopened.close().await;
 }
 
 #[tokio::test]
