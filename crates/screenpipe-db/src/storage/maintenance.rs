@@ -70,7 +70,10 @@ async fn update_descriptor(
     index: &Path,
     descriptor: &StorageDescriptor,
 ) -> Result<(), sqlx::Error> {
-    let mut conn = sqlx::SqliteConnection::connect(&format!("sqlite:{}", index.display())).await?;
+    let mut conn = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(index),
+    )
+    .await?;
     sqlx::query("PRAGMA synchronous=FULL")
         .execute(&mut conn)
         .await?;
@@ -204,7 +207,7 @@ pub async fn export_sqlite(
         let temporary=tempfile::Builder::new().prefix(".screenpipe-export-").tempdir_in(destination.parent().ok_or_else(||storage_error("export parent missing"))?)?;
         let index=temporary.path().join("export.sqlite");
         lifecycle::copy_sqlite(source.pool.clone(),index.clone(),descriptor.budget.lifecycle_timeout_secs).await?;
-        let mut output=sqlx::SqliteConnection::connect(&format!("sqlite:{}",index.display())).await?;
+        let mut output=sqlx::SqliteConnection::connect_with(&sqlx::sqlite::SqliteConnectOptions::new().filename(&index)).await?;
         let triggers:Vec<String>=sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'hybrid_%'").fetch_all(&mut output).await?;
         for name in triggers {sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TRIGGER \"{}\"",name.replace('"',"\"\"")))).execute(&mut output).await?;}
         sqlx::raw_sql("DROP VIEW IF EXISTS _bulk_element_search; DROP TABLE IF EXISTS _bulk_element_lookup; DROP TABLE IF EXISTS _storage_revocation;").execute(&mut output).await?;

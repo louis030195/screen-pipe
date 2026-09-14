@@ -1145,9 +1145,12 @@ impl DatabaseManager {
         std::fs::create_dir_all(root.join(&descriptor.payloads))?;
         let index = root.join(&descriptor.index);
         let catalog_exists = if index.exists() {
-            let mut conn =
-                sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display()))
-                    .await?;
+            let mut conn = sqlx::SqliteConnection::connect_with(
+                &sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&index)
+                    .read_only(true),
+            )
+            .await?;
             let count: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM sqlite_master WHERE name='_hybrid_migrations'",
             )

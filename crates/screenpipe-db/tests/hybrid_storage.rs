@@ -368,7 +368,16 @@ async fn corruption_fails_reads_without_returning_partial_payloads() {
 
 #[tokio::test]
 async fn backup_restores_staging_files_and_source_identity() {
-    let parent = tempfile::tempdir().unwrap();
+    // Unix permits URL delimiters in filenames; Windows canonicalization
+    // itself supplies the verbatim prefix containing a question mark.
+    let parent = tempfile::Builder::new()
+        .prefix(if cfg!(unix) {
+            "history?mode=ro"
+        } else {
+            "history"
+        })
+        .tempdir()
+        .unwrap();
     let root = parent.path().join("source");
     let db = DatabaseManager::new_hybrid(&root, Default::default(), Default::default())
         .await
@@ -512,7 +521,16 @@ async fn compact_and_legacy_export_preserve_logical_records() {
 #[tokio::test]
 async fn legacy_exports_can_be_migrated_again() {
     for populated in [false, true] {
-        let parent = tempfile::tempdir().unwrap();
+        // Unix permits URL delimiters in filenames; Windows canonicalization
+        // itself supplies the verbatim prefix containing a question mark.
+        let parent = tempfile::Builder::new()
+            .prefix(if cfg!(unix) {
+                "history?mode=ro"
+            } else {
+                "history"
+            })
+            .tempdir()
+            .unwrap();
         let root = parent.path().join("source");
         let db = DatabaseManager::new_hybrid(&root, Default::default(), Default::default())
             .await

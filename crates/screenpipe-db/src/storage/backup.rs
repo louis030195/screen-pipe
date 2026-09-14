@@ -60,8 +60,12 @@ impl DatabaseManager {
                 .await?;
         }
         super::sync_file(&index)?;
-        let mut conn =
-            sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display())).await?;
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&index)
+                .read_only(true),
+        )
+        .await?;
         let files=sqlx::query("SELECT DISTINCT pf.search_path,pf.detail_path FROM payload_files pf JOIN frame_payloads p ON p.file_id=pf.id ORDER BY pf.id").fetch_all(&mut conn).await?;
         let mut payload_paths = Vec::new();
         if storage.has_bulk() {
@@ -196,8 +200,10 @@ pub async fn restore(
     let new_index = temp.path().join(&descriptor.index);
     std::fs::create_dir_all(new_index.parent().unwrap())?;
     std::fs::rename(temp.path().join(&manifest.descriptor.index), &new_index)?;
-    let mut conn =
-        sqlx::SqliteConnection::connect(&format!("sqlite:{}", new_index.display())).await?;
+    let mut conn = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&new_index),
+    )
+    .await?;
     sqlx::query("UPDATE storage_metadata SET descriptor=?")
         .bind(serde_json::to_string(&descriptor).map_err(storage_error)?)
         .execute(&mut conn)

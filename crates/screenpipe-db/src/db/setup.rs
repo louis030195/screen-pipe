@@ -140,8 +140,6 @@ impl DatabaseManager {
             config.cache_size_kb,
             config.read_pool_max,
         );
-        let connection_string = format!("sqlite:{}", database_path);
-
         register_sqlite_extensions()?;
 
         // Ensure the data dir exists before opening the file — a missing parent
@@ -238,8 +236,14 @@ impl DatabaseManager {
         // cache_size + mmap_size are tier-configurable and applied here; the
         // WAL-safety pragmas that MUST be identical on every connection over this
         // file come from the single source of truth `WAL_SAFETY_PRAGMAS`.
-        let mut connect_options: SqliteConnectOptions = connection_string
-            .parse::<SqliteConnectOptions>()?
+        // Filesystem paths (including Windows' verbatim prefix) are not URLs.
+        // Keep URI parsing only for the existing in-memory connection forms.
+        let connect_options = if is_in_memory {
+            format!("sqlite:{database_path}").parse::<SqliteConnectOptions>()?
+        } else {
+            SqliteConnectOptions::new().filename(database_file)
+        };
+        let mut connect_options = connect_options
             .busy_timeout(Duration::from_secs(5))
             .pragma("cache_size", format!("-{}", config.cache_size_kb))
             .pragma("mmap_size", config.mmap_size.to_string());
