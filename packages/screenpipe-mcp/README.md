@@ -399,3 +399,48 @@ Every line is auditable.
 Questions or concerns: open an issue at
 <https://github.com/screenpipe/screenpipe/issues> or reach out via
 <https://screenpi.pe>.
+
+## Saved personal workflows
+
+`list-workflows` searches the desktop Workflows catalog; `get-workflow` returns
+ordered steps, gaps and historical accessibility evidence through the same
+authenticated API. Both tools are available in stdio and HTTP modes. The running
+desktop engine must support `/workflows`; an older engine returns an error.
+Connected clients can use this context to plan automation, but retrieval neither
+authorizes nor executes actions. Captured bounds/IDs must be resolved again in
+the live app. Missing or expired capture and approximate frame matches are explicit.
+No automatic upload to ChatGPT, Claude or other services is introduced.
+
+The API exposes `GET /workflows?q=...&limit=20&offset=0` and
+`GET /workflows/{id}?include_automation=true` in OpenAPI. Workflow IDs derive from
+title, trigger and outcome, so rediscover after a rename. Results omit embedded
+screenshot bytes. Detail includes up to 30 stages and 100 context nodes per frame,
+with explicit truncation. `frame-context` with `purpose="automation"`,
+`node_offset` and `node_limit` (maximum 500) retrieves further nodes while preserving
+roles, normalized monitor bounds, automation IDs, state and structural ancestors.
+The default reading mode is unchanged. `get-frame-elements` with
+`purpose="automation"` remains the compact targeting view.
+
+A workflow's frame ID and timestamp must match the current recorder before node
+hydration. Missing, expired or mismatched frames remain explicit. A historical
+control is not proof it was clicked: the action target remains unknown until an
+agent establishes it from current context and the user's instructions.
+
+The API uses the desktop owner's configured app-local `workflows/catalog.json`
+with its validated backup, rather than guessing another installation's path.
+Unconfigured or unreadable storage returns 503. Existing authentication, vault
+locking and history access apply. Data-scoped or privacy-filtered pipes are denied
+rather than receiving an unfiltered synthesized report; explicit frame endpoint
+denials also apply when hydrating accessibility nodes.
+
+```text
+Desktop catalog -> authenticated /workflows -> MCP list-workflows / get-workflow
+                          |
+                          +-> existing frame metadata/context APIs
+                          +-> bundled API skill and generated skill references
+```
+
+Each stage can also return `inputSearch` arguments for `search-content` with
+`content_type="input"`. Input results preserve recorded x/y, keys/modifiers,
+element role/name and linked frame IDs. Treat the bounded time window as
+candidate events to verify, not as automatic proof of the workflow's actions.

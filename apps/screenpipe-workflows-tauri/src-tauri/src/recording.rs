@@ -1398,6 +1398,7 @@ async fn spawn_screenpipe_inner(
     let app_for_chat_destination = app.clone();
     let app_for_owned = app.clone();
     let app_for_port_conflict = app.clone();
+    let workflow_catalog_dir = app.path().app_local_data_dir().ok().map(|dir| dir.join("workflows"));
 
     // Owned-browser: create the connect-side instance and kick off the
     // webview install in the background. The engine starts immediately;
@@ -1455,6 +1456,7 @@ async fn spawn_screenpipe_inner(
                     Some(owned_browser),
                     cloud_token_arc.clone(),
                     history_access.clone(),
+                    workflow_catalog_dir,
                 )
                 .await
                 {

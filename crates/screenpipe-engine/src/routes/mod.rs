@@ -40,3 +40,5 @@ pub mod vault;
 pub mod vision;
 pub mod web_search;
 pub mod websocket;
+
+pub mod workflows;

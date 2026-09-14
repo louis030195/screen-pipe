@@ -1368,12 +1368,20 @@ pub struct FrameContextResponse {
     pub text_source: String,
 }
 
+#[derive(OaSchema, Deserialize, Default)]
+pub struct FrameContextQuery {
+    /// Include icon-only controls and structural ancestors for automation.
+    /// The default reading view keeps its compact text-bearing nodes.
+    pub include_empty: Option<bool>,
+}
+
 /// Get frame context: accessibility text, tree nodes, and extracted URLs.
 /// Falls back to OCR data for legacy frames without accessibility data.
 #[oasgen]
 pub async fn get_frame_context(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
+    Query(query): Query<FrameContextQuery>,
 ) -> Result<JsonResponse<FrameContextResponse>, (StatusCode, JsonResponse<Value>)> {
     require_frame_history_access(&state, frame_id).await?;
     // Try to get accessibility data; gracefully handle missing columns (pre-migration DBs)
@@ -1409,7 +1417,7 @@ pub async fn get_frame_context(
                         .to_string();
                     let depth = node_val.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
-                    if !text.is_empty() {
+                    if !text.is_empty() || query.include_empty.unwrap_or(false) {
                         let bounds = node_val.get("bounds").and_then(|b| {
                             Some(AccessibilityNodeBounds {
                                 left: b.get("left")?.as_f64()? as f32,

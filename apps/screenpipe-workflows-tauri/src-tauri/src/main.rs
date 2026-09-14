@@ -2126,6 +2126,7 @@ async fn main() {
                                 Some(owned_browser),
                                 cloud_token_arc.clone(),
                                 history_access.clone(),
+                                app_for_owned.path().app_local_data_dir().ok().map(|dir| dir.join("workflows")),
                             )
                             .await
                             {
