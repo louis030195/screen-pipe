@@ -55,7 +55,8 @@ export function StorageMigrationPrompt({ activity }: { activity: StorageMigratio
         const result = await commands.getStorageMigrationStatus();
         if (!disposed && result.status === "ok") {
           setStatus(result.data);
-          if (sessionStorage.getItem(deferredKey(result.data.root))) setDismissed(result.data.root);
+          setDismissed(window.localStorage.getItem(deferredKey(result.data.root)) === result.data.app_session_id
+            ? result.data.root : null);
         }
       } catch {
         // Startup IPC can be unavailable briefly. Retry without interrupting the app.
@@ -74,7 +75,8 @@ export function StorageMigrationPrompt({ activity }: { activity: StorageMigratio
 
   function dismiss() {
     if (!status || submitting) return;
-    sessionStorage.setItem(deferredKey(status.root), "true");
+    // A recreated webview keeps the deferral; a full app restart gets a new ID.
+    window.localStorage.setItem(deferredKey(status.root), status.app_session_id);
     setDismissed(status.root);
   }
 
@@ -87,7 +89,7 @@ export function StorageMigrationPrompt({ activity }: { activity: StorageMigratio
         ? await commands.cancelStorageMigration(status.root)
         : await commands.startStorageMigration(status.root);
       if (result.status === "error") throw new Error(String(result.error));
-      sessionStorage.removeItem(deferredKey(status.root));
+      window.localStorage.removeItem(deferredKey(status.root));
       if (cancel) dismiss();
     } catch (error) {
       setError(String(error));
