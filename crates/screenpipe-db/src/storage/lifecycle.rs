@@ -774,8 +774,16 @@ pub(super) async fn compact_candidate(
     if compact.exists() {
         std::fs::remove_file(&compact)?;
     }
-    let mut conn =
-        sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display())).await?;
+    // The last manager connection can be read-only, leaving a valid WAL on
+    // disk. Checkpoint and leave WAL mode before replacing this inactive file;
+    // otherwise old WAL frames can be replayed onto the compacted page layout.
+    let mut conn = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(index)
+            .pragma("locking_mode", "EXCLUSIVE")
+            .pragma("journal_mode", "DELETE"),
+    )
+    .await?;
     super::bulk::register_hash(&mut conn).await?;
     if storage.has_bulk() {
         super::bulk::elements::register(&mut conn, storage.clone()).await?;

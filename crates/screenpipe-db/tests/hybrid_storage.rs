@@ -3,6 +3,7 @@
 
 use screenpipe_db::storage::{migrate, MigrationOptions, PrivacyPolicy, Projection, StorageMode};
 use screenpipe_db::{ContentType, DatabaseManager};
+use sqlx::Connection;
 
 async fn seed(db: &DatabaseManager, id: i64, text: Option<&str>, accessibility: Option<&str>) {
     let mut tx = db.begin_immediate_with_retry().await.unwrap();
@@ -186,7 +187,17 @@ async fn legacy_migration_preserves_original_until_explicit_deletion_on_live_gen
     // Model the retained original from an already completed copy-based install.
     // New migrations themselves never create this fixture copy.
     let retained = root.path().join("legacy-original.sqlite");
-    std::fs::copy(&path, &retained).unwrap();
+    let mut source = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("VACUUM INTO ?")
+        .bind(retained.to_str().unwrap())
+        .execute(&mut source)
+        .await
+        .unwrap();
+    source.close().await.unwrap();
     let mut report = migrate(root.path(), Default::default(), Default::default())
         .await
         .unwrap();
@@ -207,6 +218,7 @@ async fn legacy_migration_preserves_original_until_explicit_deletion_on_live_gen
     );
     report.allocated_before_bytes = None;
     report.allocated_after_bytes = None;
+    report.source_bytes = metadata.len();
     std::fs::write(
         root.path().join("storage-migration-complete.json"),
         serde_json::to_vec(&report).unwrap(),
