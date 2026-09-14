@@ -28,7 +28,7 @@ anyhow = "1"
 tracing = "0.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Used in tauri/rust
-base64 = "0.22"
+base64 = "0.23"
 thiserror = "2"
 tempfile = "3"
 
