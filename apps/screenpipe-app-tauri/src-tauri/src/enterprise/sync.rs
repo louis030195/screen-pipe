@@ -262,6 +262,9 @@ struct CursorBoundary {
     memories: u32,
     parsed: u32,
     activity_ts: Option<String>,
+    /// Recovery-only offset; live Activities keep their exclusive timestamp cursor.
+    #[serde(default)]
+    activities: u32,
     /// Feedback supports a true `(updated_at, id)` keyset cursor because its
     /// IDs are stable strings and its local route merges DB and legacy rows.
     feedback_id: Option<String>,
@@ -419,7 +422,8 @@ pub trait LocalApiClient: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Fetch AI-interpreted Activities ending after `since_ts`.
+    /// Fetch all AI-interpreted Activities ending strictly after `since_ts`,
+    /// ordered by stored end_at then Activity ID. No pagination or source writes.
     async fn fetch_activities_since(
         &self,
         _since_ts: Option<&str>,
@@ -986,13 +990,17 @@ async fn run_one_sync_inner(
     } else {
         Vec::new()
     };
-    let activities = if streams.activities {
-        match local
-            .fetch_activities_since(cursor.boundary.activity_ts.as_deref())
-            .await
-        {
+    let mut activities = if streams.activities {
+        let since = match backfill {
+            Some(request) => Some(request.activity_since(cursor)?),
+            None => cursor.boundary.activity_ts.clone(),
+        };
+        match local.fetch_activities_since(since.as_deref()).await {
             Ok(rows) => rows,
             Err(error) => {
+                if backfill.is_some() {
+                    return Err(error);
+                }
                 warn!("enterprise sync: activity fetch failed (skipping): {}", error);
                 Vec::new()
             }
@@ -1008,6 +1016,7 @@ async fn run_one_sync_inner(
         request.retain_in_range(&mut memories, |r| &r.created_at)?;
         request.retain_in_range(&mut parsed, |r| &r.timestamp)?;
         request.retain_in_range(&mut feedback, |r| &r.updated_at)?;
+        request.activity_page(&mut activities, cursor)?;
     }
 
     if frames.is_empty()
@@ -1056,7 +1065,9 @@ async fn run_one_sync_inner(
         &frames,
         |row| &row.timestamp,
     );
-    if let Some(latest) = activities.last() {
+    if let Some(request) = backfill {
+        request.advance_activity_cursor(&mut next_cursor, &activities);
+    } else if let Some(latest) = activities.last() {
         next_cursor.boundary.activity_ts = Some(latest.end_at.clone());
     }
     advance_timestamp_boundary(
@@ -1150,8 +1161,13 @@ async fn run_one_sync_inner(
     }
 
     if backfill.is_some() {
-        let records = frames.len() + audio.len() + ui.len() + parsed.len()
-            + memories.len() + feedback.len();
+        let records = frames.len()
+            + audio.len()
+            + ui.len()
+            + parsed.len()
+            + memories.len()
+            + feedback.len()
+            + activities.len();
         next_cursor.boundary.backfill_records =
             Some(cursor.boundary.backfill_records.unwrap_or(0) + records as u64);
     }

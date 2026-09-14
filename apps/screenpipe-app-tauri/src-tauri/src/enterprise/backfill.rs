@@ -15,6 +15,7 @@ pub(super) enum BackfillStream {
     UiEvents,
     Parsed,
     Memories,
+    Activities,
     Feedback,
 }
 
@@ -81,6 +82,10 @@ impl BackfillRequest {
                     result.memories = policy.memories;
                     policy.memories
                 }
+                BackfillStream::Activities => {
+                    result.activities = policy.activities;
+                    policy.activities
+                }
                 BackfillStream::Feedback => {
                     result.feedback = policy.feedback;
                     policy.feedback != FeedbackSyncMode::Off
@@ -129,6 +134,7 @@ impl BackfillRequest {
                 BackfillStream::Parsed => &cursor.last_parsed_ts,
                 BackfillStream::Memories => &cursor.last_memory_ts,
                 BackfillStream::Feedback => &cursor.last_feedback_ts,
+                BackfillStream::Activities => &cursor.boundary.activity_ts,
             };
             let valid = value
                 .as_deref()
@@ -141,6 +147,61 @@ impl BackfillRequest {
             }
         }
         Ok(())
+    }
+
+    /// The normal Activity reader is exclusive and returns all remaining rows.
+    /// Read inclusively for recovery, then page using its separate tie offset.
+    pub(super) fn activity_since(&self, cursor: &Cursor) -> Result<String, EnterpriseSyncError> {
+        cursor
+            .boundary
+            .activity_ts
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| value.checked_sub_signed(chrono::Duration::nanoseconds(1)))
+            .map(|value| value.to_rfc3339())
+            .ok_or_else(|| {
+                EnterpriseSyncError::Configuration("invalid activity backfill cursor".into())
+            })
+    }
+
+    pub(super) fn activity_page(
+        &self,
+        rows: &mut Vec<ActivityRow>,
+        cursor: &Cursor,
+    ) -> Result<(), EnterpriseSyncError> {
+        // Activity event time is end_at, matching the normal sync representation.
+        self.retain_in_range(rows, |row| &row.end_at)?;
+        // Stored model output can use different offsets/precision. The live
+        // reader sorts strings; recovery pages must sort actual event times.
+        rows.sort_by(|left, right| {
+            chrono::DateTime::parse_from_rfc3339(&left.end_at)
+                .unwrap()
+                .cmp(&chrono::DateTime::parse_from_rfc3339(&right.end_at).unwrap())
+                .then(left.activity_id.cmp(&right.activity_id))
+        });
+        rows.drain(..rows.len().min(cursor.boundary.activities as usize));
+        rows.truncate(PAGE_LIMIT as usize);
+        Ok(())
+    }
+
+    pub(super) fn advance_activity_cursor(&self, cursor: &mut Cursor, rows: &[ActivityRow]) {
+        // Normalize only checkpoint comparisons, preserving the uploaded rows.
+        // activity_page already validated every timestamp before upload.
+        let timestamps: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                chrono::DateTime::parse_from_rfc3339(&row.end_at)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    .to_rfc3339()
+            })
+            .collect();
+        advance_timestamp_boundary(
+            &mut cursor.boundary.activity_ts,
+            &mut cursor.boundary.activities,
+            &timestamps,
+            |timestamp| timestamp,
+        );
     }
 
     fn initial_cursor(&self) -> Cursor {
@@ -179,7 +240,7 @@ async fn report(
         .json(&serde_json::json!({
             "id": request.id, "status": status, "uploaded_records": cursor.boundary.backfill_records.unwrap_or(0), "last_error": if failed { Some("retrying") } else { None },
             "cursors": { "frames": cursor.last_frame_ts, "audio": cursor.last_audio_ts, "ui_events": cursor.last_ui_ts,
-                "parsed": cursor.last_parsed_ts, "memories": cursor.last_memory_ts, "feedback": cursor.last_feedback_ts }
+                "parsed": cursor.last_parsed_ts, "memories": cursor.last_memory_ts, "feedback": cursor.last_feedback_ts, "activities": cursor.boundary.activity_ts }
         }))
         .send().await.map_err(|e| EnterpriseSyncError::Ingest(e.to_string()))?
         .error_for_status().map_err(|e| EnterpriseSyncError::Ingest(e.to_string()))?;
@@ -198,6 +259,8 @@ async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("backfill_activity_tests.rs");
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::{
         matchers::{header, method, path},
@@ -638,7 +701,7 @@ pub(super) async fn fulfill_requests(
         match run_one_sync_inner(&replay_cfg, &mut cursor, local, http, false, Some(&request)).await
         {
             Ok(page) => {
-                let complete = !page.may_have_more();
+                let complete = !page.may_have_more() && page.activities < PAGE_LIMIT as usize;
                 // Persist even an empty result; lost completion ACKs then retry
                 // from the same boundary without re-uploading prior pages.
                 cursor.save(&replay_cfg.cursor_path)?;
