@@ -3,7 +3,7 @@
 
 use crate::{recording::RecordingState, store::SettingsStore};
 use screenpipe_db::storage::{migration_report, MigrationProgress, StorageDescriptor};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
@@ -146,6 +146,47 @@ pub(crate) struct StartupMigration {
     _awake: screenpipe_engine::power::KeepAwakeGuard,
 }
 
+const RECORDING_PREFERENCE: &str = "pendingStorageMigration";
+
+#[derive(Deserialize, Serialize)]
+struct RecordingPreference {
+    root: PathBuf,
+    recording: bool,
+}
+
+fn saved_recording_preference(app: &tauri::AppHandle, root: &Path) -> Result<Option<bool>, String> {
+    let store = crate::store::get_store(app, None).map_err(|e| e.to_string())?;
+    let Some(value) = store.get(RECORDING_PREFERENCE) else {
+        return Ok(None);
+    };
+    let saved: RecordingPreference = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok((root.canonicalize().map_err(|e| e.to_string())? == saved.root).then_some(saved.recording))
+}
+
+fn save_recording_preference(
+    app: &tauri::AppHandle,
+    root: &Path,
+    recording: Option<bool>,
+) -> Result<(), String> {
+    // A separate key in the existing atomic app store survives frontend settings
+    // writes. This is application activation state, not batch progress.
+    let store = crate::store::get_store(app, None).map_err(|e| e.to_string())?;
+    if let Some(recording) = recording {
+        store.set(
+            RECORDING_PREFERENCE,
+            serde_json::json!(RecordingPreference {
+                root: root.to_path_buf(),
+                recording
+            }),
+        );
+    } else {
+        store.delete(RECORDING_PREFERENCE);
+    }
+    crate::store::save_store_with_permission_repair(app, store.as_ref())?;
+    crate::store::reencrypt_store_file(app);
+    Ok(())
+}
+
 /// The ordinary startup path must finish an in-place conversion before opening
 /// any database consumers. The server lifecycle lock is held by the caller.
 pub(crate) async fn resume_before_startup(
@@ -155,13 +196,25 @@ pub(crate) async fn resume_before_startup(
     let settings = SettingsStore::get(app).ok().flatten().unwrap_or_default();
     let root = crate::config::selected_recording_data_dir(&settings.data_dir)
         .map_err(|e| e.to_string())?;
-    if !screenpipe_db::storage::migration_requires_resume(&root).map_err(|e| e.to_string())? {
+    let pending =
+        screenpipe_db::storage::migration_requires_resume(&root).map_err(|e| e.to_string())?;
+    let preference = saved_recording_preference(app, &root)?;
+    if !pending && preference.is_none() {
         return Ok(None);
     }
     if recording.server.lock().await.is_some() {
         return Err("Stop Screenpipe before resuming migration.".into());
     }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
+    if let Some(wants_recording) = preference {
+        recording.set_capture_intent(
+            wants_recording && crate::recording::recording_access_allowed(app, &settings),
+        );
+    }
+    let needs_conversion = pending
+        || migration_report(&root)
+            .map_err(|e| e.to_string())?
+            .is_none();
     let awake = screenpipe_engine::power::KeepAwakeGuard::acquire().map_err(|e| e.to_string())?;
     crate::health::set_boot_phase(
         "migrating_database",
@@ -176,14 +229,19 @@ pub(crate) async fn resume_before_startup(
             ..Default::default()
         };
     });
-    let result = screenpipe_db::storage::migrate_with_progress(
-        &root,
-        Default::default(),
-        Default::default(),
-        |update| progress(app, update),
-    )
-    .await
-    .map_err(|e| e.to_string());
+    let result = if needs_conversion {
+        screenpipe_db::storage::migrate_with_progress(
+            &root,
+            Default::default(),
+            Default::default(),
+            |update| progress(app, update),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    };
     if let Err(error) = result {
         finish_operation(app, &root, &Err(error.clone()));
         return Err(error);
@@ -230,6 +288,11 @@ async fn verify_running(app: &tauri::AppHandle, root: &Path) -> Result<(), Strin
     }
     if recording.capture_intended() && recording.capture.lock().await.is_none() {
         return Err("Your history was migrated, but recording could not resume. Try again to finish restarting.".into());
+    }
+    // Keep the preference through storage activation and process restarts. Only
+    // the successful application reopen acknowledges it, including a paused user.
+    if saved_recording_preference(app, root)?.is_some() {
+        save_recording_preference(app, root, None)?;
     }
     Ok(())
 }
@@ -448,6 +511,10 @@ pub async fn start_storage_migration(
     // Acquire before pausing so a failed wake lock never strands recording.
     let awake = screenpipe_engine::power::KeepAwakeGuard::acquire()
         .map_err(|error| format!("Could not prevent sleep. Migration has not started: {error}"))?;
+    let recording_preference = app.state::<RecordingState>().capture_intended();
+    if saved_recording_preference(&app, &root)?.is_none() {
+        save_recording_preference(&app, &root, Some(recording_preference))?;
+    }
     update_operation(&app, |operation| {
         *operation = Operation {
             root: Some(root.clone()),

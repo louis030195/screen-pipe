@@ -814,7 +814,7 @@ fn save_store_to_disk<R: tauri::Runtime>(
     retry_windows_store_io(|| store.save()).map_err(|e| e.to_string())
 }
 
-fn save_store_with_permission_repair(
+pub(crate) fn save_store_with_permission_repair(
     app: &AppHandle,
     store: &tauri_plugin_store::Store<tauri::Wry>,
 ) -> Result<(), String> {
