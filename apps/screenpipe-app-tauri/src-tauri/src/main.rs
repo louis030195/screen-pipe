@@ -2058,6 +2058,19 @@ async fn main() {
 
                             crate::recording::notify_audio_engine_fallback(&store_clone);
 
+                            let resumed_migration = match crate::storage_migration::resume_before_startup(
+                                &app_for_owned,
+                                &app_for_owned.state::<recording::RecordingState>(),
+                            ).await {
+                                Ok(resumed) => resumed,
+                                Err(error) => {
+                                    crate::health::set_boot_error(&error);
+                                    crate::health::set_recording_status(crate::health::RecordingStatus::Error);
+                                    is_starting_clone.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    return;
+                                }
+                            };
+
                             info!("Starting server core + capture on dedicated runtime...");
 
                             // Owned-browser: create the connect-side instance now so the
@@ -2091,6 +2104,11 @@ async fn main() {
                                 Ok(s) => s,
                                 Err(e) => {
                                     error!("Failed to start server core: {}", e);
+                                    if let Some(resumed) = resumed_migration {
+                                        let _ = crate::storage_migration::finish_startup(
+                                            &app_for_owned, resumed, Err(e.to_string()),
+                                        ).await;
+                                    }
                                     crate::db_relaunch::note_respawn_failure(&app_for_db_wedge, &e).await;
                                     if crate::port_conflict::is_error(&e, config.port) {
                                         crate::port_conflict::show_reclaim_failed(&app_for_owned, config.port);
@@ -2151,6 +2169,13 @@ async fn main() {
                                 info!("Server started without capture");
                             }
                             drop(capture_guard);
+                            if let Some(resumed) = resumed_migration {
+                                if let Err(error) = crate::storage_migration::finish_startup(
+                                    &app_for_owned, resumed, Ok(()),
+                                ).await {
+                                    error!("Could not finish migration startup: {error}");
+                                }
+                            }
                             is_starting_clone
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
                             drop(lifecycle_guard);

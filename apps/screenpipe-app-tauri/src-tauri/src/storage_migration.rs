@@ -163,6 +163,10 @@ pub(crate) async fn resume_before_startup(
     }
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let awake = screenpipe_engine::power::KeepAwakeGuard::acquire().map_err(|e| e.to_string())?;
+    crate::health::set_boot_phase(
+        "migrating_database",
+        Some("Resuming saved storage migration"),
+    );
     update_operation(app, |operation| {
         *operation = Operation {
             root: Some(root.clone()),
