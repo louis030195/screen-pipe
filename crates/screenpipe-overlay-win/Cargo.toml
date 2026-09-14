@@ -32,7 +32,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
-windows-core = "0.58"
+windows-core = "0.62"
 
 [[bin]]
 name = "overlay-preview"
