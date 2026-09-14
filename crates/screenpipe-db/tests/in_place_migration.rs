@@ -428,10 +428,23 @@ async fn failed_payload_write_resumes_without_discarding_published_files() {
         },
     )
     .await;
+    assert!(result.is_err());
+    // Recover while the fault is still present. Recovery must not need another
+    // write to the failed archive destination before recording can resume.
+    screenpipe_db::storage::recover_interrupted_migration(root.path(), Default::default())
+        .await
+        .unwrap();
+    let db = DatabaseManager::new(
+        root.path().join("db.sqlite").to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(49,'2026-09-14T12:00:00Z','recording while archive writes fail')").await.unwrap();
+    db.close().await;
     for (path, permissions) in changed.into_inner().unwrap() {
         std::fs::set_permissions(path, permissions).unwrap();
     }
-    assert!(result.is_err());
     assert!(screenpipe_db::storage::migration_requires_resume(root.path()).unwrap());
     let files: Vec<_> = screenpipe_db::storage::inventory(root.path())
         .unwrap()
@@ -598,4 +611,219 @@ async fn reuses_index_and_preserves_history_and_compact_backup() {
         .await
         .unwrap();
     assert_eq!(imported.frames, 48);
+}
+
+#[tokio::test]
+async fn recording_recovery_keeps_committed_payloads_and_survives_restarts() {
+    use screenpipe_db::storage::{inventory, recover_interrupted_migration, PrivacyPolicy};
+    for (point, hit) in [
+        ("migration_schema_step", 2),
+        ("migration_schema_step", 8),
+        ("migration_batch_staged", 2),
+        ("seal_files_synced", 1),
+        ("seal_committed", 1),
+        ("bulk_committed", 1),
+        ("migration_blocks_reclaimed", 2),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path()).await;
+        let crashed = std::process::Command::new(env!("CARGO_BIN_EXE_screenpipe-storage"))
+            .arg("migrate")
+            .arg(root.path())
+            .env("SCREENPIPE_STORAGE_CRASH_AT", point)
+            .env("SCREENPIPE_STORAGE_CRASH_HIT", hit.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(
+            crashed.status.code(),
+            Some(86),
+            "{point}: {}",
+            String::from_utf8_lossy(&crashed.stderr)
+        );
+        let payloads = || {
+            inventory(root.path())
+                .unwrap()
+                .into_iter()
+                .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+                .map(|p| {
+                    let data = std::fs::read(&p).unwrap();
+                    (p, data)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = payloads();
+        for id in 49..=50 {
+            let started = std::time::Instant::now();
+            recover_interrupted_migration(root.path(), Default::default())
+                .await
+                .unwrap_or_else(|e| panic!("{point}/{hit}: {e}"));
+            eprintln!(
+                "recording recovery {point}/{hit} launch {id}: {:?}",
+                started.elapsed()
+            );
+            let db = DatabaseManager::new(
+                root.path().join("db.sqlite").to_str().unwrap(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            db.verify_storage().await.unwrap();
+            assert_eq!(
+                db.frame_payloads(&[1, 48], Projection::All).await.unwrap()[&48].text(),
+                "searchable migration history"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM frames_fts WHERE frames_fts MATCH 'searchable'"
+                )
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+                48
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM elements_fts WHERE elements_fts MATCH 'searchable'"
+                )
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+                48
+            );
+            db.execute_raw_sql_write(&format!("INSERT INTO frames(id,timestamp,full_text) VALUES({id},'2026-09-14T12:00:00Z','recovered recording'); INSERT INTO elements(id,frame_id,source,role,text) VALUES({id},{id},'accessibility','AXText','recovered element')")).await.unwrap();
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM elements")
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap(),
+                id
+            );
+            db.set_frame_privacy_policy(&PrivacyPolicy::default())
+                .await
+                .unwrap();
+            if point == "seal_committed" && id == 49 {
+                // Wait beyond the normal maintenance interval: reopening must
+                // not quietly continue conversion through the background sealer.
+                tokio::time::sleep(std::time::Duration::from_millis(5200)).await;
+            }
+            db.close().await;
+            assert_eq!(
+                payloads(),
+                before,
+                "recovery changed Parquet at {point}/{hit}"
+            );
+        }
+        let report = migrate(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap_or_else(|e| panic!("explicit retry {point}: {e}"));
+        assert_eq!(report.frames, 50);
+        let db = DatabaseManager::new(
+            root.path().join("db.sqlite").to_str().unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.frame_payloads(&[49, 50], Projection::Search)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM elements_fts WHERE elements_fts MATCH 'recovered'"
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            2
+        );
+        db.verify_storage().await.unwrap();
+        db.close().await;
+    }
+}
+
+#[tokio::test]
+async fn recording_recovery_child() {
+    let Ok(root) = std::env::var("SCREENPIPE_TEST_RECOVERY_ROOT") else {
+        return;
+    };
+    screenpipe_db::storage::recover_interrupted_migration(
+        std::path::Path::new(&root),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn recording_recovery_is_durable_when_interrupted_before_or_after_activation() {
+    for point in ["migration_recovery_ready", "migration_recovery_activated"] {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path()).await;
+        let stopped = std::process::Command::new(env!("CARGO_BIN_EXE_screenpipe-storage"))
+            .arg("migrate")
+            .arg(root.path())
+            .env("SCREENPIPE_STORAGE_CRASH_AT", "seal_committed")
+            .output()
+            .unwrap();
+        assert_eq!(stopped.status.code(), Some(86));
+        let stopped = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "recording_recovery_child", "--nocapture"])
+            .env("SCREENPIPE_TEST_RECOVERY_ROOT", root.path())
+            .env("SCREENPIPE_STORAGE_CRASH_AT", point)
+            .output()
+            .unwrap();
+        assert_eq!(
+            stopped.status.code(),
+            Some(86),
+            "{point}: {}",
+            String::from_utf8_lossy(&stopped.stderr)
+        );
+        screenpipe_db::storage::recover_interrupted_migration(root.path(), Default::default())
+            .await
+            .unwrap();
+        let db = DatabaseManager::new(
+            root.path().join("db.sqlite").to_str().unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        db.verify_storage().await.unwrap();
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(49,'2026-09-14T12:00:00Z','recording after interrupted recovery')").await.unwrap();
+        db.close().await;
+    }
+}
+
+#[tokio::test]
+async fn oversized_legacy_record_does_not_prevent_recording_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("db.sqlite");
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text,accessibility_tree_json) VALUES(1,'2026-09-14T12:00:00Z','oversized history',printf('%.*c',2097152,'x'))").await.unwrap();
+    db.close().await;
+    let mut options = MigrationOptions::default();
+    options.budget.record_bytes = 1024 * 1024;
+    assert!(migrate(root.path(), Default::default(), options)
+        .await
+        .is_err());
+    screenpipe_db::storage::recover_interrupted_migration(root.path(), Default::default())
+        .await
+        .unwrap();
+    let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        db.frame_payloads(&[1], Projection::All).await.unwrap()[&1]
+            .accessibility_tree_json
+            .as_ref()
+            .unwrap()
+            .len(),
+        2097152
+    );
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(2,'2026-09-14T12:01:00Z','new recording')").await.unwrap();
+    db.close().await;
 }

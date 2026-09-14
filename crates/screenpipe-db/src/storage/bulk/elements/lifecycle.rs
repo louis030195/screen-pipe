@@ -190,37 +190,41 @@ async fn rewrite(
             format!(" LIMIT {FILE_ROWS}"),
         )
     };
-    let sql=format!("SELECT id,_archive_generation,{} FROM elements WHERE id BETWEEN ? AND ? AND ({}) ORDER BY id{limit}",names(),TABLE.eligible);
-    let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(first)
-        .bind(last)
-        .fetch(pool);
-    let mut rows = Vec::new();
-    let mut bytes = 0;
+    // Release each read cursor before encoding takes the writer. Offline
+    // migration has one connection; a recovered resident range can exceed one
+    // file budget and must not hold that connection while waiting for itself.
+    let mut after = None;
     let mut files = Vec::new();
-    while let Some(row) = stream.try_next().await? {
-        let row = record(&row)?;
-        if row.bytes() > storage.descriptor.budget.record_bytes {
-            return Err(storage_error("element record exceeds sealing budget"));
-        }
-        if !rows.is_empty()
-            && (rows.len() == FILE_ROWS
-                || bytes + row.bytes() > storage.descriptor.budget.file_bytes)
-        {
-            files.push(encode(storage, writer, std::mem::take(&mut rows)).await?);
-            bytes = 0;
-            // New ranges yield after one bounded batch. Existing ranges are
-            // replaced completely, split into bounded files as needed.
-            if range.is_none() {
+    loop {
+        let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
+        let sql=format!("SELECT id,_archive_generation,{} FROM elements WHERE id BETWEEN ? AND ? AND {lower} AND ({}) ORDER BY id{limit}",names(),TABLE.eligible);
+        let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(first)
+            .bind(last)
+            .fetch(pool);
+        let mut rows = Vec::new();
+        let mut bytes = 0;
+        while let Some(row) = stream.try_next().await? {
+            let row = record(&row)?;
+            if row.bytes() > storage.descriptor.budget.record_bytes {
+                return Err(storage_error("element record exceeds sealing budget"));
+            }
+            if !rows.is_empty()
+                && (rows.len() == FILE_ROWS
+                    || bytes + row.bytes() > storage.descriptor.budget.file_bytes)
+            {
                 break;
             }
+            bytes += row.bytes();
+            rows.push(row);
         }
-        bytes += row.bytes();
-        rows.push(row);
-    }
-    drop(stream);
-    if !rows.is_empty() {
+        drop(stream);
+        let Some(last_row) = rows.last() else { break };
+        after = Some(last_row.id);
         files.push(encode(storage, writer, rows).await?);
+        if range.is_none() {
+            break;
+        }
     }
     let last = if range.is_some() {
         last

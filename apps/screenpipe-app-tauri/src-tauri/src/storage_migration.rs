@@ -305,8 +305,8 @@ pub(crate) async fn resume_before_startup(
         if let Err(save_error) = save_migration_error(&root, &error) {
             tracing::error!(%save_error, "failed to save migration retry block");
         }
-        // Do not retry conversion during startup. The DB currently rejects an
-        // incomplete in-place index; its recording recovery remains a blocker.
+        // ServerCore restores a writable resident schema without encoding
+        // another payload batch, then resumes the saved recording preference.
         return Ok(None);
     }
     if migration_report(&root)
@@ -776,8 +776,8 @@ async fn resume_after_failed_migration(app: &tauri::AppHandle, root: &Path) -> R
     }
     // Preserve capture intent, including an explicit pause. Teardown also
     // clears the restart cooldown, whose deferred path requires a webview.
-    // Startup must not restart conversion. Reopen usable storage; an incomplete
-    // in-place index still needs a safe DB recovery path before this can succeed.
+    // ServerCore restores interrupted storage for recording without resuming
+    // archival. The durable migration error remains until an explicit retry.
     crate::recording::stop_screenpipe_inner(&recording).await?;
     crate::recording::spawn_screenpipe_inner(&recording, app.clone()).await?;
     {

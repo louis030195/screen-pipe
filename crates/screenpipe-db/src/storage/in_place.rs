@@ -54,6 +54,23 @@ pub(super) async fn convert(
     total_records: u64,
     progress: &(impl Fn(MigrationProgress) + Send + Sync),
 ) -> Result<(), sqlx::Error> {
+    run(storage, original_allocated, total_records, progress, true).await
+}
+
+/// Restore the resident schema and search indexes without encoding payloads,
+/// reclaiming files, or completing the migration. Ordinary recording can then
+/// use committed Parquet plus resident SQLite until an explicit migration retry.
+pub(super) async fn recover_recording(storage: Arc<HybridStorage>) -> Result<(), sqlx::Error> {
+    run(storage, 0, 0, &|_| {}, false).await
+}
+
+async fn run(
+    storage: Arc<HybridStorage>,
+    original_allocated: u64,
+    total_records: u64,
+    progress: &(impl Fn(MigrationProgress) + Send + Sync),
+    archive: bool,
+) -> Result<(), sqlx::Error> {
     let index = storage.root.join(&storage.descriptor.index);
     let lease = screenpipe_sqlite_coordinator::acquire_sqlite_manager_lease(&index)
         .map_err(storage_error)?;
@@ -86,7 +103,7 @@ pub(super) async fn convert(
         screenpipe_sqlite_coordinator::sqlite_write_lock(&index),
     );
     let result = async {
-        reserve(&storage)?;
+        if archive { reserve(&storage)?; }
         {
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
@@ -112,29 +129,40 @@ pub(super) async fn convert(
                 schema::finish_step(&mut tx,"suspend-original-triggers").await?;
                 tx.commit().await?;
             }
+            // A paused migration records resident payloads like the original
+            // SQLite store. Its disabled sealer must not impose a staging cap
+            // that eventually stops recording. Explicit completion restores it.
+            sqlx::query("UPDATE storage_metadata SET staging_limit=?")
+                .bind(if archive { storage.descriptor.budget.staging_bytes as i64 } else { i64::MAX })
+                .execute(&mut *conn).await?;
             if schema::converted_step(&mut conn,"conversion-complete").await? { return Ok(()); }
             schema::construction_checkpoint(&mut conn).await?;
         }
         // Encoding reservations left by an interrupted attempt are handled by
         // the existing catalog reclamation; published files are never discarded.
-        storage.reclaim_once(&pool, &writer).await?;
-        storage.reclaim_bulk(&pool, &writer).await?;
-        reclaim(&storage, &writer, file).await?;
-        report(&storage, &pool, original_allocated, total_records, progress).await?;
+        if archive {
+            storage.reclaim_once(&pool, &writer).await?;
+            storage.reclaim_bulk(&pool, &writer).await?;
+            reclaim(&storage, &writer, file).await?;
+            report(&storage, &pool, original_allocated, total_records, progress).await?;
+        }
         loop {
-            reserve(&storage)?;
-            if storage.seal_once(&pool, &writer).await? != 0 {
+            if archive { reserve(&storage)?; }
+            if archive && storage.seal_once(&pool, &writer).await? != 0 {
                 reclaim(&storage, &writer, file).await?;
                 report(&storage, &pool, original_allocated, total_records, progress).await?;
                 continue;
             }
             let last: Option<i64> = sqlx::query_scalar("SELECT max(frame_id) FROM frame_payloads").fetch_one(&pool).await?;
-            let columns = super::import::columns(&pool, "frames").await?;
-            let columns: Vec<_> = columns.into_iter().filter(|c| !c.starts_with("payload_")).collect();
-            let rows = super::import::batch(&pool, "frames", &columns, last, &storage.descriptor.budget).await?;
-            if rows.is_empty() { break; }
-            let first = rows.first().unwrap().get::<i64,_>(0);
-            let last = rows.last().unwrap().get::<i64,_>(0);
+            let range = if archive {
+                let columns = super::import::columns(&pool, "frames").await?;
+                let columns: Vec<_> = columns.into_iter().filter(|c| !c.starts_with("payload_")).collect();
+                let rows = super::import::batch(&pool, "frames", &columns, last, &storage.descriptor.budget).await?;
+                rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
+            } else {
+                resident_range(&pool, "frames", last, storage.descriptor.budget.file_bytes).await?
+            };
+            let Some((first, last)) = range else { break };
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
             let mut tx = conn.begin().await?;
@@ -147,33 +175,47 @@ pub(super) async fn convert(
         if source_exists {
             let columns = super::import::columns(&pool, "_bulk_elements_source").await?;
             loop {
-                reserve(&storage)?;
-                if bulk::elements::seal(&storage, &pool, &writer).await? != 0 {
+                if archive { reserve(&storage)?; }
+                if archive && bulk::elements::seal(&storage, &pool, &writer).await? != 0 {
                     reclaim(&storage, &writer, file).await?;
                     report(&storage, &pool, original_allocated, total_records, progress).await?;
                     continue;
                 }
-                let rows = super::import::batch(&pool, "_bulk_elements_source", &columns, None, &storage.descriptor.budget).await?;
-                if rows.is_empty() { break; }
-                let first = rows.first().unwrap().get::<i64,_>(0);
-                let last = rows.last().unwrap().get::<i64,_>(0);
+                let rows = if archive {
+                    super::import::batch(&pool, "_bulk_elements_source", &columns, None, &storage.descriptor.budget).await?
+                } else { Vec::new() };
+                let range = if archive {
+                    rows.first().zip(rows.last()).map(|(first,last)| (first.get::<i64,_>(0),last.get::<i64,_>(0)))
+                } else {
+                    resident_range(&pool, "_bulk_elements_source", None, storage.descriptor.budget.file_bytes).await?
+                };
+                let Some((first, last)) = range else { break };
                 let permit = writer.lock().await?;
                 let mut conn = permit.pool().acquire().await?;
                 let mut tx = conn.begin().await?;
-                super::import::insert(&mut tx, "elements", &columns, &rows, true).await?;
+                if archive {
+                    super::import::insert(&mut tx, "elements", &columns, &rows, true).await?;
+                } else {
+                    // SQL-to-SQL batches also recover pre-existing records that
+                    // exceed the archive record budget, without decoding them.
+                    let names = columns.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect::<Vec<_>>().join(",");
+                    sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO _bulk_element_rows({names},_archive_generation) SELECT {names},1 FROM _bulk_elements_source WHERE id BETWEEN ? AND ?")))
+                        .bind(first).bind(last).execute(&mut *tx).await?;
+                    bulk::elements::import_batch(&mut tx, first, last).await?;
+                }
                 sqlx::query("DELETE FROM _bulk_elements_source WHERE id BETWEEN ? AND ?").bind(first).bind(last).execute(&mut *tx).await?;
                 tx.commit().await?;
                 schema::construction_checkpoint(&mut conn).await?;
                 super::faults::checkpoint("migration_batch_staged");
                 drop(conn);
                 drop(permit);
-                reclaim(&storage, &writer, file).await?;
+                if archive { reclaim(&storage, &writer, file).await?; }
             }
             let permit = writer.lock().await?;
             sqlx::query("DROP TABLE _bulk_elements_source").execute(permit.pool()).await?;
         }
         for table in bulk::TABLES.iter().filter(|t| t.name != "elements") {
-            loop {
+            while archive {
                 reserve(&storage)?;
                 let rows = storage.select_bulk(&pool, table, None).await?;
                 if rows.is_empty() { break; }
@@ -191,7 +233,7 @@ pub(super) async fn convert(
                 reclaim(&storage, &writer, file).await?;
                 report(&storage, &pool, original_allocated, total_records, progress).await?;
             }
-            backfill_resident_fts(&storage, &pool, &writer, table, file).await?;
+            backfill_resident_fts(&storage, &pool, &writer, table, file, archive).await?;
         }
         {
             let permit = writer.lock().await?;
@@ -200,12 +242,20 @@ pub(super) async fn convert(
             let mut tx=conn.begin().await?;
             let original: Vec<String> = sqlx::query_scalar("SELECT sql FROM _storage_conversion_triggers WHERE restore=1").fetch_all(&mut *tx).await?;
             for sql in original { sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&mut *tx).await?; }
-            schema::finish_step(&mut tx,"conversion-complete").await?;
+            if archive {
+                schema::finish_step(&mut tx,"conversion-complete").await?;
+            } else {
+                // Restored application triggers must be suspended again only
+                // if the user explicitly retries archival later.
+                sqlx::query("DELETE FROM _storage_conversion_steps WHERE step='suspend-original-triggers'").execute(&mut *tx).await?;
+            }
             tx.commit().await?;
         }
-        reclaim(&storage, &writer, file).await?;
-        progress(MigrationProgress { message: "conversion complete", completed_records: Some(total_records), total_records: Some(total_records),
-            bytes_saved: Some(original_allocated.saturating_sub(super::reclaim::footprint(&storage.root)?)), available_bytes: Some(fs2::available_space(&storage.root)?) });
+        if archive {
+            reclaim(&storage, &writer, file).await?;
+            progress(MigrationProgress { message: "conversion complete", completed_records: Some(total_records), total_records: Some(total_records),
+                bytes_saved: Some(original_allocated.saturating_sub(super::reclaim::footprint(&storage.root)?)), available_bytes: Some(fs2::available_space(&storage.root)?) });
+        }
         Ok(())
     }.await;
     if let Err(ref error) = result {
@@ -217,6 +267,37 @@ pub(super) async fn convert(
     drop(owner.file.take());
     drop(owner.lease.take());
     result
+}
+
+// Only identifiers chosen by the offline runner reach this helper. Recovery
+// transfers rows inside SQLite instead of allocating archive-sized Rust values.
+async fn resident_range(
+    pool: &SqlitePool,
+    table: &str,
+    after: Option<i64>,
+    budget_bytes: usize,
+) -> Result<Option<(i64, i64)>, sqlx::Error> {
+    let lower = after.map_or_else(|| "1".to_owned(), |id| format!("id>{id}"));
+    let size = super::import::columns(pool, table).await?.iter().map(|name| {
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        format!("CASE WHEN typeof({quoted}) IN ('integer','real') THEN 8 ELSE COALESCE(length(CAST({quoted} AS BLOB)),0) END")
+    }).collect::<Vec<_>>().join("+");
+    let rows: Vec<(i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT id,{size} FROM {table} WHERE {lower} ORDER BY id LIMIT 128"
+    )))
+    .fetch_all(pool)
+    .await?;
+    let mut range = None;
+    let mut bytes = 0usize;
+    for (id, size) in rows {
+        let size = usize::try_from(size).map_err(storage_error)?;
+        if range.is_some() && bytes.saturating_add(size) > budget_bytes {
+            break;
+        }
+        bytes = bytes.saturating_add(size);
+        range = Some((range.map_or(id, |(first, _)| first), id));
+    }
+    Ok(range)
 }
 
 async fn reclaim(
@@ -239,12 +320,17 @@ async fn backfill_resident_fts(
     writer: &SqliteWritePool,
     table: &bulk::Table,
     file: &mut std::fs::File,
+    archive: bool,
 ) -> Result<(), sqlx::Error> {
     use futures::TryStreamExt;
     if table.fts.is_empty() {
         return Ok(());
     }
-    let step = format!("resident-fts-{}", table.name);
+    let step = format!(
+        "{}-fts-{}",
+        if archive { "resident" } else { "recovery" },
+        table.name
+    );
     let size = table
         .fts
         .iter()
@@ -257,14 +343,16 @@ async fn backfill_resident_fts(
         .collect::<Vec<_>>()
         .join("+");
     loop {
-        reserve(storage)?;
+        if archive {
+            reserve(storage)?;
+        }
         let after: Option<i64> =
             sqlx::query_scalar("SELECT last_id FROM _storage_conversion_steps WHERE step=?")
                 .bind(&step)
                 .fetch_optional(pool)
                 .await?
                 .flatten();
-        let sql = format!("SELECT id,{size} FROM {t} WHERE _archive_file IS NULL AND NOT ({eligible}) AND id {comparison} ? ORDER BY id LIMIT {rows}",t=table.name,eligible=table.eligible,comparison=if after.is_some(){">"}else{">="},rows=bulk::FILE_ROWS);
+        let sql = format!("SELECT id,{size} FROM {t} WHERE _archive_file IS NULL AND NOT ({eligible}) AND id {comparison} ? ORDER BY id LIMIT {rows}",t=table.name,eligible=if archive { table.eligible } else { "0" },comparison=if after.is_some(){">"}else{">="},rows=bulk::FILE_ROWS);
         let mut stream = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(after.unwrap_or(i64::MIN))
             .fetch(pool);
@@ -272,7 +360,7 @@ async fn backfill_resident_fts(
         let mut bytes = 0_usize;
         while let Some(row) = stream.try_next().await? {
             let size = row.get::<i64, _>(1) as usize;
-            if size > storage.descriptor.budget.record_bytes {
+            if archive && size > storage.descriptor.budget.record_bytes {
                 return Err(storage_error(
                     "resident search record exceeds migration budget",
                 ));
@@ -296,8 +384,12 @@ async fn backfill_resident_fts(
         }
         sqlx::query("INSERT INTO _storage_conversion_steps(step,last_id) VALUES(?,?) ON CONFLICT(step) DO UPDATE SET last_id=excluded.last_id").bind(&step).bind(last).execute(&mut *tx).await?;
         tx.commit().await?;
-        super::reclaim::free_leaves(&mut conn, file, storage.descriptor.budget.decode_bytes)
-            .await?;
+        if archive {
+            super::reclaim::free_leaves(&mut conn, file, storage.descriptor.budget.decode_bytes)
+                .await?;
+        } else {
+            schema::construction_checkpoint(&mut conn).await?;
+        }
     }
     Ok(())
 }

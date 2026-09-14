@@ -155,9 +155,7 @@ fn read_journal(root: &Path) -> Result<Journal, sqlx::Error> {
 
 pub(super) fn migration_is_paused(root: &Path) -> Result<bool, sqlx::Error> {
     let journal = read_journal(root)?;
-    Ok(journal.format == 1
-        && journal.phase == Phase::Paused
-        && checked_path(root, Path::new("db.sqlite"))?.is_file())
+    Ok(journal.phase == Phase::Paused && checked_path(root, Path::new("db.sqlite"))?.is_file())
 }
 
 pub fn migration_requires_resume(root: &Path) -> Result<bool, sqlx::Error> {
@@ -165,6 +163,96 @@ pub fn migration_requires_resume(root: &Path) -> Result<bool, sqlx::Error> {
         return Ok(false);
     }
     Ok(read_journal(root)?.format == 2)
+}
+
+/// A paused in-place migration has a complete writable resident schema, but
+/// retains its journal so archival can only continue after explicit user action.
+pub(super) fn migration_recording_ready(root: &Path) -> Result<bool, sqlx::Error> {
+    if !root.join("storage-migration.json").exists() {
+        return Ok(false);
+    }
+    let journal = read_journal(root)?;
+    if journal.format != 2 || journal.phase != Phase::Paused {
+        return Ok(false);
+    }
+    let active = StorageDescriptor::read(root)?;
+    Ok(active.as_ref() == Some(&journal.descriptor)
+        || (active.is_none()
+            && root.join("db.sqlite").is_file()
+            && !root.join(&journal.descriptor.index).exists()))
+}
+
+/// Restore recording after an interrupted conversion without retrying archival.
+/// Committed payload files are retained byte-for-byte; remaining rows stay in
+/// SQLite. Recovery and subsequent recording use the existing single writer.
+pub async fn recover_interrupted_migration(
+    root: &Path,
+    config: DbConfig,
+) -> Result<(), sqlx::Error> {
+    if !root.join("storage-migration.json").exists() {
+        return Ok(());
+    }
+    if read_journal(root)?.format == 1 {
+        return pause_interrupted_migration(root);
+    }
+    if migration_recording_ready(root)? {
+        return Ok(());
+    }
+    let root = root.canonicalize()?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".storage.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .map_err(|_| storage_error("storage lifecycle is already owned"))?;
+    let mut journal = read_journal(&root)?;
+    let index = checked_path(&root, &journal.descriptor.index)?;
+    if root.join("db.sqlite").is_file() {
+        if index.exists() || StorageDescriptor::read(&root)?.is_some() {
+            return Err(storage_error(
+                "migration recovery found conflicting database generations",
+            ));
+        }
+        // Nothing was renamed or converted. Keep the original writable, and
+        // refresh its verification receipts only on a later explicit retry.
+        journal.phase = Phase::Paused;
+        durable_json(&root.join("storage-migration.json"), &journal)?;
+        return Ok(());
+    }
+    if !index.is_file() {
+        return Err(storage_error("migration index is missing"));
+    }
+    if StorageDescriptor::read(&root)?.is_some_and(|active| active != journal.descriptor) {
+        return Err(storage_error(
+            "active descriptor differs from migration index",
+        ));
+    }
+    let storage = HybridStorage::new(root.clone(), journal.descriptor.clone())?;
+    super::in_place::recover_recording(storage.clone()).await?;
+    let db = DatabaseManager::new_with_storage(
+        index.to_str().unwrap(),
+        config,
+        Some(storage),
+        false,
+        false,
+    )
+    .await?;
+    let check = sqlx::query("SELECT id FROM frames LIMIT 1")
+        .fetch_optional(&db.pool)
+        .await;
+    db.close().await;
+    check?;
+    // Journal first: interruption before descriptor publication remains closed;
+    // recovery is idempotent and never starts a Parquet conversion batch.
+    journal.phase = Phase::Paused;
+    durable_json(&root.join("storage-migration.json"), &journal)?;
+    super::faults::checkpoint("migration_recovery_ready");
+    durable_json(&root.join("storage.json"), &journal.descriptor)?;
+    super::faults::checkpoint("migration_recovery_activated");
+    tracing::info!("storage recovered for recording; migration remains paused");
+    Ok(())
 }
 
 /// Reopening the desktop app restores ordinary use of its last active storage.
@@ -361,6 +449,49 @@ pub async fn migrate_with_progress(
         super::faults::checkpoint("migration_before_rename");
         journal
     };
+    if journal.phase == Phase::Paused {
+        // Recording may have appended, edited, or retained history since the
+        // failure. The explicit retry verifies that current logical dataset,
+        // keeping all already committed archive files and their generations.
+        let active = StorageDescriptor::read(&root)?;
+        let path = if active.is_some() {
+            root.join(&journal.descriptor.index)
+        } else {
+            source_path.clone()
+        };
+        let storage = active
+            .map(|d| HybridStorage::new(root.clone(), d))
+            .transpose()?;
+        let db = DatabaseManager::new_with_storage(
+            path.to_str().unwrap(),
+            config.clone(),
+            storage,
+            false,
+            false,
+        )
+        .await?;
+        let refreshed = async {
+            let receipts = table_receipts(&db, Some(&journal.source)).await?;
+            let mut searches = Vec::new();
+            for (term, _) in &journal.search_receipts {
+                let ids = sqlx::query_scalar(MIGRATION_SEARCH)
+                    .bind(term)
+                    .fetch_all(&db.pool)
+                    .await?;
+                searches.push((term.clone(), ids));
+            }
+            Ok::<_, sqlx::Error>((receipts, searches))
+        }
+        .await;
+        db.close().await;
+        let (receipts, searches) = refreshed?;
+        journal.source = receipts;
+        journal.search_receipts = searches;
+        journal.snapshot = source_identity(&root)?;
+        journal.report = None;
+        journal.phase = Phase::Building;
+        durable_json(&journal_path, &journal)?;
+    }
     if let Some(active) = StorageDescriptor::read(&root)? {
         if active != journal.descriptor {
             return Err(storage_error(

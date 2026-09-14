@@ -337,7 +337,6 @@ impl ServerCore {
 
         // --- Database ---
         let local_data_dir = config.data_dir.clone();
-        crate::db_relaunch::set_active_database(&local_data_dir);
         let data_path = local_data_dir.join("data");
         std::fs::create_dir_all(&data_path).map_err(|error| {
             let message =
@@ -346,8 +345,13 @@ impl ServerCore {
             message
         })?;
 
-        screenpipe_db::storage::pause_interrupted_migration(&local_data_dir)
-            .map_err(|error| format!("Failed to resume storage after interruption: {error}"))?;
+        screenpipe_db::storage::recover_interrupted_migration(
+            &local_data_dir,
+            config.db_config.clone(),
+        )
+        .await
+        .map_err(|error| format!("Failed to resume storage after interruption: {error}"))?;
+        crate::db_relaunch::set_active_database(&local_data_dir);
 
         // A crash during repair may leave the committed WAL archived separately
         // from the main file. Reconcile the swap before ordinary DB diagnosis.

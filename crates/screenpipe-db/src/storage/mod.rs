@@ -29,7 +29,8 @@ pub use command::run_command;
 pub use inventory::{artifact_bytes, inventory};
 pub use lifecycle::{
     cancel_migration, migrate, migrate_with_progress, migration_report, migration_requires_resume,
-    pause_interrupted_migration, MigrationOptions, MigrationProgress, MigrationReport,
+    pause_interrupted_migration, recover_interrupted_migration, MigrationOptions,
+    MigrationProgress, MigrationReport,
 };
 pub use maintenance::{compact, export_sqlite};
 pub use reader::StorageReadToken;
@@ -266,7 +267,9 @@ pub fn resolve_database_path(database: &Path) -> Result<PathBuf, sqlx::Error> {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     if database.file_name().is_some_and(|name| name == "db.sqlite") {
-        if lifecycle::migration_requires_resume(root)? {
+        if lifecycle::migration_requires_resume(root)?
+            && !lifecycle::migration_recording_ready(root)?
+        {
             return Err(storage_error(
                 "in-place migration pending; resume migration before opening history or recording",
             ));
@@ -431,6 +434,13 @@ impl HybridStorage {
         let Some(root) = path.parent().and_then(Path::parent).and_then(Path::parent) else {
             return Ok(None);
         };
+        if lifecycle::migration_requires_resume(root)?
+            && !lifecycle::migration_recording_ready(root)?
+        {
+            return Err(storage_error(
+                "interrupted migration must restore recording before opening its index",
+            ));
+        }
         let Some(descriptor) = StorageDescriptor::read(root)? else {
             return Err(storage_error(
                 "hybrid index requires an active storage descriptor",
