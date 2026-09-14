@@ -40,8 +40,13 @@ pub(super) async fn construction_checkpoint(
     let row = sqlx::query("PRAGMA wal_checkpoint(FULL)")
         .fetch_one(&mut *conn)
         .await?;
-    if row.try_get::<i64, _>(0)? != 0 || row.try_get::<i64, _>(1)? != row.try_get::<i64, _>(2)? {
-        return Err(storage_error("offline construction has an active reader"));
+    let busy: i64 = row.try_get(0)?;
+    let pages: i64 = row.try_get(1)?;
+    let copied: i64 = row.try_get(2)?;
+    if busy != 0 || pages != copied {
+        return Err(storage_error(format!(
+            "offline construction checkpoint incomplete (busy={busy}, wal_pages={pages}, checkpointed={copied})"
+        )));
     }
     Ok(())
 }

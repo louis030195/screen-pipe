@@ -327,25 +327,43 @@ impl DatabaseManager {
         };
 
         // Read pool: handles all SELECT queries (search, timeline, API, pipes).
-        let read_pool = crate::storage::bulk::pool_options(storage.clone(), true)
+        let read_pool_options = crate::storage::bulk::pool_options(storage.clone(), true)
             .max_connections(if storage.is_some() {
                 config.read_pool_max.max(2)
             } else {
                 config.read_pool_max
             })
-            .min_connections(config.read_pool_min)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect_with(read_connect_options)
-            .await
-            .map_err(|error| quarantine_startup_error(database_file, error))?;
+            .min_connections(if bootstrap_storage {
+                0
+            } else {
+                config.read_pool_min
+            })
+            .acquire_timeout(Duration::from_secs(5));
+        // An unpublished index has no readers yet. Defer their connections
+        // until schema construction is complete, rather than letting their
+        // initialization overlap its DDL and checkpoints. The published
+        // generation reopens with the ordinary configured pools.
+        let read_pool = if bootstrap_storage {
+            read_pool_options.connect_lazy_with(read_connect_options)
+        } else {
+            read_pool_options
+                .connect_with(read_connect_options)
+                .await
+                .map_err(|error| quarantine_startup_error(database_file, error))?
+        };
 
         crate::recovery::register_database_pool(database_file, &read_pool);
 
         // Write pool: dedicated to INSERT/UPDATE/DELETE via begin_immediate_with_retry().
         // Writes are serialized by write_semaphore so only 1 is active
         // at a time; extras absorb connection detach without killing the pool.
+        let write_pool_max = if bootstrap_storage {
+            1
+        } else {
+            config.write_pool_max
+        };
         let write_pool = match crate::storage::bulk::pool_options(storage.clone(), false)
-            .max_connections(config.write_pool_max)
+            .max_connections(write_pool_max)
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(connect_options.clone())
@@ -368,7 +386,7 @@ impl DatabaseManager {
             crate::write_queue::WriteQueueHealth::for_database_path(database_path);
         let write_pool_rebuilder = crate::write_queue::WritePoolRebuilder::new(
             connect_options,
-            config.write_pool_max,
+            write_pool_max,
             1,
             Duration::from_secs(10),
         )
