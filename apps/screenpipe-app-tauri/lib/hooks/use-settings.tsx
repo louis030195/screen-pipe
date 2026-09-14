@@ -965,9 +965,9 @@ export const getStore = async () => {
 	if (!_store) {
 		_store = (async () => {
 			// Resolve the base dir via the backend so the webview opens the same
-			// store.bin as Rust (get_base_dir honors SCREENPIPE_DATA_DIR); a
-			// hardcoded ~/.screenpipe here splits the settings store in two
-			// whenever that override is set.
+			// store.bin as Rust. The backend pins this to the launch directory,
+			// even when recordings use another folder or SCREENPIPE_DATA_DIR
+			// was supplied to isolate the entire app at launch.
 			let baseDir: string | null = null;
 			try {
 				const res = await commands.getScreenpipeBaseDir();

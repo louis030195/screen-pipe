@@ -933,7 +933,7 @@ async fn main() {
     // #[tokio::main] and panics ("Cannot start a runtime from within a
     // runtime"), killing the app at launch.
     let initial_cloud_token = crate::auth_token::migrate_plaintext_token(
-        &screenpipe_core::paths::default_screenpipe_data_dir(),
+        crate::config::app_data_dir(),
     )
     .await;
 
@@ -1480,6 +1480,8 @@ async fn main() {
             // can fire) makes `default_screenpipe_data_dir()` self-consistent and
             // also propagates the correct dir to child processes (the CLI
             // sidecar inherits this env).
+            // App settings and the cloud session stay in app_data_dir(), pinned
+            // before authentication, so webviews cannot open a second store.
             std::env::set_var("SCREENPIPE_DATA_DIR", &data_dir);
 
             // The fs-plugin scope in capabilities/main.json only whitelists

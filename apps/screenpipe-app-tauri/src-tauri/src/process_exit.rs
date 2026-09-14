@@ -317,6 +317,9 @@ pub fn force_app_relaunch(app: AppHandle, status: i32) -> ! {
             command.args(env.args_os.iter().skip(1));
             command
         };
+        // Startup repoints this variable at recordings. A replacement app must
+        // reopen the original settings store before selecting recordings again.
+        command.env("SCREENPIPE_DATA_DIR", crate::config::app_data_dir());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
