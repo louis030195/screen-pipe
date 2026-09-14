@@ -25,12 +25,27 @@ async fn fixture(root: &std::path::Path) {
 }
 
 #[tokio::test]
-#[ignore = "requires a marked disposable volume no larger than 512 MiB"]
+#[ignore = "requires a marked disposable volume; optional production-default run uses up to 8 GiB"]
 async fn migration_completes_with_less_free_space_than_its_final_payloads() {
     use std::io::Write;
     let volume = std::path::PathBuf::from(std::env::var("SCREENPIPE_CONSTRAINED_VOLUME").unwrap());
     assert!(volume.join(".screenpipe-disposable-volume").is_file());
-    assert!(fs2::total_space(&volume).unwrap() <= 512 * 1024 * 1024);
+    let production = std::env::var_os("SCREENPIPE_TEST_MIGRATION_DEFAULTS").is_some();
+    let count: i64 = if production { 4096 } else { 96 };
+    let payload_bytes = if production { 512 * 1024 } else { 256 * 1024 };
+    let mut options = MigrationOptions::default();
+    let (capacity_limit, free_target) = if production {
+        (
+            8_u64 * 1024 * 1024 * 1024,
+            options.budget.disk_reserve_bytes + 128 * 1024 * 1024,
+        )
+    } else {
+        options.budget.file_bytes = 512 * 1024;
+        options.budget.record_bytes = 1024 * 1024;
+        options.budget.disk_reserve_bytes = 0;
+        (512 * 1024 * 1024, 13 * 1024 * 1024)
+    };
+    assert!(fs2::total_space(&volume).unwrap() <= capacity_limit);
     let root = tempfile::tempdir_in(&volume).unwrap();
     let db = DatabaseManager::new(
         root.path().join("db.sqlite").to_str().unwrap(),
@@ -40,8 +55,8 @@ async fn migration_completes_with_less_free_space_than_its_final_payloads() {
     .unwrap();
     let mut state = 0x852df832c973ba01_u64;
     let alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
-    for id in 1..=96 {
-        let detail: String = (0..256 * 1024)
+    for id in 1..=count {
+        let detail: String = (0..payload_bytes)
             .map(|_| {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -57,16 +72,12 @@ async fn migration_completes_with_less_free_space_than_its_final_payloads() {
     db.close().await;
     let mut filler = std::fs::File::create(root.path().join("unrelated-data")).unwrap();
     let block = vec![0xa5; 1024 * 1024];
-    while fs2::available_space(&volume).unwrap() > 13 * 1024 * 1024 {
+    while fs2::available_space(&volume).unwrap() > free_target {
         filler.write_all(&block).unwrap();
         filler.sync_all().unwrap();
     }
     drop(filler);
     let initial_free = fs2::available_space(&volume).unwrap();
-    let mut options = MigrationOptions::default();
-    options.budget.file_bytes = 512 * 1024;
-    options.budget.record_bytes = 1024 * 1024;
-    options.budget.disk_reserve_bytes = 0;
     let updates = std::sync::Mutex::new(Vec::new());
     let result = screenpipe_db::storage::migrate_with_progress(
         root.path(),
@@ -96,9 +107,12 @@ async fn migration_completes_with_less_free_space_than_its_final_payloads() {
         report.payload_bytes > initial_free,
         "fixture must require progressive reclamation"
     );
-    assert!(updates.lock().unwrap().iter().any(
-        |u| u.completed_records.unwrap_or(0) < 192 && u.bytes_saved.unwrap_or(0) > 1024 * 1024
-    ));
+    assert!(updates
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|u| u.completed_records.unwrap_or(0) < 2 * count as u64
+            && u.bytes_saved.unwrap_or(0) > 1024 * 1024));
     eprintln!("constrained migration: initial_free={initial_free}, final_payloads={}, allocated_before={}, allocated_after={}, remaining_free={}", report.payload_bytes,report.allocated_before_bytes.unwrap(),report.allocated_after_bytes.unwrap(),fs2::available_space(&volume).unwrap());
     let db = DatabaseManager::new(
         root.path().join("db.sqlite").to_str().unwrap(),
@@ -108,7 +122,7 @@ async fn migration_completes_with_less_free_space_than_its_final_payloads() {
     .unwrap();
     db.verify_storage().await.unwrap();
     assert_eq!(
-        db.frame_payloads(&[1, 96], Projection::All)
+        db.frame_payloads(&[1, count], Projection::All)
             .await
             .unwrap()
             .len(),
