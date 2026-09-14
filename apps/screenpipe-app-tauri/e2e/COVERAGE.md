@@ -11,8 +11,8 @@ and layer declared in the manifest, weighted by confidence and criticality.
 - Manifest: `e2e/coverage-map.json`
 - Specs directory: `e2e/specs`
 - Mapped specs: 140
-- Declared test blocks: 405
-- Weighted coverage points: 326.1
+- Declared test blocks: 404
+- Weighted coverage points: 325.1
 
 Confidence weights: strong=1.0, partial=0.7, conditional=0.4, smoke=0.3.
 Criticality weights: high=1.0, medium=0.7, low=0.4.
@@ -23,9 +23,9 @@ can execute more runtime cases than this number shows.
 
 | Platform | Specs | Declared tests | Weighted points | Layers | Features | Critical score |
 | --- | --- | --- | --- | --- | --- | --- |
-| windows | 107 | 343 | 286.1 | 15 | 122 | 85% |
-| macos | 136 | 367 | 295.9 | 17 | 132 | 88% |
-| linux | 95 | 301 | 255.5 | 14 | 119 | 80% |
+| windows | 107 | 342 | 285.1 | 15 | 122 | 85% |
+| macos | 136 | 366 | 294.9 | 17 | 132 | 88% |
+| linux | 95 | 300 | 254.5 | 14 | 119 | 80% |
 
 ## Runtime Results
 
@@ -45,14 +45,14 @@ pass/fail/skip counts.
 | entitlement | - | 1 specs / 1 tests / 1.0 pts | - |
 | local-api | 29 specs / 120 tests / 101.0 pts | 39 specs / 117 tests / 100.5 pts | 24 specs / 88 tests / 79.2 pts |
 | notifications | 4 specs / 26 tests / 17.3 pts | 3 specs / 5 tests / 3.4 pts | 2 specs / 4 tests / 3.1 pts |
-| onboarding | 9 specs / 40 tests / 35.8 pts | 11 specs / 44 tests / 39.2 pts | 9 specs / 40 tests / 35.8 pts |
+| onboarding | 9 specs / 39 tests / 34.8 pts | 11 specs / 43 tests / 38.2 pts | 9 specs / 39 tests / 34.8 pts |
 | os-integration | 7 specs / 32 tests / 26.9 pts | 15 specs / 30 tests / 18.4 pts | 2 specs / 15 tests / 10.8 pts |
 | performance | 3 specs / 45 tests / 45.0 pts | 5 specs / 36 tests / 31.8 pts | 2 specs / 30 tests / 30.0 pts |
 | pipes | 6 specs / 20 tests / 20.0 pts | 8 specs / 26 tests / 26.0 pts | 6 specs / 20 tests / 20.0 pts |
-| real-ui-e2e | 80 specs / 241 tests / 204.9 pts | 97 specs / 259 tests / 219.9 pts | 74 specs / 217 tests / 190.9 pts |
+| real-ui-e2e | 80 specs / 240 tests / 203.9 pts | 97 specs / 258 tests / 218.9 pts | 74 specs / 216 tests / 189.9 pts |
 | settings | 15 specs / 42 tests / 39.0 pts | 17 specs / 36 tests / 31.7 pts | 14 specs / 33 tests / 30.0 pts |
 | storage-privacy | 10 specs / 44 tests / 35.3 pts | 10 specs / 29 tests / 28.1 pts | 7 specs / 22 tests / 21.1 pts |
-| tauri-command | 23 specs / 65 tests / 51.9 pts | 35 specs / 88 tests / 70.3 pts | 22 specs / 66 tests / 52.8 pts |
+| tauri-command | 23 specs / 64 tests / 50.9 pts | 35 specs / 87 tests / 69.3 pts | 22 specs / 65 tests / 51.8 pts |
 | window-lifecycle | 22 specs / 71 tests / 59.5 pts | 23 specs / 55 tests / 40.9 pts | 16 specs / 44 tests / 34.4 pts |
 
 ## Critical Feature Matrix
@@ -200,7 +200,7 @@ pass/fail/skip counts.
 | meetings-only-audio-lifecycle.spec.ts | windows, macos | audio-device, local-api, real-ui-e2e | meetings-only-audio-lifecycle, audio-device-health | high | conditional | real-user-flow | 1 | Opt-in real-audio lifecycle lane: configured devices stay closed outside meetings and open only across a manual meeting edge. |
 | notification-viewer-link.spec.ts | windows, macos, linux | notifications, local-api, window-lifecycle | notifications, viewer-deeplink | high | partial | mixed | 3 | Notification local file links rewrite into in-app viewer links. |
 | onboarding-background-ai-tools.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, storage-privacy | onboarding, settings-ai | high | strong | real-user-flow | 2 | Isolated agent-home CI lane verifies private native config writes, the resolved local API credential, a real authenticated MCP tool call, skills setup, and migration from the removed connection slide through engine startup to optional recommended setup and completion. |
-| onboarding-first-run.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, first-run-learning, settings-persistence | high | strong | real-user-flow | 10 | Fresh-install setup walk: signed-out users restoring a post-login step return to login; after account creation, the acquisition slide is reachable in the shipped order and counted by the progress bar, offers no free-text field, one tap persists through to store.bin via the real settings command, skip records nothing, verified Free accounts continue without card capture or hosted checkout and land in Home, and existing lifetime owners stay out of mandatory checkout. |
+| onboarding-first-run.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, first-run-learning, settings-persistence | high | strong | real-user-flow | 9 | Fresh-install setup walk: signed-out users restoring a post-login step return to login; after account creation, the acquisition slide is reachable in the shipped order and counted by the progress bar, offers no free-text field, one tap persists through to store.bin via the real settings command, skip records nothing, and existing lifetime owners stay out of mandatory checkout. |
 | onboarding-h1-follow-up.spec.ts | windows, macos, linux | onboarding, notifications, pipes, real-ui-e2e | onboarding, notifications, pipes | high | strong | real-user-flow | 1 | A due H1 activation runs its real Pipe, sends one visible prompt through the app-control notification server, and remains exactly-once across repeated scheduler ticks. |
 | onboarding-redirect.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, window-lifecycle | onboarding, app-launch | high | conditional | real-user-flow | 5 | Opt-in no-onboarding seed verifies onboarding redirect. |
 | onboarding-trust-affordances.spec.ts | windows, macos, linux | onboarding, real-ui-e2e, tauri-command | onboarding, settings-privacy-api-auth, storage-retention | high | strong | real-user-flow | 4 | Pre-grant reassurance in setup: the login slide carries the storage-locality line and the pause affordance on one line (the only slide every platform sees, since permissions auto-advances on non-mac); the mac permissions slide keeps that promise collapsed to a single line below the permission wheel and on expand renders the data dir the running app actually resolved rather than a reconstructed ~/.screenpipe, with an open action pointed at that path; collapsed and expanded states are both asserted to fit inside the fixed-size onboarding window; and the timeline slide states the capture bounds (incognito skipped, per-app exclusions) where the capture decision is made. The mac assertions share one visit because the slide auto-advances 600ms after all grants land. |

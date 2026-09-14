@@ -88,6 +88,10 @@ const AUTOMATE_MY_WORK_LEGACY_PROMPT_HASHES: &[&str] = &[
 ];
 const BUNDLED_BUILTIN_PIPES: &[(&str, &str)] = &[
     (
+        "skill-learning",
+        include_str!("../../assets/pipes/skill-learning/pipe.md"),
+    ),
+    (
         "automate-my-work",
         include_str!("../../assets/pipes/automate-my-work/pipe.md"),
     ),
@@ -2739,7 +2743,16 @@ async fn setup_pipe_permissions(
     config: &PipeConfig,
     token_registry: Option<&Arc<dyn permissions::PipeTokenRegistry>>,
     read_only: bool,
+    api_port: u16,
 ) -> Option<String> {
+    if config.name == "skill-learning" {
+        if let Err(error) = atomic_write(
+            &pipe_dir.join(".screenpipe-learning-config.json"),
+            &serde_json::json!({"port": api_port}).to_string(),
+        ) {
+            warn!("could not configure skill learning: {error}");
+        }
+    }
     if let Err(e) = PiExecutor::ensure_permissions_extension(pipe_dir, config) {
         warn!("failed to install permissions extension: {}", e);
     }
@@ -4181,6 +4194,7 @@ impl PipeManager {
                 &config,
                 self.token_registry.as_ref(),
                 trigger == "event" && event_runs_are_read_only(&config),
+                self.api_port,
             )
             .await;
         }
@@ -4861,6 +4875,7 @@ impl PipeManager {
                     &config,
                     self.token_registry.as_ref(),
                     trigger == "event" && event_runs_are_read_only(&config),
+                    self.api_port,
                 )
                 .await;
             }
@@ -6625,6 +6640,7 @@ impl PipeManager {
                             config,
                             token_registry.as_ref(),
                             triggered_by_event && event_runs_are_read_only(config),
+                            api_port,
                         )
                         .await;
                     }
@@ -7430,6 +7446,11 @@ impl PipeManager {
 
     /// Copy built-in pipe templates into pipes_dir if they don't exist.
     pub fn install_builtin_pipes(&self) -> Result<()> {
+        if let Some(data_dir) = self.pipes_dir.parent() {
+            if let Err(error) = crate::starter_skills::install_store(&data_dir.join("skills")) {
+                warn!("could not install starter skills: {error}");
+            }
+        }
         // Manual pipes are bundled as templates. Scheduled pipes (idea-tracker,
         // obsidian-sync) are available from the pipe store instead.
         let tombstones = read_tombstones(&self.pipes_dir);
@@ -8926,6 +8947,19 @@ mod tests {
     use chrono::{TimeZone, Timelike};
     use std::path::Path;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn skill_learning_is_opt_in_and_bounded() {
+        let (config, _) =
+            parse_frontmatter(include_str!("../../assets/pipes/skill-learning/pipe.md")).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.agent, "pi");
+        assert_eq!(config.schedule, "every 6h");
+        assert_eq!(config.timeout, Some(180));
+        assert!(!config.subagent);
+        assert!(!config.history);
+        assert_eq!(config.artifacts[0].path, "output/latest-change.md");
+    }
 
     #[test]
     fn rotating_chatgpt_token_errors_require_reauthentication() {

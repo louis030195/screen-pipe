@@ -45,7 +45,6 @@ export function TrialActivationPaywall({
   );
   const [tokenResolved, setTokenResolved] = React.useState(Boolean(user?.token));
   const [error, setError] = React.useState<string | null>(null);
-  const [freeBusy, setFreeBusy] = React.useState(false);
   const [returnedWithoutStatus, setReturnedWithoutStatus] = React.useState(() =>
     ["pending", "returned"].includes(
       window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY) ?? "",
@@ -138,35 +137,6 @@ export function TrialActivationPaywall({
     }
   }, [checkoutToken]);
 
-  const continueWithFree = React.useCallback(async () => {
-    if (freeBusy) return;
-    submissionStartedRef.current = true;
-    setFreeBusy(true);
-    setError(null);
-    try {
-      const result = await commands.setOnboardingStep(
-        TRIAL_ACTIVATION_UNLOCKED_STEP,
-      );
-      if (result.status === "error") throw new Error(result.error);
-      window.sessionStorage.removeItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY);
-      posthog.capture("onboarding_plan_activated", {
-        experiment: "first-summary-card-trial-v1",
-        variant: "summary_first",
-        plan: "free",
-        confirmation: "free_no_card",
-        source: "checkout_dialog",
-      });
-    } catch (freeError) {
-      submissionStartedRef.current = false;
-      setFreeBusy(false);
-      setError(
-        freeError instanceof Error
-          ? freeError.message
-          : "could not continue with Free",
-      );
-    }
-  }, [freeBusy]);
-
   React.useEffect(() => {
     if (!open || !tokenResolved || !checkoutToken || returnedWithoutStatus) {
       return;
@@ -230,13 +200,6 @@ export function TrialActivationPaywall({
             loading screenpipe.com
           </p>
         )}
-        <Button
-          variant="ghost"
-          disabled={freeBusy}
-          onClick={() => void continueWithFree()}
-        >
-          {freeBusy ? "continuing with Free" : "continue with Free — no card"}
-        </Button>
       </DialogContent>
     </Dialog>
   );

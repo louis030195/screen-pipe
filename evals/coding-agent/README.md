@@ -9,9 +9,13 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 40 git-mined regressions. See
+The current app corpus contains 41 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest contributes 20 more.
+
+The MCP config symlink case grades Settings-side IO with synthetic files and
+real links on a symlink-capable host. Its platform path-resolution port is
+substituted; passing it does not establish native bridge or desktop acceptance.
 
 The regression inventory has an explicit owner and advisory/blocking policy.
 New cases may declare trigger paths for later change-aware selection. Validation

@@ -216,6 +216,7 @@ type ApiRequest = {
   url: string;
   authorization?: string;
   client?: string;
+  agent?: string;
 };
 
 async function searchContentThroughMcp(): Promise<{
@@ -229,6 +230,7 @@ async function searchContentThroughMcp(): Promise<{
       url: request.url || "",
       authorization: request.headers.authorization,
       client: request.headers["x-screenpipe-client"] as string | undefined,
+      agent: request.headers["x-screenpipe-agent"] as string | undefined,
     });
 
     response.setHeader("content-type", "application/json");
@@ -469,6 +471,7 @@ describe("stdio startup handshake", { timeout: INIT_DEADLINE_MS + 2_000 }, () =>
       method: "GET",
       authorization: "Bearer sp-boundary-e2e-key",
       client: "mcp",
+      agent: "codex",
     });
   });
 });

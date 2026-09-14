@@ -277,7 +277,7 @@ jobs:
       working-directory: ./apps/screenpipe-app-tauri
       run: bun run test:e2e:onboarding-background-ai-tools
 
-    - name: Verify clean Free onboarding without card capture
+    - name: Verify first-run onboarding and existing-owner checkout bypass
       shell: pwsh
       working-directory: ./apps/screenpipe-app-tauri
       run: bun run test:e2e:onboarding-first-run
@@ -929,7 +929,7 @@ jobs:
       working-directory: ./apps/screenpipe-app-tauri
       run: bun run test:e2e:onboarding-background-ai-tools
 
-    - name: Verify clean Free onboarding without card capture
+    - name: Verify first-run onboarding and existing-owner checkout bypass
       shell: bash
       working-directory: ./apps/screenpipe-app-tauri
       run: bun run test:e2e:onboarding-first-run

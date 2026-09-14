@@ -397,7 +397,10 @@ pub async fn get_activity_summary(
     if api_client.is_direct_api() && data_status == "ok" {
         analytics::capture_event_nonblocking(
             "qualified_value_event",
-            crate::qualified_value::api_outcome_properties(ApiOutcomeKind::ActivitySummary),
+            crate::qualified_value::api_outcome_properties(
+                ApiOutcomeKind::ActivitySummary,
+                api_client.agent_client(),
+            ),
         );
     }
 

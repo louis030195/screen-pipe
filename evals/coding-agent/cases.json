@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-10.1",
+  "dataset_version": "2026-09-11.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1238,6 +1238,52 @@
           }
         ],
         "command": "cargo test -p screenpipe-sqlite-coordinator --locked --test eval_operational_fault -- --test-threads=1"
+      }
+    },
+    {
+      "id": "app-mcp-config-symlink-preservation",
+      "name": "Preserve linked config files during explicit MCP setup",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "fa7ce9ab5fa8865b0a9c8c044368d8c76f4434cc",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6977"
+      },
+      "base_ref": "53049736dd78d2c12c1a326d89adb8f9b53ef831",
+      "oracle_ref": "fa7ce9ab5fa8865b0a9c8c044368d8c76f4434cc",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/ai-tools-mcp.ts",
+        "apps/screenpipe-app-tauri/lib/utils/tauri.ts",
+        "apps/screenpipe-app-tauri/src-tauri/src/skills.rs",
+        "crates/screenpipe-engine/src/cli/agent.rs"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/ai-tools-mcp.ts",
+        "apps/screenpipe-app-tauri/lib/utils/tauri.ts",
+        "apps/screenpipe-app-tauri/src-tauri/src/skills.rs",
+        "crates/screenpipe-engine/src/cli/agent.rs"
+      ],
+      "tags": ["regression", "escaped-failure", "mcp", "configuration", "symlink", "data-integrity", "false-positive"],
+      "prompt": "Explicit MCP connect and disconnect in Settings replace a symlinked config with a regular file, leaving its dotfiles target unchanged. Preserve absolute and relative link chains when updating Codex TOML or Cursor JSON configurations: update the actual target, keep unrelated settings and servers, and back up the previous target contents beside that target. Dangling links, loops, and resolution errors must fail without replacing the link or creating a fresh config. Ordinary missing files must remain creatable, invalid or unreadable configs must remain untouched, backups must stay bounded, and disconnect must remain idempotent. Keep the existing public connect/remove interfaces usable. This task covers Settings-side configuration IO at the platform path-resolution boundary, not native desktop acceptance or launch-time reconciliation.",
+      "agent_timeout_seconds": 1200,
+      "grader_dependency_links": [
+        {
+          "source_path": "apps/screenpipe-app-tauri/node_modules",
+          "destination_path": "apps/screenpipe-app-tauri/node_modules"
+        }
+      ],
+      "grader": {
+        "timeout_seconds": 300,
+        "fixtures": [
+          {
+            "source_path": "apps/screenpipe-app-tauri/lib/__tests__/ai-tools-mcp.test.ts"
+          },
+          {
+            "local_path": "graders/app-mcp-config-symlinks.test.ts",
+            "destination_path": "apps/screenpipe-app-tauri/lib/__tests__/eval-mcp-config-symlinks.test.ts"
+          }
+        ],
+        "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/__tests__/ai-tools-mcp.test.ts lib/__tests__/eval-mcp-config-symlinks.test.ts"
       }
     }
   ]

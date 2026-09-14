@@ -101,6 +101,7 @@ export function skillSpec({ home, bun, dataDir, port, skill }, machine = hostnam
     throw new Error("Screenpipe's local connection details are unavailable.");
   }
   const device = createHash("sha256").update(`${machine}\n${home}`).digest("hex").slice(0, 16);
+  skill = skill.replaceAll("X-Screenpipe-Agent: unknown", "X-Screenpipe-Agent: grokbot");
   const parameters = JSON.stringify({ bun, SCREENPIPE_DATA_DIR: dataDir, SCREENPIPE_LOCAL_API_URL: `http://127.0.0.1:${port}` }, null, 2);
   return {
     name: `Screenpipe on ${machine}`,
@@ -111,7 +112,54 @@ export function skillSpec({ home, bun, dataDir, port, skill }, machine = hostnam
   };
 }
 
+const STARTER_MARKER = /^<!-- screenpipe-starter-v1: ([a-f0-9]{64}) -->\n/;
+const API_REFERENCE_HEADING = "## API reference (execute on the local computer)";
+
+function fingerprint(spec, body) {
+  return createHash("sha256").update(JSON.stringify([spec.name, spec.description, spec.trigger ?? null, spec.sourceRef, body])).digest("hex");
+}
+
+function isUneditedStarter(row) {
+  const marker = typeof row.body === "string" && row.body.match(STARTER_MARKER);
+  return !!marker && marker[1] === fingerprint(row, row.body.slice(marker[0].length));
+}
+
+// All workflow text comes from the same compiled public registry used by the
+// local assistant installer. Learned/private device skills never enter here.
+export function skillSpecs(input, machine = hostname()) {
+  const api = skillSpec(input, machine);
+  const starters = input.starterSkills ?? [];
+  if (!Array.isArray(starters) || starters.length > 32) throw new Error("Invalid Screenpipe starter bundle.");
+  const names = new Set();
+  const specs = starters.map(entry => {
+    if (!Array.isArray(entry) || entry.length !== 2) throw new Error("Invalid Screenpipe starter bundle.");
+    const [name, markdown] = entry;
+    if (typeof name !== "string" || !/^screenpipe-[a-z0-9-]+$/.test(name) || names.has(name) ||
+        typeof markdown !== "string" || !markdown.trim() || markdown.length > 64_000) {
+      throw new Error("Invalid Screenpipe starter bundle.");
+    }
+    names.add(name);
+    const spec = {
+      name: `${name} on ${machine}`,
+      description: markdown.match(/^description: "([^"\n]+)"/m)?.[1] ?? `Screenpipe workflow: ${name}`,
+      trigger: null,
+      sourceRef: `${api.sourceRef}/skills/${name}`,
+    };
+    // Repeat the local-computer boundary in each independently selected skill.
+    // The API reference itself stays in the existing companion API skill.
+    const context = api.body.slice(0, api.body.indexOf(API_REFERENCE_HEADING));
+    const body = `${context}Use the companion skill "${api.name}" for the API reference. Execute Screenpipe tools and save private results on that same local computer. Do not create a cloud schedule or upload private learned skills merely because this workflow is installed.\n\n## Workflow\n\n${markdown}`;
+    return { ...spec, body: `<!-- screenpipe-starter-v1: ${fingerprint(spec, body)} -->\n${body}` };
+  });
+  return [api, ...specs];
+}
+
 export async function reconcileSkill(call, spec, action) {
+  return reconcileSkills(call, [spec], action);
+}
+
+export async function reconcileSkills(call, specs, action) {
+  if (!["status", "connect", "disconnect"].includes(action) || !specs.length) throw new Error("Invalid Grok Bot connection action.");
   const agents = await call("listAgents");
   if (!Array.isArray(agents)) throw new Error("Grok Bot returned an unsupported Bot list.");
   const agent = agents.find((item) => typeof item.id === "string" && !item.isGroup);
@@ -121,31 +169,59 @@ export async function reconcileSkill(call, spec, action) {
     if (!Array.isArray(rows)) throw new Error("Grok Bot returned an unsupported skill list.");
     return rows;
   };
-  const ours = (rows) => rows.filter((row) => row.sourceRef === spec.sourceRef && row.source === "workflow");
+  const ours = (rows, spec) => rows.filter((row) => row.sourceRef === spec.sourceRef && row.source === "workflow");
+  const starter = spec => spec.sourceRef.includes("/skills/");
+  const matches = (row, spec) => row.body === spec.body && row.description === spec.description &&
+    row.name === spec.name && (row.trigger ?? null) === spec.trigger;
   let rows = await read();
-  let existing = ours(rows);
   if (action === "disconnect") {
-    for (const row of existing) await call("deleteAgentWorkflow", { id: agent.id, workflowId: row.id });
-    rows = await read();
-    if (ours(rows).length) throw new Error("Grok Bot has not removed the Screenpipe skill yet. Retry disconnecting.");
-    return { detected: true, connected: false, message: "Automatic installation is off. The Screenpipe skill was removed from Grok Bot." };
-  }
-  if (action === "connect") {
-    if (existing.length > 1) throw new Error("Multiple Screenpipe skills were found. Review them in Grok Bot before reconnecting.");
-    if (!existing.length) {
-      if (rows.some((row) => row.name === spec.name || row.sourceRef === spec.sourceRef)) {
-        throw new Error("An existing skill uses Screenpipe's name. Rename it in Grok Bot before connecting.");
+    const removed = new Set();
+    let preserved = 0;
+    for (const spec of specs) {
+      for (const row of ours(rows, spec)) {
+        if (starter(spec) && !isUneditedStarter(row)) { preserved++; continue; }
+        await call("deleteAgentWorkflow", { id: agent.id, workflowId: row.id });
+        removed.add(row.id);
       }
-      await call("createAgentWorkflow", { id: agent.id, spec });
-    } else if (existing[0].body !== spec.body || existing[0].description !== spec.description) {
-      await call("updateAgentWorkflow", { id: agent.id, workflowId: existing[0].id, spec });
     }
     rows = await read();
-    existing = ours(rows);
-    if (existing.length !== 1 || existing[0].body !== spec.body) throw new Error("Grok Bot has not confirmed the Screenpipe skill yet. Retry connecting.");
+    if (rows.some(row => removed.has(row.id))) throw new Error("Grok Bot has not removed the Screenpipe skills yet. Retry disconnecting.");
+    return { detected: true, connected: false, preserved, message: preserved ?
+      "Automatic installation is off. Edited starter skills were kept in Grok Bot." :
+      "Automatic installation is off. The Screenpipe skills were removed from Grok Bot." };
   }
-  const connected = existing.length === 1 && existing[0].body === spec.body;
-  return { detected: true, connected, message: connected ? "Screenpipe's skill is installed in Grok Bot. Local retrieval follows your Grok Bot computer permissions." : "Screenpipe's skill is not installed in Grok Bot." };
+  if (action === "connect") {
+    // Check the entire bundle before any mutation. A sourceRef alone never
+    // authorizes replacing an unmarked or user-edited starter skill.
+    for (const spec of specs) {
+      const existing = ours(rows, spec);
+      if (existing.length > 1) throw new Error("Multiple Screenpipe skills were found. Review them in Grok Bot before reconnecting.");
+      if (!existing.length && rows.some(row => row.name === spec.name || row.sourceRef === spec.sourceRef)) {
+        throw new Error("An existing skill uses Screenpipe's name. Rename it in Grok Bot before connecting.");
+      }
+      if (starter(spec) && existing.length && !isUneditedStarter(existing[0])) {
+        throw new Error("A Screenpipe starter skill was edited or is not managed. It was preserved; review it in Grok Bot before reconnecting.");
+      }
+    }
+    for (const spec of specs) {
+      const existing = ours(rows, spec);
+      if (!existing.length) await call("createAgentWorkflow", { id: agent.id, spec });
+      else if (!matches(existing[0], spec)) await call("updateAgentWorkflow", { id: agent.id, workflowId: existing[0].id, spec });
+    }
+    // A dropped request or native timeout may leave a partial bundle. Retry
+    // discovers those copies instead of duplicating them; only full read-back
+    // counts as connected.
+    rows = await read();
+  }
+  const installed = specs.filter(spec => {
+    const existing = ours(rows, spec);
+    return existing.length === 1 && matches(existing[0], spec);
+  }).length;
+  const connected = installed === specs.length;
+  if (action === "connect" && !connected) throw new Error("Grok Bot has not confirmed the Screenpipe skills yet. Retry connecting.");
+  return { detected: true, connected, installed, total: specs.length, message: connected ?
+    "Screenpipe skills are installed in Grok Bot. Local retrieval follows your Grok Bot computer permissions." :
+    "Screenpipe's skill installation is incomplete in Grok Bot." };
 }
 
 export async function runInstaller(input) {
@@ -162,7 +238,7 @@ export async function runInstaller(input) {
     if (!response.ok) throw new Error(`Grok Bot could not complete setup (HTTP ${response.status}). Open Grok Bot and retry.`);
     try { return await response.json(); } catch { throw new Error("Grok Bot returned an unsupported response."); }
   };
-  return reconcileSkill(call, skillSpec(input), input.action);
+  return reconcileSkills(call, skillSpecs(input), input.action);
 }
 
 // Native caller passes only non-secret connection parameters over stdin.

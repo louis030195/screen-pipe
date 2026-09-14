@@ -1309,6 +1309,13 @@ class BackendHttpError extends Error {
   }
 }
 
+function currentMcpClient() {
+  return resolveMcpClient(
+    process.env.SCREENPIPE_MCP_CLIENT,
+    server.getClientVersion()?.name,
+  );
+}
+
 async function fetchAPI(
   endpoint: string,
   options: RequestInit = {}
@@ -1324,6 +1331,7 @@ async function fetchAPI(
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         "x-screenpipe-client": "mcp",
+        "x-screenpipe-agent": currentMcpClient(),
         ...options.headers,
       },
     });
@@ -1353,11 +1361,7 @@ const qualifiedValue = createMcpQualifiedValueReporter((payload) =>
     method: "POST",
     body: JSON.stringify(payload),
   }),
-  () =>
-    resolveMcpClient(
-      process.env.SCREENPIPE_MCP_CLIENT,
-      server.getClientVersion()?.name,
-    ),
+  currentMcpClient,
 );
 
 // Zone label for a timestamp's HH:MM slice. The server serializes timestamps in

@@ -553,6 +553,7 @@ fn capture_direct_api_search_value(client: &ExplicitApiClient, result_count: usi
             "qualified_value_event",
             crate::qualified_value::api_outcome_properties(
                 crate::qualified_value::ApiOutcomeKind::SearchResult,
+                client.agent_client(),
             ),
         );
     }
@@ -1487,6 +1488,7 @@ pub(crate) async fn search(
             "query_length": query.q.as_ref().map(|q| q.len()).unwrap_or(0),
             "content_type": format!("{:?}", query.content_type),
             "request_source": api_client.source_label(),
+            "agent_client": api_client.agent_client().as_str(),
             "has_date_filter": query.start_time.is_some() || query.end_time.is_some(),
             "has_app_filter": query.app_name.is_some(),
             "result_count": total,

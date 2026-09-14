@@ -14,12 +14,17 @@ Local REST API at `http://localhost:3030`. Full reference (60+ endpoints): https
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   "http://localhost:3030/..."
 ```
 
 The fixed `X-Screenpipe-Client: api` value attributes a successful, nonempty
 external retrieval to the API surface. Never put an agent name, customer name,
 project, prompt, or other dynamic value in this header.
+Include both attribution headers above on REST retrievals. The installer sets
+`X-Screenpipe-Agent` to a fixed app identifier; preserve that value. If this is
+an unconfigured reference, leave it as `unknown`. Never substitute a project,
+user, model, prompt, or other dynamic identifier.
 
 The `$SCREENPIPE_LOCAL_API_KEY` env var is already set in your environment. Without it you get 403. The only exception is `/health` (no auth needed).
 
@@ -36,6 +41,7 @@ For the list endpoints (`/search`, `/elements`, `/frames/{id}/elements`) you can
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   "http://localhost:3030/search?q=QUERY&content_type=all&limit=10&start_time=1h%20ago"
 ```
 
@@ -172,6 +178,7 @@ supplies the signed-in identity.
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   "http://localhost:3030/activity-summary?start_time=1h%20ago&end_time=now"
 ```
 

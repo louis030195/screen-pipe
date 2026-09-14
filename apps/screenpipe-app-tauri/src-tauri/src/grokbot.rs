@@ -29,7 +29,8 @@ async fn run_bridge(
     let data_dir = crate::log_files::get_active_data_dir(app.clone()).await?;
     let api = crate::recording::local_api_context_from_app(app);
     let input = json!({ "home": home, "bun": bun, "dataDir": data_dir,
-        "port": api.port, "skill": API_SKILL, "action": action });
+        "port": api.port, "skill": API_SKILL,
+        "starterSkills": screenpipe_core::starter_skills::STARTER_SKILLS, "action": action });
     run_bridge_input(bun, &input).await
 }
 
@@ -113,22 +114,102 @@ pub async fn grokbot_connection(app: AppHandle, action: String) -> Result<Value,
 }
 
 pub fn start_background(app: AppHandle, home: PathBuf, bun: PathBuf) {
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        return; // The installer has no credential adapter for other platforms.
+    }
     tauri::async_runtime::spawn(async move {
-        // The existing AI-tool home isolation applies to this integration too.
-        // A recently installed or signed-out Grok Bot gets time to start.
-        for delay in [0, 15, 60] {
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+        let app_data = grokbot_app_data_in(&home);
+        let mut last_error = None;
+        // Retry absent/signed-out installations for this session, stopping only
+        // on confirmed setup or opt-out. Every app launch verifies setup again.
+        for delay in [Duration::ZERO, Duration::from_secs(15)]
+            .into_iter()
+            .chain(std::iter::repeat(crate::skills::AI_TOOL_CHECK_INTERVAL))
+        {
+            tokio::time::sleep(delay).await;
+            // No Bun process, keychain access or network request while the app
+            // hasn't created its account files. Honor isolated dev/E2E homes.
+            if !grokbot_account_files_exist(&app_data).await {
+                continue;
+            }
             match connection_in(&app, &home, &bun, "connect", true).await {
-                Ok(_) => return,
-                Err(_) => tracing::info!("Grok Bot automatic skill installation is waiting for the app; retry is available in Connections"),
+                Ok(result) if background_setup_finished(&result) => return,
+                Ok(_) => last_error = None,
+                Err(error) => {
+                    if last_error.as_ref() != Some(&error) {
+                        tracing::info!("Grok Bot automatic skill installation is waiting for the app; retry is available in Connections");
+                    }
+                    last_error = Some(error);
+                }
             }
         }
     });
 }
 
+fn grokbot_app_data_in(home: &Path) -> PathBuf {
+    // Match the bridge's appDataPath, including platform config overrides only
+    // for the real home. Fixtures and isolated dev builds never use real data.
+    #[cfg(target_os = "windows")]
+    if dirs::home_dir().as_deref() == Some(home) {
+        if let Some(config) = std::env::var_os("APPDATA").filter(|path| !path.is_empty()) {
+            return PathBuf::from(config).join("Grok Bot");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let config = home.join("Library/Application Support");
+    #[cfg(target_os = "windows")]
+    let config = home.join("AppData/Roaming");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let config = home.join(".config");
+    config.join("Grok Bot")
+}
+
+async fn grokbot_account_files_exist(app_data: &Path) -> bool {
+    for name in ["sand-secrets.json", "gateway-descriptor.json"] {
+        if !tokio::fs::try_exists(app_data.join(name))
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn background_setup_finished(result: &Value) -> bool {
+    result["connected"] == true || result["optedOut"] == true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn later_grokbot_install_waits_for_account_files_in_the_isolated_home() {
+        let home = tempfile::tempdir().unwrap();
+        let app_data = grokbot_app_data_in(home.path());
+        assert!(app_data.starts_with(home.path()));
+        assert!(!grokbot_account_files_exist(&app_data).await);
+        std::fs::create_dir_all(&app_data).unwrap();
+        std::fs::write(app_data.join("sand-secrets.json"), "{}").unwrap();
+        assert!(!grokbot_account_files_exist(&app_data).await);
+        std::fs::write(app_data.join("gateway-descriptor.json"), "{}").unwrap();
+        assert!(grokbot_account_files_exist(&app_data).await);
+    }
+
+    #[test]
+    fn grokbot_background_stops_only_after_confirmation_or_opt_out() {
+        assert!(!background_setup_finished(
+            &json!({"detected": false, "connected": false})
+        ));
+        assert!(!background_setup_finished(
+            &json!({"detected": true, "connected": false})
+        ));
+        assert!(background_setup_finished(&json!({"connected": true})));
+        assert!(background_setup_finished(
+            &json!({"connected": false, "optedOut": true})
+        ));
+    }
 
     #[tokio::test]
     async fn bundled_bridge_executes_with_an_isolated_home_without_connecting_real_accounts() {

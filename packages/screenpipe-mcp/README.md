@@ -8,6 +8,35 @@ https://github.com/user-attachments/assets/7466a689-7703-4f0b-b3e1-b1cb9ed70cff
 
 MCP server for screenpipe - search your screen recordings, audio transcriptions, and control your computer with AI.
 
+## Usage attribution
+
+When Screenpipe analytics are enabled, successful nonempty retrievals produce
+`qualified_value_event` with `surface` (`api` or `mcp`) and `agent_client`.
+Supported app identifiers are `claude`, `chatgpt`, `codex`, `cursor`, `gemini`,
+`openclaw`, `hermes`, `runner`, `windsurf`, `grok`, and `grokbot`. Claude Desktop
+and Claude Code share the existing `claude` bucket. This identifies the caller,
+not the app appearing in a recording.
+
+MCP uses `SCREENPIPE_MCP_CLIENT` when it names a supported app, falling back to
+the initialization handshake's client name. HTTP sessions resolve independently.
+Only the fixed identifier is forwarded; raw client names are never analytics
+properties. Unrecognized MCP clients remain `unknown`.
+
+Installed REST skills send `X-Screenpipe-Client: api` and a fixed
+`X-Screenpipe-Agent` header for their target app. Other API clients can send the
+same headers. Missing or unrecognized app identifiers retain the legacy
+`direct_api` bucket on qualified-value events. `search_performed` also includes
+the fixed `agent_client` (`unknown` when unidentified), alongside `request_source`.
+These are self-reported identifiers, not verified app identities; copied skills
+and callers that omit the headers cannot be reliably attributed. Historical
+generic API events cannot be assigned an app retroactively.
+
+Attribution adds fields to existing events and uses the existing analytics
+opt-out. It does not scan running apps or send prompts, search text, or raw
+client names. HTTP MCP now reports successful searches through the same
+best-effort local telemetry endpoint as stdio MCP; empty/failed searches do not
+produce qualified-value events.
+
 ## Installation
 
 ### Option 1: The screenpipe desktop app (Recommended)

@@ -49,6 +49,18 @@ describe("createMcpQualifiedValueReporter", () => {
     expect(classifyMcpClientName("private-customer-project")).toBe("unknown");
   });
 
+  it.each([
+    ["claude-code", "Claude Code", "claude"],
+    ["claude-desktop", "Claude Desktop", "claude"],
+    ["chatgpt", "ChatGPT", "chatgpt"],
+    ["gemini", "gemini-cli", "gemini"],
+    ["runner", "Runner", "runner"],
+    ["grokbot", "Grok Bot", "grokbot"],
+  ])("recognizes configured %s and its handshake name", (configured, protocol, expected) => {
+    expect(resolveMcpClient(configured, "unrecognized-client")).toBe(expected);
+    expect(resolveMcpClient(undefined, protocol)).toBe(expected);
+  });
+
   it("prefers an explicit safe client over the protocol client name", () => {
     expect(resolveMcpClient("hermes", "Claude Desktop")).toBe("hermes");
     expect(resolveMcpClient("unknown", "Claude Desktop")).toBe("claude");

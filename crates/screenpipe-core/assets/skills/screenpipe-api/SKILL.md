@@ -34,12 +34,17 @@ Screenpipe instance.
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/..."
 ```
 
 The fixed `X-Screenpipe-Client: api` value attributes a successful, nonempty
 external retrieval to the API surface. Never put an agent name, customer name,
 project, prompt, or other dynamic value in this header.
+Include both attribution headers above on REST retrievals. The installer sets
+`X-Screenpipe-Agent` to a fixed app identifier; preserve that value. If this is
+an unconfigured reference, leave it as `unknown`. Never substitute a project,
+user, model, prompt, or other dynamic identifier.
 
 No-auth endpoints: `/health`, `/ws/health`, `/audio/device/status`, `/connections/oauth/callback`, `/frames/*`, `/notify`, `/pipes/store/*`.
 
@@ -69,6 +74,7 @@ Default broad-context call. Bundles apps, windows, key_texts, audio, edited_file
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/activity-summary?start_time=30m%20ago&end_time=now"
 ```
 
@@ -87,6 +93,7 @@ Use when `/activity-summary` says `ok` but you need verbatim quotes, media paths
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   -o /tmp/sp.json \
   "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/search?q=QUERY&content_type=all&limit=10&start_time=1h%20ago&fields=type,content.app_name,content.text,content.transcription,content.timestamp"
 wc -c /tmp/sp.json && head -c 2000 /tmp/sp.json
@@ -121,6 +128,7 @@ Single `content_type` means uniform rows, so add `format=csv` too:
 ```bash
 curl -H "Authorization: Bearer $SCREENPIPE_LOCAL_API_KEY" \
   -H "X-Screenpipe-Client: api" \
+  -H "X-Screenpipe-Agent: unknown" \
   -o /tmp/sp.csv \
   "${SCREENPIPE_LOCAL_API_URL:-http://localhost:3030}/search?content_type=ocr&limit=20&start_time=2h%20ago&format=csv&fields=content.timestamp,content.app_name,content.text"
 head -20 /tmp/sp.csv

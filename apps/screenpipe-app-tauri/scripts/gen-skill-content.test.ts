@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  SCREENPIPE_STARTER_SKILLS,
   SCREENPIPE_API_SKILL_MD,
   SCREENPIPE_CLI_SKILL_MD,
 } from "../lib/generated/screenpipe-skills";
@@ -43,4 +44,17 @@ describe("generated skill content", () => {
     expect(SCREENPIPE_API_SKILL_MD).toBe(apiSkill);
     expect(SCREENPIPE_CLI_SKILL_MD).toBe(cliSkill);
   });
+});
+
+// The UI catalog must describe exactly the skills the native shared installer ships.
+it("keeps the public starter catalog aligned with native installation", async () => {
+  const root = path.resolve(import.meta.dirname, "../../..");
+  const registry = await readFile(path.join(root, "crates/screenpipe-core/src/starter_skills.rs"), "utf8");
+  const names = [...registry.matchAll(/"(screenpipe-[^"]+)",\s*include_str!\(/g)].map(m => m[1]).sort();
+  expect(SCREENPIPE_STARTER_SKILLS.map(s => s.name)).toEqual(names);
+  for (const skill of SCREENPIPE_STARTER_SKILLS) {
+    const body = await readFile(path.join(root, "crates/screenpipe-core/assets/skills", skill.name, "SKILL.md"), "utf8");
+    expect(body).toContain(`description: "${skill.description}"`);
+    expect(body).not.toMatch(/\/Users\/|github_pat_|ghp_|xoxb-/i);
+  }
 });

@@ -17,8 +17,6 @@ const mocks = vi.hoisted(() => ({
   view: {} as LearningWindowView,
   emit: vi.fn().mockResolvedValue(undefined),
   completeOnboarding: vi.fn().mockResolvedValue(undefined),
-  setOnboardingStep: vi.fn().mockResolvedValue({ status: "ok", data: null }),
-  capture: vi.fn(),
   handoff: {
     targets: [],
     resolved: false,
@@ -50,12 +48,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: mocks.emit,
   listen: vi.fn(async () => () => {}),
 }));
-vi.mock("posthog-js", () => ({ default: { capture: mocks.capture } }));
 vi.mock("@/lib/utils/tauri", () => ({
-  commands: {
-    completeOnboarding: mocks.completeOnboarding,
-    setOnboardingStep: mocks.setOnboardingStep,
-  },
+  commands: { completeOnboarding: mocks.completeOnboarding },
 }));
 
 vi.mock("@/lib/hooks/use-settings", () => ({
@@ -175,26 +169,6 @@ describe("trial activation summary experience", () => {
     expect(
       screen.getByTestId("trial-activation-start-trial").parentElement,
     ).toHaveClass("pointer-events-auto");
-  });
-
-  it("unlocks the full app when the user continues with Free", async () => {
-    render(<TrialActivationUnlockPrompt onStartTrial={vi.fn()} />);
-
-    fireEvent.click(screen.getByTestId("trial-activation-continue-free"));
-
-    await waitFor(() =>
-      expect(mocks.setOnboardingStep).toHaveBeenCalledWith(
-        "trial-activation-v1-unlocked",
-      ),
-    );
-    expect(mocks.capture).toHaveBeenCalledWith(
-      "onboarding_plan_activated",
-      expect.objectContaining({
-        plan: "free",
-        confirmation: "free_no_card",
-        source: "summary_lock",
-      }),
-    );
   });
 
   it("supports an inline CTA beside native product surfaces", () => {

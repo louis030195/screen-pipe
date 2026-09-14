@@ -35,7 +35,7 @@ export default function PlanSelectionStep({
   const { settings, loadUser } = useSettings();
   const user = settings.user as AppUser | null | undefined;
   const [returnStatus] = useState(checkoutStatus);
-  const [busy, setBusy] = useState(returnStatus === "complete");
+  const [busy, setBusy] = useState(returnStatus !== "cancelled");
   const [error, setError] = useState<string | null>(null);
   const [returnRecoveryFinished, setReturnRecoveryFinished] = useState(
     returnStatus !== "complete",
@@ -81,6 +81,11 @@ export default function PlanSelectionStep({
       );
     }
   }, [userToken]);
+
+  useEffect(() => {
+    if (returnStatus !== null) return;
+    startCheckout();
+  }, [returnStatus, startCheckout]);
 
   useEffect(() => {
     if (returnStatus !== "complete") return;
@@ -199,16 +204,6 @@ export default function PlanSelectionStep({
     setRecoveryAttempt((attempt) => attempt + 1);
   }, [userToken]);
 
-  const continueWithFree = useCallback(() => {
-    if (advancedRef.current) return;
-    advancedRef.current = true;
-    posthog.capture("onboarding_plan_activated", {
-      plan: "free",
-      confirmation: "free_no_card",
-    });
-    void handleNextSlide();
-  }, [handleNextSlide]);
-
   if (returnStatus === "complete") {
     return (
       <div
@@ -257,29 +252,19 @@ export default function PlanSelectionStep({
           checkout was not completed
         </h2>
         <p className="mt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-          start the Business trial, or keep using Free without a card.
+          retry when you are ready to start your trial.
         </p>
         {error && (
           <p className="mt-4 font-mono text-[11px] text-destructive">{error}</p>
         )}
-        <div className="mt-5 flex flex-col gap-3">
-          <button
-            type="button"
-            onClick={startCheckout}
-            disabled={busy}
-            className="border bg-foreground px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-background transition-opacity hover:opacity-80 disabled:opacity-50"
-          >
-            {busy ? "opening checkout" : "retry secure checkout"}
-          </button>
-          <button
-            type="button"
-            data-testid="onboarding-plan-free"
-            onClick={continueWithFree}
-            className="border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
-          >
-            continue with Free — no card
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={startCheckout}
+          disabled={busy}
+          className="mt-5 border bg-foreground px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-background transition-opacity hover:opacity-80 disabled:opacity-50"
+        >
+          {busy ? "opening checkout" : "retry secure checkout"}
+        </button>
       </div>
     );
   }
@@ -287,31 +272,23 @@ export default function PlanSelectionStep({
   return (
     <div
       className="mx-auto w-full max-w-sm text-center"
-      data-testid="onboarding-plan-selection"
+      data-testid="onboarding-card-capture"
     >
-      <h2 className="text-xl font-semibold lowercase">choose how to start</h2>
-      <p className="mt-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-        Use Screenpipe Free without a card, or start a 7-day Business trial.
+      <h2 className="text-xl font-semibold lowercase">
+        opening secure checkout
+      </h2>
+      <p className="mt-3 font-mono text-[11px] text-muted-foreground">
+        {error || "loading screenpipe.com"}
       </p>
-      {error && <p className="mt-3 font-mono text-[11px] text-destructive">{error}</p>}
-      <div className="mt-5 flex flex-col gap-3">
+      {error && (
         <button
           type="button"
           onClick={startCheckout}
-          disabled={busy}
-          className="border bg-foreground px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-background transition-opacity hover:opacity-80 disabled:opacity-50"
+          className="mt-5 border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
         >
-          {busy ? "opening checkout" : "start 7-day Business trial"}
+          try again
         </button>
-        <button
-          type="button"
-          data-testid="onboarding-plan-free"
-          onClick={continueWithFree}
-          className="border px-4 py-2 font-mono text-[10px] uppercase tracking-widest transition-colors hover:bg-foreground hover:text-background"
-        >
-          continue with Free — no card
-        </button>
-      </div>
+      )}
     </div>
   );
 }

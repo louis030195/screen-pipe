@@ -18,11 +18,6 @@ import { appIconUrl } from "@/lib/first-run/recent-activity";
 import { AgentHandoffPicker } from "@/components/first-run/agent-handoff-picker";
 import { useFirstRunLearningWindow } from "@/components/first-run/learning-window-provider";
 import type { AgentHandoffTarget } from "@/lib/first-run/agent-handoff";
-import {
-  TRIAL_ACTIVATION_EXPERIMENT_FLAG,
-  TRIAL_ACTIVATION_TREATMENT,
-  TRIAL_ACTIVATION_UNLOCKED_STEP,
-} from "@/lib/first-run/trial-activation";
 
 function CapturedAppIcon({ app }: { app: FirstRunCapturedApp }) {
   const [failed, setFailed] = React.useState(false);
@@ -398,33 +393,6 @@ export function TrialActivationUnlockPrompt({
   onStartTrial: () => void;
   inline?: boolean;
 }) {
-  const [freeBusy, setFreeBusy] = React.useState(false);
-  const [freeError, setFreeError] = React.useState<string | null>(null);
-
-  const continueWithFree = async () => {
-    if (freeBusy) return;
-    setFreeBusy(true);
-    setFreeError(null);
-    try {
-      const result = await commands.setOnboardingStep(
-        TRIAL_ACTIVATION_UNLOCKED_STEP,
-      );
-      if (result.status === "error") throw new Error(result.error);
-      posthog.capture("onboarding_plan_activated", {
-        experiment: TRIAL_ACTIVATION_EXPERIMENT_FLAG,
-        variant: TRIAL_ACTIVATION_TREATMENT,
-        plan: "free",
-        confirmation: "free_no_card",
-        source: inline ? "timeline_lock" : "summary_lock",
-      });
-    } catch (error) {
-      setFreeBusy(false);
-      setFreeError(
-        error instanceof Error ? error.message : "could not continue with Free",
-      );
-    }
-  };
-
   return (
     <div
       className={
@@ -436,29 +404,13 @@ export function TrialActivationUnlockPrompt({
       data-layout={inline ? "inline" : "overlay"}
     >
       <div className="pointer-events-auto w-full max-w-xl border border-border bg-background p-5 text-center shadow-lg">
-        <div className="pointer-events-auto flex flex-col gap-3">
-          <Button
-            className="h-12 w-full px-8 text-sm"
-            data-testid="trial-activation-start-trial"
-            onClick={onStartTrial}
-          >
-            start your 7-day Business trial
-          </Button>
-          <Button
-            variant="outline"
-            className="h-11 w-full px-8 text-sm"
-            data-testid="trial-activation-continue-free"
-            disabled={freeBusy}
-            onClick={() => void continueWithFree()}
-          >
-            {freeBusy ? "continuing with Free" : "continue with Free — no card"}
-          </Button>
-        </div>
-        {freeError && (
-          <p className="mt-3 text-sm text-destructive" role="alert">
-            {freeError}
-          </p>
-        )}
+        <Button
+          className="h-12 w-full px-8 text-sm"
+          data-testid="trial-activation-start-trial"
+          onClick={onStartTrial}
+        >
+          start your 7-day free trial to unlock full access
+        </Button>
       </div>
     </div>
   );

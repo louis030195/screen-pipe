@@ -47,7 +47,6 @@ const seedFlags = E2E_SEED_FLAGS.split(",")
 const canRun = !seedFlags.includes("onboarding");
 
 const LEARNING_STORAGE_KEY = "screenpipe.first-run.learning-window.v1";
-const FORCE_BILLING_GATE_KEY = "screenpipe_e2e_force_billing_gate";
 const E2E_ACCOUNT_USER_KEY = "screenpipe_e2e_account_user";
 const E2E_ACCOUNT_USER_EVENT = "screenpipe-e2e-seed-account-user";
 const E2E_ACCOUNT_FIXTURE_ACTIVE_KEY =
@@ -434,9 +433,13 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     expect(text).not.toContain("what do you want first");
     expect(text).not.toContain("build my first live view");
 
-    // An authenticated Free install must still encounter final connection
-    // setup instead of depending on Home's learning timer.
+    // Final setup explains the defaults without requiring account connections.
+    expect(text).toContain("remember my work");
+    expect(text).toContain("recognize meeting speakers");
+    expect(text).toContain("start screenpipe");
     expect(text).toContain("connect gmail");
+    expect(text).toContain("connect calendar");
+    expect(text).toContain("email my daily recap");
     const match = text.match(/setup[^0-9]*(\d+)\s*of\s*(\d+)/);
     if (match) {
       const [, current, total] = match.map(Number);
@@ -444,80 +447,8 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     }
   });
 
-  it("continues from a verified Free account without asking for a card", async () => {
-    // Tauri's encrypted token store survives the app-data reset used between
-    // local E2E runs. Clear any synthetic token from a previous run before
-    // installing this fixture so the native store and settings stay aligned.
-    await seedFreeOnboardingUser();
-
-    try {
-      await gotoSlide("plan");
-      await waitForTestId("onboarding-plan-selection", 30_000);
-
-      const before = await bodyText();
-      expect(before).not.toContain("opening secure checkout");
-      expect(
-        await browser.execute(
-          () =>
-            !!document.querySelector(
-              '[data-testid="onboarding-card-capture"]',
-            ),
-        ),
-      ).toBe(false);
-
-      const continueFree = await waitForTestId("onboarding-plan-free");
-      await continueFree.waitForExist({ timeout: t(20_000) });
-      await continueFree.click();
-
-      await waitForTestId("onboarding-final-setup", 30_000);
-      const after = await bodyText();
-      expect(after).toContain("connect gmail");
-      expect(after).not.toContain("opening secure checkout");
-      expect(
-        await browser.execute(
-          () =>
-            !!document.querySelector(
-              '[data-testid="onboarding-card-capture"]',
-            ),
-        ),
-      ).toBe(false);
-
-      const filepath = await saveScreenshot("onboarding-free-no-card");
-      expect(existsSync(filepath)).toBe(true);
-
-      const finishSetup = await $("button*=continue");
-      await finishSetup.waitForExist({ timeout: t(20_000) });
-      await finishSetup.click();
-
-      await waitForWindowClosed("onboarding", t(30_000));
-      await waitForWindowHandle("home", t(30_000));
-      await browser.switchToWindow("home");
-
-      // E2E builds normally bypass the post-onboarding entitlement gate so
-      // the broad suite can exercise paid surfaces. Force that real gate back
-      // on and reload the already-mounted Home webview before asserting its
-      // navigation; otherwise Home could remain visible through the bypass.
-      await browser.execute((key: string) => {
-        window.localStorage.setItem(key, "1");
-        window.location.reload();
-      }, FORCE_BILLING_GATE_KEY);
-      await browser.pause(t(2_500));
-      await browser.switchToWindow("home");
-
-      const navHome = await $('[data-testid="nav-home"]');
-      await navHome.waitForExist({ timeout: t(30_000) });
-      expect(await navHome.isExisting()).toBe(true);
-    } finally {
-      await browser
-        .execute((key: string) => {
-          window.localStorage.removeItem(key);
-        }, FORCE_BILLING_GATE_KEY)
-        .catch(() => {});
-    }
-  });
-
   it("keeps lifetime ownership out of mandatory checkout", async () => {
-    // The preceding Free scenario installs a different synthetic token. Clear
+    // The preceding scenarios install a different synthetic token. Clear
     // it first so changing fixtures exercises a clean account transition.
     await clearOnboardingUser();
     await seedOnboardingUser({
@@ -539,8 +470,7 @@ const seedLearningWindow = async (state: Record<string, unknown>) => {
     });
 
     // Simulate an upgrade from a build that had already persisted "plan".
-    // The preceding Free test completed setup and closed this window, so reset
-    // the native completion flag before restoring the older in-progress step.
+    // Reset the native completion flag before restoring the in-progress step.
     await invokeOrThrow("reset_onboarding");
     // The current shipped route must map it back to engine instead of opening
     // a hosted checkout for an account that already has access.

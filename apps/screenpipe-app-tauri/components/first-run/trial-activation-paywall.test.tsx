@@ -68,7 +68,6 @@ beforeEach(() => {
   window.sessionStorage.clear();
   mocks.user = null;
   mocks.loadUser.mockResolvedValue(undefined);
-  mocks.setOnboardingStep.mockResolvedValue({ status: "ok", data: null });
   submitSpy = vi
     .spyOn(HTMLFormElement.prototype, "submit")
     .mockImplementation(() => undefined);
@@ -156,44 +155,5 @@ describe("TrialActivationPaywall", () => {
     expect(
       window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY),
     ).toBe("pending");
-  });
-
-  it("lets a user return from checkout and continue with Free", async () => {
-    mocks.user = {
-      token: "in-memory-token",
-      has_payment_method: false,
-      entitlement_source: "none",
-    };
-    window.sessionStorage.setItem(
-      TRIAL_ACTIVATION_CHECKOUT_STATE_KEY,
-      "pending",
-    );
-
-    render(<TrialActivationPaywall open locked />);
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "continue with Free — no card",
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.setOnboardingStep).toHaveBeenCalledWith(
-        "trial-activation-v1-unlocked",
-      ),
-    );
-    expect(submitSpy).not.toHaveBeenCalled();
-    await waitFor(() =>
-      expect(
-        window.sessionStorage.getItem(TRIAL_ACTIVATION_CHECKOUT_STATE_KEY),
-      ).toBeNull(),
-    );
-    expect(mocks.capture).toHaveBeenCalledWith(
-      "onboarding_plan_activated",
-      expect.objectContaining({
-        plan: "free",
-        confirmation: "free_no_card",
-        source: "checkout_dialog",
-      }),
-    );
   });
 });
