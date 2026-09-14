@@ -123,7 +123,7 @@ export function StorageMigrationGate({ offerMigration = false }: { offerMigratio
           {activity.available_bytes != null && <p>Free space: {migrationBytes(activity.available_bytes)}</p>}
         </div>
         <p className="border-t border-border pt-4 text-xs text-muted-foreground">
-          Space is recovered as each batch is verified. If interrupted, migration resumes on the next launch.
+          Space is recovered as each batch is verified. If interrupted, recording resumes with your saved preference. Migration waits for you to retry.
         </p>
       </div>
     </dialog>
