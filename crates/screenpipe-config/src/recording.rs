@@ -16,6 +16,18 @@ where
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// Treat an explicit JSON `null` as the type's `Default` value.
+/// Mirrors the identically-named helper in `store.rs` so Vec fields in
+/// `RecordingSettings` survive a store that persisted `null` instead of `[]`.
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 /// Older desktop builds persisted a single selected monitor as a string, while
 /// current builds persist an array. Accept both shapes so an upgrade preserves
 /// the user's selection instead of rejecting the entire settings store.
@@ -30,9 +42,13 @@ where
         String(String),
     }
 
-    Ok(match StringOrVec::deserialize(deserializer)? {
-        StringOrVec::Vec(ids) => ids,
-        StringOrVec::String(id) => vec![id],
+    // Treat an explicit JSON `null` as an empty list (same policy as the other
+    // Vec fields; a null means "no selection" not "invalid settings").
+    let opt = Option::<StringOrVec>::deserialize(deserializer)?;
+    Ok(match opt {
+        None => vec![],
+        Some(StringOrVec::Vec(ids)) => ids,
+        Some(StringOrVec::String(id)) => vec![id],
     })
 }
 
@@ -181,7 +197,7 @@ pub struct DomainRule {
     pub domain: String,
     #[serde(default)]
     pub include_subdomains: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub excluded_subdomains: Vec<String>,
 }
 
@@ -304,7 +320,11 @@ pub struct RecordingSettings {
     pub meeting_live_transcription_provider: String,
 
     /// Audio device names/IDs to capture from.
-    #[serde(rename = "audioDevices")]
+    #[serde(
+        rename = "audioDevices",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub audio_devices: Vec<String>,
 
     /// Automatically follow the system default audio devices.
@@ -398,7 +418,11 @@ pub struct RecordingSettings {
 
     /// Custom vocabulary for transcription biasing and word replacement.
     /// Previously stored in SettingsStore.extra["vocabularyWords"].
-    #[serde(rename = "vocabularyWords", default)]
+    #[serde(
+        rename = "vocabularyWords",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub vocabulary: Vec<VocabEntry>,
 
     // ── Vision ─────────────────────────────────────────────────────────
@@ -476,7 +500,11 @@ pub struct RecordingSettings {
     /// ("meet.google.com"). Use when one app trips the detector spuriously
     /// (an always-open Teams, a Discord call you don't want logged) but you
     /// still want Zoom/Meet/etc. detected. Empty = detect all known apps.
-    #[serde(rename = "ignoredMeetingApps", default)]
+    #[serde(
+        rename = "ignoredMeetingApps",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub ignored_meeting_apps: Vec<String>,
 
     // ── Mitsukeru fork: event-driven capture overrides ─────────────────
@@ -573,11 +601,19 @@ pub struct RecordingSettings {
 
     // ── Filters ────────────────────────────────────────────────────────
     /// Window titles to exclude from capture.
-    #[serde(rename = "ignoredWindows")]
+    #[serde(
+        rename = "ignoredWindows",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub ignored_windows: Vec<String>,
 
     /// Window titles to exclusively capture (empty = capture all).
-    #[serde(rename = "includedWindows")]
+    #[serde(
+        rename = "includedWindows",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub included_windows: Vec<String>,
 
     /// Browser URLs to exclude from capture. Existing string entries remain
@@ -643,6 +679,7 @@ pub struct RecordingSettings {
     pub record_while_locked: bool,
 
     /// Languages for transcription (ISO 639-1 codes).
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub languages: Vec<String>,
 
     // ── Privacy ────────────────────────────────────────────────────────
@@ -719,7 +756,8 @@ pub struct RecordingSettings {
     /// Addresses, Sensitive) as opt-in checkboxes.
     #[serde(
         rename = "piiRedactionLabels",
-        default = "default_pii_redaction_labels"
+        default = "default_pii_redaction_labels",
+        deserialize_with = "deserialize_null_as_default"
     )]
     pub pii_redaction_labels: Vec<String>,
 
@@ -734,7 +772,8 @@ pub struct RecordingSettings {
     /// `ui_element_value`). `full_text` is always redacted regardless.
     #[serde(
         rename = "piiRedactionColumns",
-        default = "default_pii_redaction_columns"
+        default = "default_pii_redaction_columns",
+        deserialize_with = "deserialize_null_as_default"
     )]
     pub pii_redaction_columns: Vec<String>,
 
@@ -838,7 +877,11 @@ pub struct RecordingSettings {
     pub schedule_enabled: bool,
 
     /// Per-day schedule rules (only used when schedule_enabled is true)
-    #[serde(rename = "scheduleRules", default)]
+    #[serde(
+        rename = "scheduleRules",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub schedule_rules: Vec<ScheduleRule>,
 
     /// Require authentication for remote (non-localhost) API access.
