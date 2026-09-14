@@ -772,7 +772,7 @@ async fn resume_after_failed_migration(app: &tauri::AppHandle, root: &Path) -> R
         .is_some_and(|server| !server.db.pool.is_closed());
     let capture_ready = !recording.capture_intended() || recording.capture.lock().await.is_some();
     if server_ready && capture_ready {
-        return Ok(());
+        return finish_recording_recovery(app).await;
     }
     // Preserve capture intent, including an explicit pause. Teardown also
     // clears the restart cooldown, whose deferred path requires a webview.
@@ -793,6 +793,26 @@ async fn resume_after_failed_migration(app: &tauri::AppHandle, root: &Path) -> R
         return Err("Recording did not resume.".into());
     }
     tracing::info!("recording restored after migration failure; migration remains blocked");
+    Ok(())
+}
+
+/// Once recovery has restored the saved intent, later recording controls own it.
+/// Retaining the migration preference would overwrite a subsequent user pause.
+pub(crate) async fn finish_recording_recovery(app: &tauri::AppHandle) -> Result<(), String> {
+    let root = selected_root(app)?;
+    if saved_migration_error(&root).is_none()
+        || saved_recording_preference(app, &root)?.is_none()
+    {
+        return Ok(());
+    }
+    let recording = app.state::<RecordingState>();
+    let ready = recording.server.lock().await.as_ref().is_some_and(|server| {
+        server.data_dir.canonicalize().ok().as_ref() == Some(&root)
+            && !server.db.pool.is_closed()
+    });
+    if ready && (!recording.capture_intended() || recording.capture.lock().await.is_some()) {
+        save_recording_preference(app, &root, None)?;
+    }
     Ok(())
 }
 
