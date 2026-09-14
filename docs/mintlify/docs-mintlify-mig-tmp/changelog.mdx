@@ -11,8 +11,16 @@ icon: "newspaper"
 
 ## week of september 7, 2026
 
+### new features
+
+- **Exclude specific apps from system-audio capture (macOS 14.4+)** — a new **Exclude apps from system audio** section in Settings → Recording lets you pick which apps screenpipe should skip when it records system audio. Pick apps from a Finder `.app` picker, review them in a chip list with app icons, then hit **Apply & Restart** to have the change take effect. The list is persisted and hot-reloads, so future launches keep the same exclusions without further action. Requires macOS 14.4 or later; on the first record after enabling, macOS shows an audio-capture prompt you'll need to allow. See [meeting transcription](/meeting-transcription) and [permissions](/permissions).
+- **Bring your own MCP servers into the AI agent** — screenpipe's chat agent can now call tools from MCP servers you've registered yourself, alongside the built-in ones. Any custom MCP server in your config is routed through the same agent surface, so you can mix your own tools with screenpipe's without running two chats. Failed servers still name themselves in the chat row so you know which one to fix. See [MCP server](/mcp-server).
+- **Cleaner microphone capture with VoiceProcessingIO (macOS, opt-in)** — microphone capture can now use Apple's VoiceProcessingIO audio unit, which applies system-level echo cancellation and noise suppression on Apple silicon. It's opt-in per device, so existing setups keep their current behaviour until you turn it on. Best for calls in noisy rooms or with speakers instead of headphones. See [meeting transcription](/meeting-transcription).
+
 ### bug fixes
 
+- **Electron apps get the full accessibility tree** — VS Code, Discord, Slack, and other Electron apps used to have their accessibility walk cut off partway through the window, so screen context could miss whole panes. The walker now resets its depth budget at each web-area boundary inside the window, so the full UI is captured on those apps. See [permissions](/permissions).
+- **USB audio devices no longer drop into silence on macOS** — plugging in a USB microphone or interface whose sample rate didn't match the system's used to send the input silent mid-recording. Sample-rate mismatches are now handled at the device layer, so USB inputs keep producing audio through the whole session. See [meeting transcription](/meeting-transcription).
 - **Signed-in accounts no longer get stuck blocked at launch** — screenpipe used to decide whether to start the recording engine from cached account data, so a subscribed account with stale or incomplete cached plan info could be blocked at startup until you re-authenticated. Screenpipe now re-verifies your account with the server (bounded to 10 seconds) before applying a cached denial, so valid subscriptions start recording right away. If that first check fails (for example, you're offline), the engine stays paused and resumes automatically once a later account refresh succeeds; signing out or pressing Stop cancels the pending resume. Already-verified accounts keep working offline as before. See [troubleshooting](/troubleshooting).
 
 ## week of august 10, 2026
