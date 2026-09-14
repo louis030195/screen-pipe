@@ -3237,8 +3237,11 @@ impl PipeManager {
             }
 
             config.name = dir_name.clone();
-            if let Some(&enabled) = local_overrides.get(&dir_name) {
-                config.enabled = enabled;
+            // Organization policy is authoritative over saved local toggles.
+            if !is_enterprise_managed(&config) {
+                if let Some(&enabled) = local_overrides.get(&dir_name) {
+                    config.enabled = enabled;
+                }
             }
             if let Some(destination) = local_run_destinations.get(&dir_name) {
                 config.run_in = destination.clone();
@@ -3259,6 +3262,48 @@ impl PipeManager {
                 warn!("failed to stop over-limit pipe '{}': {}", name, e);
             }
         }
+    }
+
+    async fn stop_disabled_managed_pipes(&self) {
+        let names: Vec<String> = self
+            .pipes
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, (config, _, _))| is_enterprise_managed(config) && !config.enabled)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in names {
+            if let Err(e) = self.stop_pipe(&name).await {
+                warn!("failed to stop disabled managed pipe '{}': {}", name, e);
+            }
+        }
+    }
+
+    /// Claim a run against the current policy, including after a scheduler queue
+    /// wait. Hold the config lock through registration so a concurrent reload
+    /// either rejects this run or finds its handle and requests cancellation.
+    async fn register_pipe_run(&self, name: &str, handle: ExecutionHandle) -> Result<()> {
+        let pipes = self.pipes.lock().await;
+        let (config, _, _) = pipes
+            .get(name)
+            .ok_or_else(|| self.pipe_not_found_error(name))?;
+        if is_enterprise_managed(config) && !config.enabled {
+            return Err(anyhow!(
+                "pipe '{}' is disabled on this device by your organization",
+                name
+            ));
+        }
+        let mut running = self.running.lock().await;
+        if running.contains_key(name) {
+            return Err(anyhow!(
+                "pipe '{}' is already running — you may already be executing inside this pipe. \
+                 Do NOT run `screenpipe pipe run` from within a pipe.",
+                name
+            ));
+        }
+        running.insert(name.to_string(), handle);
+        Ok(())
     }
 
     /// Scan `pipes_dir` for `*/pipe.md` and load configs.
@@ -3282,6 +3327,7 @@ impl PipeManager {
             pipes.extend(selected);
         }
         self.stop_suppressed_pipes(&suppressed).await;
+        self.stop_disabled_managed_pipes().await;
 
         info!("loaded {} pipes from {:?}", loaded_count, self.pipes_dir);
         if !suppressed.is_empty() {
@@ -3353,6 +3399,7 @@ impl PipeManager {
         }
 
         self.stop_suppressed_pipes(&suppressed).await;
+        self.stop_disabled_managed_pipes().await;
 
         // Update debounce timestamp
         *self.last_reload.lock().await = Instant::now();
@@ -3918,18 +3965,7 @@ impl PipeManager {
         let run_handle = handle.clone();
         let stop_requested = handle.stop_requested.clone();
 
-        // Mark as running
-        {
-            let mut running = self.running.lock().await;
-            if running.contains_key(name) {
-                return Err(anyhow!(
-                    "pipe '{}' is already running — you may already be executing inside this pipe. \
-                     Do NOT run `screenpipe pipe run` from within a pipe.",
-                    name
-                ));
-            }
-            running.insert(name.to_string(), handle);
-        }
+        self.register_pipe_run(name, handle).await?;
 
         // Defense-in-depth: check PID file (cross-process lock)
         if let Some(existing_pid) = read_pid_file(&self.pipes_dir, name) {
@@ -4542,18 +4578,7 @@ impl PipeManager {
             let run_handle = handle.clone();
             let stop_requested = handle.stop_requested.clone();
 
-            // Mark as running
-            {
-                let mut running = self.running.lock().await;
-                if running.contains_key(name) {
-                    return Err(anyhow!(
-                        "pipe '{}' is already running — you may already be executing inside this pipe. \
-                         Do NOT run `screenpipe pipe run` from within a pipe.",
-                        name
-                    ));
-                }
-                running.insert(name.to_string(), handle);
-            }
+            self.register_pipe_run(name, handle).await?;
 
             // Defense-in-depth: check PID file (cross-process lock)
             if let Some(existing_pid) = read_pid_file(&self.pipes_dir, name) {
@@ -6767,9 +6792,27 @@ impl PipeManager {
 
                         // Mark running + write PID file only after acquiring the permit,
                         // so the UI shows accurate state (not "running" while queued).
+                        if let Err(error) =
+                            fallback_runner.register_pipe_run(&pipe_name, handle).await
                         {
-                            let mut r = running_ref.lock().await;
-                            r.insert(pipe_name.clone(), handle);
+                            info!("scheduler: skipping pipe '{}': {}", pipe_name, error);
+                            if let (Some((event, key)), Some(store)) =
+                                (&claim_for_release, &store_ref)
+                            {
+                                if let Err(e) =
+                                    store.release_event_run(&pipe_name, event, key).await
+                                {
+                                    warn!(
+                                        "scheduler: could not release event claim for '{}': {}",
+                                        pipe_name, e
+                                    );
+                                }
+                            }
+                            if let Some(token) = pipe_token.take() {
+                                cleanup_pipe_token(&token, token_registry_ref.as_ref());
+                            }
+                            queued_ref.lock().await.remove(&pipe_name);
+                            return;
                         }
                         // Sentinel 0 — see start_pipe_background.
                         write_pid_file(&pipes_dir_for_mark, &pipe_name, 0);
@@ -11146,6 +11189,214 @@ Run the scheduled task.
         let (config, _) = parse_frontmatter(content).unwrap();
         assert!(is_enterprise_managed(&config));
         assert_eq!(config.preset, vec!["org-ai"]);
+    }
+
+    #[tokio::test]
+    async fn enterprise_managed_queued_run_rechecks_policy_before_execution() {
+        struct QueueExecutor {
+            release: tokio::sync::Notify,
+            attempts: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl AgentExecutor for QueueExecutor {
+            async fn run(
+                &self,
+                _prompt: &str,
+                _model: &str,
+                working_dir: &Path,
+                _provider: Option<&str>,
+                _provider_url: Option<&str>,
+                _provider_api_key: Option<&str>,
+                _shared_pid: Option<SharedPid>,
+                _continue_session: bool,
+            ) -> Result<AgentOutput> {
+                let name = working_dir
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                self.attempts.lock().unwrap().push(name.clone());
+                if name == "a-blocker" {
+                    self.release.notified().await;
+                }
+                Ok(AgentOutput {
+                    stdout: "done".into(),
+                    stderr: String::new(),
+                    success: true,
+                    pid: None,
+                })
+            }
+            fn kill(&self, _handle: &ExecutionHandle) -> Result<()> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn ensure_installed(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &str {
+                "queue-test"
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(QueueExecutor {
+            release: tokio::sync::Notify::new(),
+            attempts: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut executors: HashMap<String, Arc<dyn AgentExecutor>> = HashMap::new();
+        executors.insert("mock".into(), executor.clone());
+        for name in ["a-blocker", "b-managed", "z-probe"] {
+            let dir = temp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("pipe.md"), format!(
+                "---\nschedule: every 1m\nenabled: true\nagent: mock\nenterprise_managed: {}\n---\nTask",
+                name == "b-managed"
+            )).unwrap();
+        }
+        let mut manager = PipeManager::new(temp.path().to_path_buf(), executors, None, 0);
+        let queued = Arc::new(tokio::sync::Notify::new());
+        let queued_signal = queued.clone();
+        manager.set_scheduled_run_context(Arc::new(move |name| {
+            // The scheduler visits names in order: b-managed has been queued
+            // when it prepares z-probe. a-blocker holds the execution permit.
+            if name == "z-probe" {
+                queued_signal.notify_one();
+            }
+            None
+        }));
+        manager.load_pipes().await.unwrap();
+        manager.start_scheduler().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), queued.notified())
+            .await
+            .unwrap();
+
+        let path = temp.path().join("b-managed/pipe.md");
+        let content = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("enabled: true", "enabled: false");
+        std::fs::write(&path, content).unwrap();
+        manager.reload_pipes().await.unwrap();
+        executor.release.notify_one();
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if manager
+                    .logs
+                    .lock()
+                    .await
+                    .get("z-probe")
+                    .is_some_and(|logs| !logs.is_empty())
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        manager.stop_scheduler().await;
+        completed.unwrap();
+        assert_eq!(*executor.attempts.lock().unwrap(), ["a-blocker", "z-probe"]);
+        assert!(!manager.logs.lock().await.contains_key("b-managed"));
+        assert!(read_pid_file(temp.path(), "b-managed").is_none());
+    }
+
+    #[tokio::test]
+    async fn enterprise_managed_policy_overrides_saved_local_toggles() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipes_dir = temp.path().join("pipes");
+        for (name, managed, enabled, local) in [
+            ("cloud-only", true, false, true),
+            ("local-managed", true, true, false),
+            ("personal", false, false, true),
+        ] {
+            let dir = pipes_dir.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("pipe.md"), format!(
+                "---\nschedule: manual\nenabled: {enabled}\nenterprise_managed: {managed}\n---\nTask"
+            )).unwrap();
+            set_local_override(&pipes_dir, name, local).unwrap();
+        }
+        let manager = PipeManager::new(pipes_dir, HashMap::new(), None, 0);
+        manager.load_pipes().await.unwrap();
+        manager.reload_pipes().await.unwrap();
+        let pipes = manager.pipes.lock().await;
+        assert!(!pipes["cloud-only"].0.enabled);
+        assert!(pipes["local-managed"].0.enabled);
+        assert!(pipes["personal"].0.enabled);
+    }
+
+    #[tokio::test]
+    async fn enterprise_managed_disabled_pipe_rejects_manual_and_background_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let pipe_dir = temp.path().join("managed");
+        std::fs::create_dir_all(&pipe_dir).unwrap();
+        std::fs::write(
+            pipe_dir.join("pipe.md"),
+            "---\nschedule: manual\nenabled: false\nenterprise_managed: true\n---\nTask",
+        )
+        .unwrap();
+        let manager = PipeManager::new(temp.path().to_path_buf(), HashMap::new(), None, 0);
+        manager.load_pipes().await.unwrap();
+        for mutation in [PipeMutation::Run, PipeMutation::StartBackground] {
+            let error = invoke_pipe_mutation(&manager, mutation, "managed")
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("disabled on this device by your organization"));
+            assert!(manager.running.lock().await.is_empty());
+            assert!(read_pid_file(temp.path(), "managed").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn enterprise_managed_disable_stops_active_runs_on_load_and_reload() {
+        for reload in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let manager = PipeManager::new(temp.path().to_path_buf(), HashMap::new(), None, 0);
+            for (name, managed) in [("managed", true), ("personal", false)] {
+                let dir = temp.path().join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(
+                    dir.join("pipe.md"),
+                    format!(
+                    "---\nschedule: manual\nenabled: true\nenterprise_managed: {managed}\n---\nTask"
+                ),
+                )
+                .unwrap();
+            }
+            manager.load_pipes().await.unwrap();
+            let mut handles = Vec::new();
+            for name in ["managed", "personal"] {
+                let handle = ExecutionHandle::new(Arc::new(std::sync::atomic::AtomicU32::new(0)));
+                manager
+                    .register_pipe_run(name, handle.clone())
+                    .await
+                    .unwrap();
+                handles.push(handle);
+                let path = temp.path().join(name).join("pipe.md");
+                let content = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("enabled: true", "enabled: false");
+                std::fs::write(path, content).unwrap();
+            }
+            if reload {
+                manager.reload_pipes().await.unwrap();
+            } else {
+                manager.load_pipes().await.unwrap();
+            }
+            assert!(handles[0].stop_requested.load(Ordering::SeqCst));
+            assert_eq!(handles[0].current_pid(), 0); // stop is pending before a process exists
+            assert!(!handles[1].stop_requested.load(Ordering::SeqCst));
+            // A disabled personal pipe can still be run manually.
+            manager.running.lock().await.remove("personal");
+            manager
+                .register_pipe_run("personal", handles[1].clone())
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
