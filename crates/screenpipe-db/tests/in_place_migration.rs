@@ -538,6 +538,14 @@ async fn reuses_index_and_preserves_history_and_compact_backup() {
             .await
             .unwrap();
     assert_eq!(count, 48);
+    let original_schema: String = sqlx::query_scalar(
+        "SELECT sql FROM _storage_conversion_schema WHERE type='table' AND name='frames'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(original_schema.contains("accessibility_tree_json"));
+    assert!(!original_schema.contains("payload_detail_present"));
     let backup_root = tempfile::tempdir().unwrap();
     let backup = backup_root.path().join("backup");
     db.backup_to(backup.to_str().unwrap()).await.unwrap();
@@ -551,4 +559,16 @@ async fn reuses_index_and_preserves_history_and_compact_backup() {
             < source.len() / 2
     );
     db.close().await;
+    let exported = tempfile::tempdir().unwrap();
+    screenpipe_db::storage::export_sqlite(
+        root.path(),
+        &exported.path().join("db.sqlite"),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let imported = migrate(exported.path(), Default::default(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(imported.frames, 48);
 }

@@ -210,6 +210,9 @@ pub async fn export_sqlite(
         sqlx::raw_sql("DROP VIEW IF EXISTS _bulk_element_search; DROP TABLE IF EXISTS _bulk_element_lookup; DROP TABLE IF EXISTS _storage_revocation;").execute(&mut output).await?;
         super::bulk::export(&source,&mut output).await?;
         sqlx::raw_sql("DROP TABLE frames_fts; DROP TABLE frame_payloads; DROP TABLE payload_files; DROP TABLE upload_bindings; DROP TABLE storage_metadata; DROP TABLE _hybrid_migrations;").execute(&mut output).await?;
+        // A standalone export starts a new conversion if imported again. Its
+        // old completion checkpoints must not skip the new catalogs/backfills.
+        sqlx::raw_sql("DROP TABLE IF EXISTS _storage_conversion_steps; DROP TABLE IF EXISTS _storage_conversion_triggers; DROP TABLE IF EXISTS _storage_conversion_schema;").execute(&mut output).await?;
         // Hybrid construction adds these derived columns to the legacy schema.
         // Remove them from the private export before restoring bulky payloads,
         // so a later migration can construct its own catalog without collisions.

@@ -93,6 +93,9 @@ pub(super) async fn convert(
             sqlx::raw_sql("BEGIN EXCLUSIVE; COMMIT; CREATE TABLE IF NOT EXISTS _storage_conversion_steps(step TEXT PRIMARY KEY,last_id INTEGER);").execute(&mut *conn).await?;
             if !schema::converted_step(&mut conn, "original-triggers").await? {
                 let mut tx=conn.begin().await?;
+                // Preserve the source schema with the index, so provenance also
+                // survives compact backups after the outer journal is retired.
+                sqlx::raw_sql("CREATE TABLE _storage_conversion_schema(type TEXT NOT NULL,name TEXT NOT NULL,table_name TEXT NOT NULL,sql TEXT); INSERT INTO _storage_conversion_schema SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE '_storage_conversion_%';").execute(&mut *tx).await?;
                 sqlx::raw_sql("CREATE TABLE _storage_conversion_triggers(name TEXT PRIMARY KEY,sql TEXT NOT NULL,restore INTEGER NOT NULL DEFAULT 0); INSERT INTO _storage_conversion_triggers(name,sql) SELECT name,sql FROM sqlite_master WHERE type='trigger';").execute(&mut *tx).await?;
                 schema::finish_step(&mut tx,"original-triggers").await?;
                 tx.commit().await?;
