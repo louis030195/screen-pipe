@@ -5,12 +5,21 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { commands, type StorageMigrationActivity } from "@/lib/utils/tauri";
+import { migrationElapsed, StorageMigrationPrompt } from "./storage-migration-prompt";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 
 /** One blocker per webview, driven only by this native process's active operation. */
-export function StorageMigrationGate() {
-  const [activity, setActivity] = useState<StorageMigrationActivity>({ busy: false, message: "" });
+export function StorageMigrationGate({ offerMigration = false }: { offerMigration?: boolean }) {
+  const [activity, setActivity] = useState<StorageMigrationActivity>({ root: null, busy: false, message: "", error: null, completed: false, elapsed_seconds: 0, completed_records: null, total_records: null });
   const [unavailable, setUnavailable] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    setElapsed(activity.elapsed_seconds);
+    if (!activity.busy) return;
+    const observedAt = performance.now();
+    const timer = setInterval(() => setElapsed(activity.elapsed_seconds + Math.floor((performance.now() - observedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [activity.busy, activity.elapsed_seconds]);
   const revision = useRef(0);
   const dialog = useRef<HTMLDialogElement>(null);
   const busy = useRef(activity.busy);
@@ -71,7 +80,11 @@ export function StorageMigrationGate() {
     return () => { if (element.open) element.close(); };
   }, [activity.busy]);
 
-  if (!activity.busy) return null;
+  if (!activity.busy) return offerMigration ? <StorageMigrationPrompt activity={activity} /> : null;
+
+  const total = activity.total_records ?? 0;
+  const converted = activity.completed_records ?? 0;
+  const percentage = total > 0 ? Math.min(100, Math.floor(converted / total * 100)) : null;
 
   return (
     <dialog
@@ -90,13 +103,21 @@ export function StorageMigrationGate() {
         <div className="space-y-2">
           <h2 id="storage-migration-title" className="text-lg font-semibold">migrating storage</h2>
           <p id="storage-migration-description" className="text-sm text-muted-foreground">
-            Keep Screenpipe open. The app will be available when migration and verification finish.
+            Recording is paused while your history is converted and verified. It will resume automatically when finished. Keep Screenpipe open; your computer will stay awake.
           </p>
         </div>
         <div className="flex items-center gap-3 text-sm" role="status" aria-live="polite">
           <Loader2 className="h-5 w-5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
           <span>{unavailable ? "Waiting for migration status…" : `${activity.message || "Preparing migration"}…`}</span>
         </div>
+        {percentage !== null && <div className="space-y-2">
+          <div className="flex justify-between gap-4 text-sm tabular-nums">
+            <span>records converted</span><span>{percentage}%</span>
+          </div>
+          <progress aria-label="records converted" value={converted} max={total} className="h-2 w-full appearance-none [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary [&::-moz-progress-bar]:bg-primary" />
+          <p className="text-xs text-muted-foreground tabular-nums">{converted.toLocaleString()} of {total.toLocaleString()} records. Verification follows conversion.</p>
+        </div>}
+        <p className="text-sm tabular-nums">Elapsed: {migrationElapsed(elapsed)}</p>
         <p className="border-t border-border pt-4 text-xs text-muted-foreground">
           Your original database is being kept. Deleting it is a separate action after migration.
         </p>

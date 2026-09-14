@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Database } from "lucide-react";
 import { commands, type StorageMigrationStatus } from "@/lib/utils/tauri";
+import { StorageMigrationDescription } from "@/components/storage-migration-prompt";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -156,9 +157,7 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
             <AlertDialogHeader>
               <AlertDialogTitle>{status?.completed ? "finish switching storage?" : "migrate storage?"}</AlertDialogTitle>
               <AlertDialogDescription>
-                Screenpipe will pause recording, convert and verify your history, then restart on the new storage.
-                Large databases can take a while and need temporary free disk space. Keep the app open until it finishes.
-                Your original database will be kept. Deleting it is a separate action after the switch succeeds.
+                <StorageMigrationDescription />
               </AlertDialogDescription>
             </AlertDialogHeader>
             {error && <p className="text-xs text-destructive" role="alert">{error}</p>}
@@ -166,7 +165,7 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
               <AlertDialogCancel disabled={submitting}>keep current storage</AlertDialogCancel>
               <Button disabled={busy || !status?.can_migrate || migrationRoot !== status?.root}
                 onClick={() => { if (migrationRoot) void run(() => commands.startStorageMigration(migrationRoot)); }}>
-                {submitting ? "starting…" : "continue"}
+                {submitting ? "starting…" : "start now"}
               </Button>
             </AlertDialogFooter>
           </AlertDialogContent>

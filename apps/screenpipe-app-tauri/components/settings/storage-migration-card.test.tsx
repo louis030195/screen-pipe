@@ -47,8 +47,8 @@ describe("storage migration", () => {
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "migrate storage" }));
     expect(commands.startStorageMigration).not.toHaveBeenCalled();
-    expect(screen.getByText(/deleting it is a separate action/i)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "continue" }));
+    expect(screen.getByText(/deleting it is a separate, optional action/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "start now" }));
     await waitFor(() => expect(commands.startStorageMigration).toHaveBeenCalledWith("/fixture"));
     await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(true));
     expect(commands.deleteOriginalStorageDatabase).not.toHaveBeenCalled();

@@ -4,7 +4,10 @@
 //! Offline construction streams the frozen source into the final generation.
 //! Only one byte-bounded batch is staged before sealing and page reclamation.
 
-use super::{lifecycle::TableParity, storage_error, StorageBudget};
+use super::{
+    lifecycle::{MigrationProgress, TableParity},
+    storage_error, StorageBudget,
+};
 use crate::DatabaseManager;
 use futures::TryStreamExt;
 use sha2::{Digest, Sha256};
@@ -206,6 +209,7 @@ async fn insert(
 pub(super) async fn records(
     source: &DatabaseManager,
     candidate: &DatabaseManager,
+    progress: &(impl Fn(MigrationProgress) + Send + Sync),
 ) -> Result<Vec<TableParity>, sqlx::Error> {
     let storage = candidate.storage.as_ref().unwrap();
     let budget = &storage.descriptor.budget;
@@ -257,6 +261,25 @@ pub(super) async fn records(
         }
     }
     tables.push("sqlite_sequence".into());
+    let mut total_records = 0_u64;
+    for table in &tables {
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {}",
+            quote(table)
+        )))
+        .fetch_one(&source.pool)
+        .await?;
+        total_records += count as u64;
+    }
+    let mut completed_records = 0_u64;
+    let report = |completed_records| {
+        progress(MigrationProgress {
+            message: "converting and compressing recordings",
+            completed_records: Some(completed_records),
+            total_records: Some(total_records),
+        })
+    };
+    report(completed_records);
     let mut receipts = Vec::new();
     for table in tables {
         tracing::info!(%table, "streaming migration records");
@@ -309,12 +332,15 @@ pub(super) async fn records(
                 }
                 tx.commit().await?;
             }
-            count += rows.len() as u64;
+            let batch_count = rows.len() as u64;
+            count += batch_count;
             drop(rows);
             super::faults::checkpoint("migration_batch_staged");
             while candidate.seal_frame_payloads().await? != 0 {}
             reclaim(candidate).await?;
             super::faults::checkpoint("migration_batch_sealed");
+            completed_records += batch_count;
+            report(completed_records);
             after = Some(last);
         }
         if logical.contains(&table) {

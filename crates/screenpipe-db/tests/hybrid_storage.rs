@@ -879,10 +879,42 @@ async fn migration_streams_large_payloads_with_bounded_temporary_space() {
             }
         })
     };
-    let result = migrate(root.path(), Default::default(), options).await;
+    let updates = std::sync::Mutex::new(Vec::new());
+    let result = screenpipe_db::storage::migrate_with_progress(
+        root.path(),
+        Default::default(),
+        options,
+        |update| {
+            updates.lock().unwrap().push(update);
+        },
+    )
+    .await;
     done.store(true, Ordering::Relaxed);
     monitor.join().unwrap();
     let report = result.unwrap();
+    let updates = updates.into_inner().unwrap();
+    let counts: Vec<_> = updates
+        .iter()
+        .filter_map(|update| update.completed_records.zip(update.total_records))
+        .collect();
+    assert!(
+        counts.len() > 3,
+        "byte-bounded batches must report intermediate work"
+    );
+    assert_eq!(counts.first().unwrap().0, 0);
+    assert!(
+        counts.last().unwrap().1 >= 66,
+        "frames and elements contribute to the total"
+    );
+    assert!(counts
+        .windows(2)
+        .all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 == pair[1].1));
+    let (converted, total) = *counts.last().unwrap();
+    assert_eq!(converted, total);
+    assert!(
+        updates.last().unwrap().total_records.is_none(),
+        "conversion percentage must not pretend to measure verification or activation"
+    );
     let peak = peak.load(Ordering::Relaxed);
     eprintln!("streaming migration: source={} peak_candidate={} final_index={} parquet={} headroom={headroom}", original.len(), peak, report.index_bytes, report.payload_bytes);
     assert!(

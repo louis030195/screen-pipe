@@ -2,11 +2,12 @@
 // https://screenpipe.com
 
 use crate::{recording::RecordingState, store::SettingsStore};
-use screenpipe_db::storage::{migration_report, StorageDescriptor};
+use screenpipe_db::storage::{migration_report, MigrationProgress, StorageDescriptor};
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
+    time::Instant,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -16,6 +17,28 @@ struct Operation {
     busy: bool,
     message: String,
     error: Option<String>,
+    started_at: Option<Instant>,
+    elapsed_seconds: u64,
+    completed_records: Option<u64>,
+    total_records: Option<u64>,
+    completed: bool,
+}
+
+impl Operation {
+    fn activity(&self) -> StorageMigrationActivity {
+        StorageMigrationActivity {
+            root: self.root.as_ref().map(|root| root.display().to_string()),
+            busy: self.busy,
+            message: self.message.clone(),
+            error: self.error.clone(),
+            elapsed_seconds: self
+                .started_at
+                .map_or(self.elapsed_seconds, |start| start.elapsed().as_secs()),
+            completed_records: self.completed_records,
+            total_records: self.total_records,
+            completed: self.completed,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -23,8 +46,14 @@ pub struct StorageMigrationState(Mutex<Operation>);
 
 #[derive(Clone, Serialize, specta::Type)]
 pub struct StorageMigrationActivity {
+    pub root: Option<String>,
     pub busy: bool,
     pub message: String,
+    pub error: Option<String>,
+    pub elapsed_seconds: u64,
+    pub completed_records: Option<u64>,
+    pub total_records: Option<u64>,
+    pub completed: bool,
 }
 
 #[tauri::command]
@@ -33,10 +62,7 @@ pub fn get_storage_migration_activity(
     state: State<'_, StorageMigrationState>,
 ) -> StorageMigrationActivity {
     let operation = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    StorageMigrationActivity {
-        busy: operation.busy,
-        message: operation.message.clone(),
-    }
+    operation.activity()
 }
 
 fn update_operation(app: &tauri::AppHandle, update: impl FnOnce(&mut Operation)) {
@@ -44,10 +70,7 @@ fn update_operation(app: &tauri::AppHandle, update: impl FnOnce(&mut Operation))
     let activity = {
         let mut operation = state.0.lock().unwrap_or_else(|e| e.into_inner());
         update(&mut operation);
-        StorageMigrationActivity {
-            busy: operation.busy,
-            message: operation.message.clone(),
-        }
+        operation.activity()
     };
     let _ = app.emit("storage-migration-activity", activity);
 }
@@ -95,8 +118,12 @@ fn require_selected_root(app: &tauri::AppHandle, expected: &str) -> Result<PathB
     Ok(root)
 }
 
-fn progress(app: &tauri::AppHandle, message: &str) {
-    update_operation(app, |operation| operation.message = message.into());
+fn progress(app: &tauri::AppHandle, update: MigrationProgress) {
+    update_operation(app, |operation| {
+        operation.message = update.message.into();
+        operation.completed_records = update.completed_records;
+        operation.total_records = update.total_records;
+    });
 }
 
 #[tauri::command]
@@ -215,16 +242,22 @@ pub async fn start_storage_migration(
             .blocked_reason
             .unwrap_or_else(|| "Migration is unavailable in the current storage state.".into()));
     }
+    // Independent of the recording preference, which startup reapplies during switchover.
+    // Acquire before pausing so a failed wake lock never strands recording.
+    let awake = screenpipe_engine::power::KeepAwakeGuard::acquire()
+        .map_err(|error| format!("Could not prevent sleep. Migration has not started: {error}"))?;
     update_operation(&app, |operation| {
         *operation = Operation {
             root: Some(root.clone()),
             busy: true,
             message: "pausing recording".into(),
-            error: None,
+            started_at: Some(Instant::now()),
+            ..Default::default()
         };
     });
     tauri::async_runtime::spawn(async move {
         let _lifecycle = lifecycle;
+        let _awake = awake;
         let result = async {
             let recording = app.state::<RecordingState>();
             crate::recording::stop_screenpipe_inner(&recording).await?;
@@ -233,10 +266,15 @@ pub async fn start_storage_migration(
                     .await.map_err(|e| e.to_string())?;
             }
             require_selected_root(&app, &root.display().to_string())?;
-            progress(&app, "restarting screenpipe on the new storage");
+            progress(&app, MigrationProgress {
+                message: "resuming recording on the new storage",
+                completed_records: None,
+                total_records: None,
+            });
             crate::recording::spawn_screenpipe_inner(&recording, app.clone()).await?;
             let descriptor = StorageDescriptor::read(&root).map_err(|e| e.to_string())?
                 .ok_or("The new storage is not active. The original database has been kept.")?;
+            {
             let server = recording.server.lock().await;
             let server = server.as_ref().ok_or("Screenpipe has not restarted. The original database has been kept.")?;
             if server.data_dir.canonicalize().map_err(|e| e.to_string())? != root
@@ -244,12 +282,30 @@ pub async fn start_storage_migration(
                 return Err("Screenpipe has not switched to the new storage. The original database has been kept.".into());
             }
             server.db.query_raw_sql("SELECT id FROM frames LIMIT 1").await.map_err(|e| e.to_string())?;
+            }
+            if recording.capture_intended() && recording.capture.lock().await.is_none() {
+                return Err("Your history was migrated, but recording could not resume. Try again to finish restarting. The original database has been kept.".into());
+            }
             Ok::<_, String>(())
         }.await;
         update_operation(&app, |operation| {
+            operation.elapsed_seconds = operation.activity().elapsed_seconds;
+            operation.started_at = None;
             operation.busy = false;
+            operation.completed = result.is_ok();
             operation.error = result.err();
-            operation.message.clear();
+            operation.message = if operation.completed {
+                if app.state::<RecordingState>().capture_intended() {
+                    "Your history has been migrated and recording has resumed."
+                } else {
+                    "Your history has been migrated. Recording remains paused as you selected."
+                }
+            } else {
+                "Migration needs attention. Your original database has been kept."
+            }
+            .into();
+            operation.completed_records = None;
+            operation.total_records = None;
         });
     });
     Ok(())

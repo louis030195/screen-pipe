@@ -15,8 +15,8 @@ vi.mock("@/lib/hooks/use-tauri-event", () => ({
 }));
 import { StorageMigrationGate } from "./storage-migration-gate";
 
-const idle = { busy: false, message: "" };
-const running = { busy: true, message: "compressing recordings" };
+const idle: StorageMigrationActivity = { root: "/fixture", busy: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, completed: false };
+const running = { ...idle, busy: true, message: "compressing recordings" };
 const notify = (payload: StorageMigrationActivity) => act(() => mock.onActivity({ payload }));
 
 beforeEach(() => {
@@ -29,6 +29,20 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("app-wide migration modal", () => {
+  it("shows measured conversion counts and elapsed time, then clears the percentage during verification", async () => {
+    render(<StorageMigrationGate />);
+    await waitFor(() => expect(mock.getActivity).toHaveBeenCalled());
+    notify({ ...running, completed_records: 250, total_records: 1000, elapsed_seconds: 125 });
+    expect(screen.getByRole("progressbar")).toHaveAttribute("value", "250");
+    expect(screen.getByText("25%")).toBeTruthy();
+    expect(screen.getByText("Elapsed: 2m 5s")).toBeTruthy();
+    expect(screen.getByText(/250 of 1,000 records/)).toBeTruthy();
+    notify({ ...running, message: "checking storage and search", elapsed_seconds: 190 });
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText("Elapsed: 3m 10s")).toBeTruthy();
+    expect(screen.getByRole("dialog")).toHaveTextContent("resume automatically");
+  });
+
   it("blocks an already-running migration and stays mounted across page changes", async () => {
     mock.getActivity.mockResolvedValue(running);
     const app = render(<><StorageMigrationGate /><main>settings</main></>);
@@ -44,7 +58,7 @@ describe("app-wide migration modal", () => {
     render(<StorageMigrationGate />);
     await waitFor(() => expect(mock.getActivity).toHaveBeenCalled());
     notify(running);
-    notify({ busy: true, message: "restarting screenpipe on the new storage" });
+    notify({ ...running, message: "restarting screenpipe on the new storage" });
     expect(screen.getByRole("dialog")).toHaveTextContent("restarting screenpipe");
     notify(idle);
     expect(screen.queryByRole("dialog")).toBeNull();

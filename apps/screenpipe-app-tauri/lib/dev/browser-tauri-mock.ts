@@ -479,6 +479,13 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
     source_bytes: 13_000_000_000, migrated_bytes: null, can_migrate: true,
     can_cancel: false, can_delete_source: false, blocked_reason: null,
   };
+  let migrationStartedAt = 0;
+  let migrationActivity = {
+    root: null as string | null, busy: false, message: "", error: null as string | null,
+    elapsed_seconds: 0, completed_records: null as number | null,
+    total_records: null as number | null, completed: false,
+  };
+  const emitMigrationActivity = () => options.onEvent?.("storage-migration-activity", { ...migrationActivity });
   const stores = new Map<number, Map<string, unknown>>();
   const storePaths = new Map<string, number>();
   const warned = new Set<string>();
@@ -648,21 +655,44 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
       case "get_storage_migration_status":
         return { ...storageMigration };
       case "get_storage_migration_activity":
-        return { busy: storageMigration.busy, message: storageMigration.message };
+        return { ...migrationActivity, elapsed_seconds: migrationActivity.busy ? Math.floor((Date.now() - migrationStartedAt) / 1000) : migrationActivity.elapsed_seconds };
       case "start_storage_migration": {
-        storageMigration = { ...storageMigration, busy: true, can_migrate: false, pending: true, message: "compressing recordings" };
-        options.onEvent?.("storage-migration-activity", { busy: true, message: storageMigration.message });
-        setTimeout(() => {
-          if (options.scenario === "backend-error") {
-            storageMigration = { ...storageMigration, busy: false, can_migrate: true, can_cancel: true, message: "", error: "Migration paused because verification could not finish. Your original database has been kept." };
+        if (input.root !== storageMigration.root || storageMigration.busy) throw new Error("Storage changed or migration is already running.");
+        migrationStartedAt = Date.now();
+        storageMigration = { ...storageMigration, busy: true, can_migrate: false, pending: true, error: null };
+        migrationActivity = { ...migrationActivity, root: storageMigration.root, busy: true, completed: false, error: null, message: "converting and compressing recordings", elapsed_seconds: 0, completed_records: 0, total_records: 1000 };
+        emitMigrationActivity();
+        let tick = 0;
+        const timer = setInterval(() => {
+          tick += 1;
+          migrationActivity.elapsed_seconds = Math.floor((Date.now() - migrationStartedAt) / 1000);
+          if (tick <= 10) {
+            migrationActivity.completed_records = tick * 100;
           } else {
-            storageMigration = { ...storageMigration, busy: false, pending: false, completed: true, using_new_storage: true, generation: "browser-migration", migrated_bytes: 2_130_000_000, message: "", can_delete_source: true };
+            migrationActivity.completed_records = null;
+            migrationActivity.total_records = null;
+            migrationActivity.message = tick === 11 ? "checking storage and search" : "resuming recording on the new storage";
           }
-          options.onEvent?.("storage-migration-activity", { busy: false, message: "" });
-        }, 4000);
+          if (tick === 13) {
+            clearInterval(timer);
+            migrationActivity.busy = false;
+            if (options.scenario === "backend-error") {
+              migrationActivity.error = "Migration paused because verification could not finish. Your original database has been kept.";
+              storageMigration = { ...storageMigration, busy: false, can_migrate: true, can_cancel: true, error: migrationActivity.error };
+            } else {
+              migrationActivity.completed = true;
+              migrationActivity.message = "Your history has been migrated and recording has resumed.";
+              storageMigration = { ...storageMigration, busy: false, pending: false, completed: true, using_new_storage: true, generation: "browser-migration", migrated_bytes: 2_130_000_000, can_delete_source: true };
+            }
+          }
+          storageMigration.message = migrationActivity.message;
+          emitMigrationActivity();
+        }, 1000);
         return null;
       }
       case "cancel_storage_migration":
+        migrationActivity = { ...migrationActivity, busy: false, completed: false, error: null, message: "" };
+        emitMigrationActivity();
         storageMigration = { ...storageMigration, pending: false, error: null, can_cancel: false, can_migrate: true };
         return null;
       case "delete_original_storage_database": {

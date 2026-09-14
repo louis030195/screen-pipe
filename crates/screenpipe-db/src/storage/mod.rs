@@ -27,7 +27,7 @@ pub use command::run_command;
 pub use inventory::{artifact_bytes, inventory};
 pub use lifecycle::{
     cancel_migration, migrate, migrate_with_progress, migration_report,
-    pause_interrupted_migration, MigrationOptions, MigrationReport,
+    pause_interrupted_migration, MigrationOptions, MigrationProgress, MigrationReport,
 };
 pub use maintenance::{compact, export_sqlite};
 pub use reader::StorageReadToken;

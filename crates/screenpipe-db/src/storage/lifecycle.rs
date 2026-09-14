@@ -196,12 +196,31 @@ pub async fn migrate(
     migrate_with_progress(root, config, options, |_| {}).await
 }
 
+/// Counts describe conversion only; verification and activation have no known denominator.
+#[derive(Clone, Copy, Debug)]
+pub struct MigrationProgress {
+    pub message: &'static str,
+    pub completed_records: Option<u64>,
+    pub total_records: Option<u64>,
+}
+
+impl MigrationProgress {
+    fn phase(message: &'static str) -> Self {
+        Self {
+            message,
+            completed_records: None,
+            total_records: None,
+        }
+    }
+}
+
 pub async fn migrate_with_progress(
     root: &Path,
     config: DbConfig,
     options: MigrationOptions,
-    progress: impl Fn(&'static str) + Send + Sync,
+    progress: impl Fn(MigrationProgress) + Send + Sync,
 ) -> Result<MigrationReport, sqlx::Error> {
+    progress(MigrationProgress::phase("preparing migration"));
     let root = root.canonicalize()?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -276,7 +295,9 @@ pub async fn migrate_with_progress(
         durable_json(&journal_path, &journal)?;
     }
     if resuming && journal.phase == Phase::Active && source_path.exists() {
-        progress("verifying the retained original database");
+        progress(MigrationProgress::phase(
+            "verifying the retained original database",
+        ));
         let source = DatabaseManager::new_with_storage(
             source_path
                 .to_str()
@@ -339,7 +360,7 @@ pub async fn migrate_with_progress(
                 sync_directory(generation.parent().unwrap())?;
             }
             std::fs::create_dir_all(generation)?;
-            progress("preparing the new storage");
+            progress(MigrationProgress::phase("preparing the new storage"));
             super::import::prepare(&source, &index, &journal.descriptor.budget).await?;
             let candidate = DatabaseManager::new_with_storage(
                 index.to_str().unwrap(),
@@ -353,8 +374,8 @@ pub async fn migrate_with_progress(
             )
             .await?;
             let candidate_result = async {
-                progress("converting and compressing recordings");
-                let tables = super::import::records(&source, &candidate).await?;
+                progress(MigrationProgress::phase("counting records to convert"));
+                let tables = super::import::records(&source, &candidate, &progress).await?;
                 let pending: i64 =
                     sqlx::query_scalar("SELECT count(*) FROM frame_payloads WHERE state='staged'")
                         .fetch_one(&candidate.pool)
@@ -371,6 +392,7 @@ pub async fn migrate_with_progress(
             .await;
             candidate.close().await;
             let tables = candidate_result?;
+            progress(MigrationProgress::phase("checking storage and search"));
             journal.source = tables.clone();
             // The regular opener checks identity, schema, and catalog before ready.
             let reopened = DatabaseManager::new_with_storage(
@@ -385,7 +407,6 @@ pub async fn migrate_with_progress(
             )
             .await?;
             let verification = async {
-                progress("checking storage and search");
                 verify_migration_queries(&source, &reopened).await?;
                 Ok::<_, sqlx::Error>(())
             }
@@ -410,7 +431,7 @@ pub async fn migrate_with_progress(
             journal.phase = Phase::Ready;
             durable_json(&journal_path, &journal)?;
             super::faults::checkpoint("migration_ready");
-            progress("switching to the new storage");
+            progress(MigrationProgress::phase("switching to the new storage"));
             durable_json(&root.join("storage.json"), &journal.descriptor)?;
             super::faults::checkpoint("migration_activated");
             journal.phase = Phase::Active;
