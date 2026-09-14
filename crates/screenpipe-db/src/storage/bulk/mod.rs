@@ -18,7 +18,7 @@ use super::{storage_error, HybridStorage};
 pub(crate) use connection::pool_options;
 pub(crate) use connection::register_hash;
 pub(super) use lifecycle::export;
-pub(super) use schema::bootstrap;
+pub(super) use schema::{bootstrap, bootstrap_in_place, finish_indexes};
 use std::sync::{atomic::AtomicUsize, Arc, Mutex};
 
 pub const CAPABILITY: &str = "parquet-bulk-v1";
@@ -113,10 +113,10 @@ impl Table {
     fn mask(&self) -> i64 {
         (1 << self.columns.len()) - 1
     }
-    fn view(&self) -> String {
+    pub(super) fn view(&self) -> String {
         format!("_bulk_logical_{}", self.name)
     }
-    fn fts_columns(&self) -> String {
+    pub(super) fn fts_columns(&self) -> String {
         self.fts
             .iter()
             .map(|s| s.split_whitespace().next().unwrap())

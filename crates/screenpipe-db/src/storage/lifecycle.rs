@@ -69,6 +69,10 @@ pub struct MigrationReport {
     pub payload_bytes: u64,
     #[serde(default)]
     pub source_identity: Option<RetainedSourceIdentity>,
+    #[serde(default)]
+    pub allocated_before_bytes: Option<u64>,
+    #[serde(default)]
+    pub allocated_after_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,12 +137,16 @@ struct Journal {
     #[serde(default)]
     snapshot: Option<RetainedSourceIdentity>,
     report: Option<MigrationReport>,
+    #[serde(default)]
+    allocated_before_bytes: Option<u64>,
+    #[serde(default)]
+    search_receipts: Vec<(String, Vec<i64>)>,
 }
 
 fn read_journal(root: &Path) -> Result<Journal, sqlx::Error> {
     let path = checked_path(root, Path::new("storage-migration.json"))?;
     let journal: Journal = serde_json::from_slice(&std::fs::read(path)?).map_err(storage_error)?;
-    if journal.format != 1 {
+    if !matches!(journal.format, 1 | 2) {
         return Err(storage_error("unsupported migration journal"));
     }
     journal.descriptor.validate(root)?;
@@ -147,7 +155,16 @@ fn read_journal(root: &Path) -> Result<Journal, sqlx::Error> {
 
 pub(super) fn migration_is_paused(root: &Path) -> Result<bool, sqlx::Error> {
     let journal = read_journal(root)?;
-    Ok(journal.phase == Phase::Paused && checked_path(root, Path::new("db.sqlite"))?.is_file())
+    Ok(journal.format == 1
+        && journal.phase == Phase::Paused
+        && checked_path(root, Path::new("db.sqlite"))?.is_file())
+}
+
+pub fn migration_requires_resume(root: &Path) -> Result<bool, sqlx::Error> {
+    if !root.join("storage-migration.json").exists() {
+        return Ok(false);
+    }
+    Ok(read_journal(root)?.format == 2)
 }
 
 /// Reopening the desktop app restores ordinary use of its last active storage.
@@ -169,6 +186,9 @@ pub fn pause_interrupted_migration(root: &Path) -> Result<(), sqlx::Error> {
         return Ok(());
     }
     let mut journal = read_journal(&root)?;
+    if journal.format == 2 {
+        return Ok(());
+    }
     if !matches!(
         journal.phase,
         Phase::Building | Phase::Ready | Phase::Paused
@@ -186,8 +206,8 @@ pub fn pause_interrupted_migration(root: &Path) -> Result<(), sqlx::Error> {
 }
 
 /// Offline conversion owns only the selected logical root. The caller shuts
-/// down its recorder before invoking this operation. The complete source is
-/// retained after activation until a separate explicit deletion on the live manager.
+/// down its recorder before invoking this operation. The existing SQLite file
+/// becomes the active index, with committed batches recovered on interruption.
 pub async fn migrate(
     root: &Path,
     config: DbConfig,
@@ -202,6 +222,8 @@ pub struct MigrationProgress {
     pub message: &'static str,
     pub completed_records: Option<u64>,
     pub total_records: Option<u64>,
+    pub bytes_saved: Option<u64>,
+    pub available_bytes: Option<u64>,
 }
 
 impl MigrationProgress {
@@ -210,6 +232,8 @@ impl MigrationProgress {
             message,
             completed_records: None,
             total_records: None,
+            bytes_saved: None,
+            available_bytes: None,
         }
     }
 }
@@ -220,7 +244,14 @@ pub async fn migrate_with_progress(
     options: MigrationOptions,
     progress: impl Fn(MigrationProgress) + Send + Sync,
 ) -> Result<MigrationReport, sqlx::Error> {
-    progress(MigrationProgress::phase("preparing migration"));
+    // Old unpublished conversions still own a complete original. Retire only
+    // their verified disposable candidate before choosing the new strategy.
+    if root.join("storage-migration.json").exists() && read_journal(root)?.format == 1 {
+        if StorageDescriptor::read(root)?.is_some() {
+            return resume_legacy_migration(root, config, progress).await;
+        }
+        cancel_migration(root, config.clone()).await?;
+    }
     let root = root.canonicalize()?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -234,67 +265,263 @@ pub async fn migrate_with_progress(
     super::inventory::verify_protection(&root)?;
     let journal_path = root.join("storage-migration.json");
     let source_path = root.join("db.sqlite");
-    let resuming = journal_path.exists();
-    let mut journal: Journal = if resuming {
+    let mut journal = if journal_path.exists() {
         read_journal(&root)?
     } else {
         if StorageDescriptor::read(&root)?.is_some() {
-            return Err(storage_error(
-                "root already has an active storage descriptor",
-            ));
+            return Err(storage_error("root already has active storage"));
         }
         if !source_path.is_file() {
             return Err(storage_error("source database is missing"));
         }
+        progress(MigrationProgress::phase(
+            "checking storage before conversion",
+        ));
+        if fs2::available_space(&root)? < super::in_place::working_space(&options.budget) {
+            return Err(storage_error(
+                "insufficient migration working space; database unchanged",
+            ));
+        }
+        super::reclaim::probe(&root)?;
+        let source = DatabaseManager::new_with_storage(
+            source_path
+                .to_str()
+                .ok_or_else(|| storage_error("non-UTF8 database path"))?,
+            config.clone(),
+            None,
+            false,
+            false,
+        )
+        .await?;
+        let original = async {
+            let frozen = source.begin_immediate_with_retry().await?;
+            verify_integrity(&source.pool).await?;
+            let pages: i64 = sqlx::query_scalar("PRAGMA page_count").fetch_one(&source.pool).await?;
+            if (pages as usize).div_ceil(8) > options.budget.decode_bytes / 2 {
+                return Err(storage_error("freelist map exceeds migration memory budget; database unchanged"));
+            }
+            let receipts = table_receipts(&source, None).await?;
+            let terms: Vec<String> = sqlx::query_scalar("SELECT full_text FROM frames WHERE full_text IS NOT NULL AND id IN ((SELECT min(id) FROM frames),(SELECT max(id) FROM frames))").fetch_all(&source.pool).await?;
+            let mut searches = Vec::new();
+            for text in terms {
+                if let Some(term) = text.split_whitespace().find(|t| t.len()>2) {
+                    let term = format!("\"{}\"",term.replace('"',"\"\""));
+                    let ids = sqlx::query_scalar(MIGRATION_SEARCH).bind(&term).fetch_all(&source.pool).await?;
+                    searches.push((term,ids));
+                }
+            }
+            frozen.rollback().await?;
+            Ok::<_,sqlx::Error>((receipts,searches))
+        }.await;
+        source.close().await;
+        drop(source);
+        let (receipts, searches) = original?;
+        // Detect external SQLite readers before journaling or moving the file.
+        let mut exclusive = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&source_path)
+                .create_if_missing(false)
+                .pragma("locking_mode", "EXCLUSIVE")
+                .busy_timeout(std::time::Duration::from_secs(5)),
+        )
+        .await?;
+        let check = async {
+            sqlx::raw_sql("BEGIN EXCLUSIVE; COMMIT;")
+                .execute(&mut exclusive)
+                .await?;
+            super::schema::construction_checkpoint(&mut exclusive).await
+        }
+        .await;
+        exclusive.close().await?;
+        check?;
         let generation = uuid::Uuid::new_v4().to_string();
         let directory = PathBuf::from("storage").join(&generation);
-        let descriptor = StorageDescriptor {
-            format: 1,
-            mode: StorageMode::HybridParquetV1,
-            database_id: uuid::Uuid::new_v4().to_string(),
-            generation,
-            source_continuity: true,
-            index: directory.join("index.sqlite"),
-            payloads: directory.join("payloads"),
-            capabilities: super::capabilities(),
-            budget: options.budget,
-            privacy: options.privacy,
-        };
-        Journal {
-            format: 1,
+        let journal = Journal {
+            format: 2,
             phase: Phase::Building,
-            descriptor,
-            source: Vec::new(),
-            snapshot: None,
+            descriptor: StorageDescriptor {
+                format: 1,
+                mode: StorageMode::HybridParquetV1,
+                database_id: uuid::Uuid::new_v4().to_string(),
+                generation,
+                source_continuity: true,
+                index: directory.join("index.sqlite"),
+                payloads: directory.join("payloads"),
+                capabilities: super::capabilities(),
+                budget: options.budget,
+                privacy: options.privacy,
+            },
+            source: receipts,
+            snapshot: source_identity(&root)?,
             report: None,
-        }
+            allocated_before_bytes: Some(super::reclaim::footprint(&root)?),
+            search_receipts: searches,
+        };
+        durable_json(&journal_path, &journal)?;
+        super::faults::checkpoint("migration_before_rename");
+        journal
     };
     if let Some(active) = StorageDescriptor::read(&root)? {
         if active != journal.descriptor {
             return Err(storage_error(
-                "active descriptor differs from migration candidate",
+                "active descriptor differs from migration index",
             ));
         }
-        journal.phase = Phase::Active;
     }
-    if journal.phase == Phase::Paused {
-        // Recording may have added history since the interruption. Only this
-        // journal's unpublished candidate is replaced; the source stays intact.
-        let generation = checked_path(&root, &journal.descriptor.index)?
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        if generation.exists() {
-            std::fs::remove_dir_all(&generation)?;
-            sync_directory(generation.parent().unwrap())?;
+    let index = checked_path(&root, &journal.descriptor.index)?;
+    if source_path.exists() {
+        if index.exists() || source_identity(&root)? != journal.snapshot {
+            return Err(storage_error(
+                "migration source identity changed; both files have been kept",
+            ));
         }
-        journal.phase = Phase::Building;
-        journal.source.clear();
-        journal.snapshot = None;
-        journal.report = None;
+        let _source_owner =
+            screenpipe_sqlite_coordinator::acquire_sqlite_manager_lease(&source_path)
+                .map_err(storage_error)?;
+        for suffix in ["-wal", "-journal"] {
+            if root.join(format!("db.sqlite{suffix}")).exists() {
+                return Err(storage_error(
+                    "source has an active SQLite journal; migration cannot move it",
+                ));
+            }
+        }
+        std::fs::create_dir_all(index.parent().unwrap())?;
+        std::fs::rename(&source_path, &index)?;
+        sync_directory(&root)?;
+        sync_directory(index.parent().unwrap())?;
+        sync_directory(&root.join("storage"))?;
+        super::faults::checkpoint("migration_after_rename");
+    }
+    if !index.is_file() {
+        return Err(storage_error("migration index is missing"));
+    }
+    if journal.phase == Phase::Building {
+        let storage = HybridStorage::new(root.clone(), journal.descriptor.clone())?;
+        super::in_place::convert(
+            storage,
+            journal.allocated_before_bytes.unwrap_or(0),
+            journal
+                .source
+                .iter()
+                .filter(|t| t.table == "frames" || super::bulk::is_bulk_table(&t.table))
+                .map(|t| t.rows)
+                .sum(),
+            &progress,
+        )
+        .await?;
+        journal.phase = Phase::Ready;
         durable_json(&journal_path, &journal)?;
     }
-    if resuming && journal.phase == Phase::Active && source_path.exists() {
+    if journal.phase == Phase::Ready {
+        progress(MigrationProgress::phase("checking storage and search"));
+        let db = DatabaseManager::new_with_storage(
+            index.to_str().unwrap(),
+            config.clone(),
+            Some(HybridStorage::new(
+                root.clone(),
+                journal.descriptor.clone(),
+            )?),
+            false,
+            false,
+        )
+        .await?;
+        let verification = async {
+            verify_integrity(&db.pool).await?;
+            db.verify_storage().await?;
+            if table_receipts(&db, Some(&journal.source)).await? != journal.source {
+                return Err(storage_error(
+                    "migration logical data differs; converted data has been kept for diagnosis",
+                ));
+            }
+            for (term, expected) in &journal.search_receipts {
+                let actual: Vec<i64> = sqlx::query_scalar(MIGRATION_SEARCH)
+                    .bind(term)
+                    .fetch_all(&db.pool)
+                    .await?;
+                if &actual != expected {
+                    return Err(storage_error("migration indexed-search parity failed"));
+                }
+            }
+            Ok::<_, sqlx::Error>(())
+        }
+        .await;
+        db.close().await;
+        verification?;
+        journal.report = Some(MigrationReport {
+            database_id: journal.descriptor.database_id.clone(),
+            generation: journal.descriptor.generation.clone(),
+            frames: journal
+                .source
+                .iter()
+                .find(|t| t.table == "frames")
+                .map_or(0, |t| t.rows),
+            tables: journal.source.clone(),
+            source_bytes: journal.snapshot.as_ref().map_or(0, |s| s.bytes),
+            index_bytes: std::fs::metadata(&index)?.len(),
+            payload_bytes: directory_bytes(&root.join(&journal.descriptor.payloads))?,
+            source_identity: None,
+            allocated_before_bytes: journal.allocated_before_bytes,
+            allocated_after_bytes: Some(super::reclaim::footprint(&root)?),
+        });
+        durable_json(&journal_path, &journal)?;
+        super::faults::checkpoint("migration_ready");
+        durable_json(&root.join("storage.json"), &journal.descriptor)?;
+        super::faults::checkpoint("migration_activated");
+        journal.phase = Phase::Active;
+        durable_json(&journal_path, &journal)?;
+    }
+    let reopened = DatabaseManager::new_with_storage(
+        index.to_str().unwrap(),
+        config,
+        Some(HybridStorage::new(
+            root.clone(),
+            journal.descriptor.clone(),
+        )?),
+        false,
+        false,
+    )
+    .await?;
+    let check = sqlx::query("SELECT id FROM frames LIMIT 1")
+        .fetch_optional(&reopened.pool)
+        .await;
+    reopened.close().await;
+    check?;
+    let report = journal
+        .report
+        .ok_or_else(|| storage_error("migration report is missing"))?;
+    durable_json(&root.join("storage-migration-complete.json"), &report)?;
+    super::faults::checkpoint("migration_completed");
+    std::fs::remove_file(journal_path)?;
+    sync_directory(&root)?;
+    Ok(report)
+}
+
+const MIGRATION_SEARCH: &str = "SELECT frames.id FROM frames JOIN frames_fts ON frames_fts.rowid=frames.id WHERE frames_fts MATCH ? ORDER BY frames.timestamp DESC,frames.id DESC LIMIT 32";
+
+async fn resume_legacy_migration(
+    root: &Path,
+    config: DbConfig,
+    progress: impl Fn(MigrationProgress) + Send + Sync,
+) -> Result<MigrationReport, sqlx::Error> {
+    progress(MigrationProgress::phase("preparing migration"));
+    let root = root.canonicalize()?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".storage.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .map_err(|_| storage_error("storage lifecycle is already owned"))?;
+    super::inventory::verify_protection(&root)?;
+    let journal_path = root.join("storage-migration.json");
+    let source_path = root.join("db.sqlite");
+    let mut journal = read_journal(&root)?;
+    if journal.format != 1 || StorageDescriptor::read(&root)?.as_ref() != Some(&journal.descriptor)
+    {
+        return Err(storage_error("legacy migration is not activated"));
+    }
+    if source_path.exists() {
         progress(MigrationProgress::phase(
             "verifying the retained original database",
         ));
@@ -328,121 +555,6 @@ pub async fn migrate_with_progress(
         result?;
     }
     let index = checked_path(&root, &journal.descriptor.index)?;
-    if journal.phase == Phase::Building || journal.phase == Phase::Ready {
-        // This explicit physical opener is the migration's source owner. It
-        // neither follows nor overwrites the candidate descriptor.
-        let source = DatabaseManager::new_with_storage(
-            source_path
-                .to_str()
-                .ok_or_else(|| storage_error("non-UTF8 database path"))?,
-            config.clone(),
-            None,
-            false,
-            false,
-        )
-        .await?;
-        let result = async {
-            let frozen = source.begin_immediate_with_retry().await?;
-            durable_json(&journal_path, &journal)?;
-            let snapshot = source_identity(&root)?;
-            if journal.snapshot.is_some() && journal.snapshot != snapshot {
-                return Err(storage_error(
-                    "frozen source changed; restart the migration from current history",
-                ));
-            }
-            journal.snapshot = snapshot;
-            durable_json(&journal_path, &journal)?;
-            // Every unpublished attempt is built from the frozen source. This
-            // also retires candidates created by the former backup-based path.
-            let generation = index.parent().unwrap();
-            if generation.exists() {
-                std::fs::remove_dir_all(generation)?;
-                sync_directory(generation.parent().unwrap())?;
-            }
-            std::fs::create_dir_all(generation)?;
-            progress(MigrationProgress::phase("preparing the new storage"));
-            super::import::prepare(&source, &index, &journal.descriptor.budget).await?;
-            let candidate = DatabaseManager::new_with_storage(
-                index.to_str().unwrap(),
-                config.clone(),
-                Some(HybridStorage::new(
-                    root.clone(),
-                    journal.descriptor.clone(),
-                )?),
-                true,
-                false,
-            )
-            .await?;
-            let candidate_result = async {
-                progress(MigrationProgress::phase("counting records to convert"));
-                let tables = super::import::records(&source, &candidate, &progress).await?;
-                let pending: i64 =
-                    sqlx::query_scalar("SELECT count(*) FROM frame_payloads WHERE state='staged'")
-                        .fetch_one(&candidate.pool)
-                        .await?;
-                if pending != 0 {
-                    return Err(storage_error(
-                        "migration awaits required PII completion before sealing",
-                    ));
-                }
-                // Each imported batch and each published Parquet file already
-                // passed value verification. Reopening checks the final catalog.
-                Ok::<_, sqlx::Error>(tables)
-            }
-            .await;
-            candidate.close().await;
-            let tables = candidate_result?;
-            progress(MigrationProgress::phase("checking storage and search"));
-            journal.source = tables.clone();
-            // The regular opener checks identity, schema, and catalog before ready.
-            let reopened = DatabaseManager::new_with_storage(
-                index.to_str().unwrap(),
-                config.clone(),
-                Some(HybridStorage::new(
-                    root.clone(),
-                    journal.descriptor.clone(),
-                )?),
-                false,
-                false,
-            )
-            .await?;
-            let verification = async {
-                verify_migration_queries(&source, &reopened).await?;
-                Ok::<_, sqlx::Error>(())
-            }
-            .await;
-            reopened.close().await;
-            verification?;
-            let frames = tables
-                .iter()
-                .find(|t| t.table == "frames")
-                .map(|t| t.rows)
-                .unwrap_or(0);
-            journal.report = Some(MigrationReport {
-                database_id: journal.descriptor.database_id.clone(),
-                generation: journal.descriptor.generation.clone(),
-                frames,
-                tables,
-                source_bytes: std::fs::metadata(&source_path)?.len(),
-                index_bytes: std::fs::metadata(&index)?.len(),
-                payload_bytes: directory_bytes(&root.join(&journal.descriptor.payloads))?,
-                source_identity: None,
-            });
-            journal.phase = Phase::Ready;
-            durable_json(&journal_path, &journal)?;
-            super::faults::checkpoint("migration_ready");
-            progress(MigrationProgress::phase("switching to the new storage"));
-            durable_json(&root.join("storage.json"), &journal.descriptor)?;
-            super::faults::checkpoint("migration_activated");
-            journal.phase = Phase::Active;
-            durable_json(&journal_path, &journal)?;
-            frozen.rollback().await?;
-            Ok::<_, sqlx::Error>(())
-        }
-        .await;
-        source.close().await;
-        result?;
-    }
     let reopened = DatabaseManager::new_with_storage(
         index.to_str().unwrap(),
         config,
@@ -606,7 +718,17 @@ pub async fn cancel_migration(root: &Path, config: DbConfig) -> Result<(), sqlx:
         false,
     )
     .await?;
-    let verified = verify_integrity(&source.pool).await;
+    let verified = async {
+        verify_integrity(&source.pool).await?;
+        if !journal.source.is_empty() {
+            if table_receipts(&source, Some(&journal.source)).await? != journal.source {
+                return Err(storage_error("legacy source differs from its receipt; both files kept for diagnosis"));
+            }
+        } else if journal.snapshot.is_none() || source_identity(&root)? != journal.snapshot {
+            return Err(storage_error("cannot verify complete legacy source after it changed; both files kept for diagnosis"));
+        }
+        Ok::<_, sqlx::Error>(())
+    }.await;
     source.close().await;
     verified?;
     let generation = checked_path(&root, &journal.descriptor.index)?
@@ -835,54 +957,6 @@ pub(super) async fn table_receipts(
         });
     }
     Ok(result)
-}
-
-async fn verify_migration_queries(
-    source: &DatabaseManager,
-    candidate: &DatabaseManager,
-) -> Result<(), sqlx::Error> {
-    let ends: (Option<i64>, Option<i64>) = sqlx::query_as("SELECT (SELECT id FROM frames ORDER BY id LIMIT 1),(SELECT id FROM frames ORDER BY id DESC LIMIT 1)")
-        .fetch_one(&source.pool)
-        .await?;
-    let mut terms = std::collections::BTreeSet::new();
-    let ids: std::collections::BTreeSet<_> = [ends.0, ends.1].into_iter().flatten().collect();
-    for id in ids {
-        let mut original = source.frame_payloads(&[id], Projection::All).await?;
-        let mut converted = candidate.frame_payloads(&[id], Projection::All).await?;
-        let mut original = original
-            .remove(&id)
-            .ok_or_else(|| storage_error("source frame missing"))?;
-        let mut converted = converted
-            .remove(&id)
-            .ok_or_else(|| storage_error("converted frame missing"))?;
-        original.generation = 0;
-        converted.generation = 0;
-        if original != converted {
-            return Err(storage_error("migration frame retrieval differs"));
-        }
-        if let Some(term) = original
-            .full_text
-            .as_deref()
-            .and_then(|t| t.split_whitespace().find(|t| t.len() > 2))
-        {
-            terms.insert(format!("\"{}\"", term.replace('"', "\"\"")));
-        }
-    }
-    for term in terms {
-        let sql = "SELECT frames.id FROM frames JOIN frames_fts ON frames_fts.rowid=frames.id WHERE frames_fts MATCH ? ORDER BY frames.timestamp DESC,frames.id DESC LIMIT 32";
-        let original: Vec<i64> = sqlx::query_scalar(sql)
-            .bind(&term)
-            .fetch_all(&source.pool)
-            .await?;
-        let converted: Vec<i64> = sqlx::query_scalar(sql)
-            .bind(&term)
-            .fetch_all(&candidate.pool)
-            .await?;
-        if original != converted {
-            return Err(storage_error("migration indexed-search parity failed"));
-        }
-    }
-    Ok(())
 }
 
 fn directory_bytes(path: &Path) -> Result<u64, sqlx::Error> {

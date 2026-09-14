@@ -12,14 +12,14 @@ const commands = vi.hoisted(() => ({
 vi.mock("@/lib/utils/tauri", () => ({ commands }));
 import { StorageMigrationPrompt } from "./storage-migration-prompt";
 
-const idle: StorageMigrationActivity = { root: "/fixture", busy: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, completed: false };
+const idle: StorageMigrationActivity = { root: "/fixture", busy: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, bytes_saved: null, available_bytes: null, completed: false };
 let status: StorageMigrationStatus;
 
 beforeEach(() => {
   vi.clearAllMocks();
   sessionStorage.clear();
   status = {
-    root: "/fixture", busy: false, message: "", error: null, pending: false,
+    root: "/fixture", busy: false, message: "", error: null, pending: false, in_place: false, bytes_saved: null, available_bytes: null,
     completed: false, using_new_storage: false, generation: null, source_bytes: 20 * 1024 ** 3,
     migrated_bytes: null, can_migrate: true, can_cancel: false, can_delete_source: false,
     blocked_reason: null,
@@ -31,11 +31,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("automatic storage migration prompt", () => {
+  it("offers only resume for an interrupted in-place conversion", async () => {
+    Object.assign(status, { pending: true, in_place: true, can_cancel: false, error: "Free more disk space to resume." });
+    render(<StorageMigrationPrompt activity={{ ...idle, error: status.error }} />);
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("completed progress is saved");
+    expect(dialog).not.toHaveTextContent("recovery copy");
+    expect(screen.queryByRole("button", { name: "use original database" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "try again" }));
+    await waitFor(() => expect(commands.startStorageMigration).toHaveBeenCalledWith("/fixture"));
+  });
   it("detects legacy storage, explains the pause and starts only on request", async () => {
     render(<StorageMigrationPrompt activity={idle} />);
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("pause recording");
-    expect(dialog).toHaveTextContent("resume recording automatically");
+    expect(dialog).toHaveTextContent("restore your recording preference");
     expect(dialog).toHaveTextContent("computer will stay awake");
     expect(dialog).not.toHaveTextContent(/M2|M5|minutes|hours/);
     expect(commands.startStorageMigration).not.toHaveBeenCalled();

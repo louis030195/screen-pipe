@@ -25,7 +25,7 @@ const migrated = (overrides: Partial<StorageMigrationStatus> = {}) => {
 beforeEach(() => {
   vi.clearAllMocks();
   status = {
-    root: "/fixture", busy: false, message: "", error: null, pending: false,
+    root: "/fixture", busy: false, message: "", error: null, pending: false, in_place: false, bytes_saved: null, available_bytes: null,
     completed: false, using_new_storage: false, generation: null, source_bytes: 12000,
     migrated_bytes: null, can_migrate: true, can_cancel: false, can_delete_source: false,
     blocked_reason: null,
@@ -43,11 +43,19 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("storage migration", () => {
+  it("shows physical savings without a deletion action for in-place migrations", async () => {
+    migrated({ in_place: true, source_bytes: 0, bytes_saved: 4 * 1024 ** 3, can_delete_source: false });
+    mount();
+    expect(await screen.findByText("Space saved: 4.0 GB")).toBeTruthy();
+    expect(screen.getByText(/existing database is now the smaller index/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "delete original database" })).toBeNull();
+    expect(screen.queryByText("The original database has been deleted.")).toBeNull();
+  });
   it("starts conversion only after confirmation and never deletes the original automatically", async () => {
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "migrate storage" }));
     expect(commands.startStorageMigration).not.toHaveBeenCalled();
-    expect(screen.getByText(/deleting it is a separate, optional action/i)).toBeTruthy();
+    expect(screen.getByText(/space is recovered as each batch is verified/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "start now" }));
     await waitFor(() => expect(commands.startStorageMigration).toHaveBeenCalledWith("/fixture"));
     await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(true));

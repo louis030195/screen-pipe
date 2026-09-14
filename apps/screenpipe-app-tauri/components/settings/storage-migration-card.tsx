@@ -5,20 +5,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Database } from "lucide-react";
 import { commands, type StorageMigrationStatus } from "@/lib/utils/tauri";
-import { StorageMigrationDescription } from "@/components/storage-migration-prompt";
+import { migrationBytes as bytes, StorageMigrationDescription } from "@/components/storage-migration-prompt";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-
-function bytes(value: number | bigint) {
-  const amount = Number(value);
-  return amount >= 1024 ** 3
-    ? `${(amount / 1024 ** 3).toFixed(1)} GB`
-    : `${(amount / 1024 ** 2).toFixed(1)} MB`;
-}
 
 export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
   dataDirectory?: string;
@@ -108,7 +101,7 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
         {status?.blocked_reason && <p className="text-xs text-muted-foreground">{status.blocked_reason}</p>}
         {status?.pending && !status.busy && (
           <p className="text-xs text-muted-foreground">
-            Migration is unfinished. Resume to continue. Your original database is still kept.
+            {status.in_place ? "Migration is unfinished. Completed progress is saved. Resume to use history and recording again." : "Migration is unfinished. Resume to continue. Your original database is still kept."}
           </p>
         )}
         {status?.completed && !status.using_new_storage && !status.busy && (
@@ -117,8 +110,9 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
         {status?.completed && (
           <div className="text-xs space-y-1">
             {status.migrated_bytes != null && <p>Database size after migration: {bytes(status.migrated_bytes)}</p>}
+            {status.bytes_saved != null && <p>Space saved: {bytes(status.bytes_saved)}</p>}
             <p className="text-muted-foreground">
-              {Number(status.source_bytes) > 0
+              {status.in_place ? "Your existing database is now the smaller index. Space was recovered during migration." : Number(status.source_bytes) > 0
                 ? `Original database kept: ${bytes(status.source_bytes)}. It contains your history up to migration; new recordings go to the new storage.`
                 : "The original database has been deleted."}
             </p>
@@ -137,7 +131,7 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
           </Button>
         )}
 
-        {status?.completed && Number(status.source_bytes) > 0 && (
+        {status?.completed && !status.in_place && Number(status.source_bytes) > 0 && (
           <div className="border-t border-border pt-3 space-y-2">
             <p className="text-xs text-muted-foreground">Deleting the original is optional and permanent.</p>
             <Button variant="outline" size="sm" className="h-7 text-xs text-destructive"

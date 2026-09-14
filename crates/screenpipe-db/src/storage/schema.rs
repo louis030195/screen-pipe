@@ -3,7 +3,7 @@
 
 use super::{storage_error, StorageDescriptor};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqliteConnection};
+use sqlx::{Connection, Row, SqliteConnection};
 
 /// Execute trusted construction statements while the offline lifecycle owns
 /// the writer permit. Callers supply simple DDL/DML, without trigger bodies or
@@ -26,6 +26,15 @@ pub(super) async fn construction_sql(
 pub(super) async fn construction_checkpoint(
     conn: &mut SqliteConnection,
 ) -> Result<(), sqlx::Error> {
+    // In-place schema steps commit their DDL and resume marker together. Their
+    // caller checkpoints after commit, never inside the schema transaction.
+    let mut handle = conn.lock_handle().await?;
+    let in_transaction =
+        unsafe { libsqlite3_sys::sqlite3_get_autocommit(handle.as_raw_handle().as_ptr()) == 0 };
+    drop(handle);
+    if in_transaction {
+        return Ok(());
+    }
     // Construction keeps pools open between batches. Copy committed frames
     // without requesting a WAL restart under those connections.
     let row = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
@@ -34,6 +43,105 @@ pub(super) async fn construction_checkpoint(
     if row.try_get::<i64, _>(0)? != 0 || row.try_get::<i64, _>(1)? != row.try_get::<i64, _>(2)? {
         return Err(storage_error("offline construction has an active reader"));
     }
+    Ok(())
+}
+
+pub(super) async fn converted_step(
+    conn: &mut SqliteConnection,
+    step: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _storage_conversion_steps WHERE step=?)")
+        .bind(step)
+        .fetch_one(conn)
+        .await
+}
+
+pub(super) async fn finish_step(
+    conn: &mut SqliteConnection,
+    step: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO _storage_conversion_steps(step) VALUES(?)")
+        .bind(step)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Install only the catalog/trigger definitions. Historical payloads are
+/// registered and sealed one batch at a time by the offline conversion loop.
+pub(super) async fn bootstrap_in_place(
+    conn: &mut SqliteConnection,
+    descriptor: &StorageDescriptor,
+) -> Result<(), sqlx::Error> {
+    if !converted_step(conn, "frames-schema").await? {
+        let mut tx = conn.begin().await?;
+        for statement in CATALOG.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            if statement.starts_with("INSERT INTO frames_fts")
+                || statement.starts_with("UPDATE frames SET")
+            {
+                continue;
+            }
+            sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("INSERT INTO storage_metadata(singleton,descriptor,staging_limit,record_limit,policy,required_surfaces,writer_version) VALUES(1,?,?,?,?,?,?)")
+            .bind(serde_json::to_string(descriptor).map_err(storage_error)?)
+            .bind(descriptor.budget.staging_bytes as i64).bind(descriptor.budget.record_bytes as i64)
+            .bind(&descriptor.privacy.identity).bind(descriptor.privacy.required_surfaces as i64)
+            .bind(env!("CARGO_PKG_VERSION")).execute(&mut *tx).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(triggers()))
+            .execute(&mut *tx)
+            .await?;
+        let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%' AND substr(name,1,1)!='_' AND name NOT IN ('frames','frame_payloads','payload_files','storage_metadata','upload_bindings') AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'").fetch_all(&mut *tx).await?;
+        for table in tables {
+            for event in ["INSERT", "UPDATE", "DELETE"] {
+                let name = table.replace('"', "\"\"");
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE TRIGGER \"hybrid_revision_{name}_{event}\" AFTER {event} ON \"{name}\" BEGIN UPDATE storage_metadata SET revision=revision+1; END;"))).execute(&mut *tx).await?;
+            }
+        }
+        sqlx::query("INSERT INTO _hybrid_migrations VALUES(1,?)")
+            .bind(format!(
+                "{:x}",
+                Sha256::digest(format!("{CATALOG}{}", triggers()))
+            ))
+            .execute(&mut *tx)
+            .await?;
+        finish_step(&mut tx, "frames-schema").await?;
+        tx.commit().await?;
+        construction_checkpoint(conn).await?;
+        super::faults::checkpoint("migration_schema_step");
+    }
+    super::bulk::bootstrap_in_place(conn).await
+}
+
+pub(super) async fn stage_frames(
+    conn: &mut SqliteConnection,
+    first: i64,
+    last: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE storage_metadata SET maintenance=1")
+        .execute(&mut *conn)
+        .await?;
+    let flags = CATALOG
+        .rsplit_once("UPDATE frames SET ")
+        .unwrap()
+        .1
+        .trim()
+        .trim_end_matches(';');
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE frames SET {flags} WHERE id BETWEEN ? AND ?"
+    )))
+    .bind(first)
+    .bind(last)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO frame_payloads(frame_id,generation,state,bytes,policy,completed_surfaces) SELECT NEW.id,1,'staged',({BYTES}),?,{EMPTY_SURFACES} FROM frames NEW WHERE NEW.id BETWEEN ? AND ?")))
+        .bind(sqlx::query_scalar::<_, String>("SELECT policy FROM storage_metadata").fetch_one(&mut *conn).await?)
+        .bind(first).bind(last).execute(&mut *conn).await?;
+    sqlx::query("INSERT INTO frames_fts(rowid,full_text,app_name,window_name,browser_url) SELECT id,full_text,COALESCE(app_name,''),COALESCE(window_name,''),COALESCE(browser_url,'') FROM frames WHERE id BETWEEN ? AND ? AND full_text IS NOT NULL AND full_text!=''")
+        .bind(first).bind(last).execute(&mut *conn).await?;
+    sqlx::query("UPDATE storage_metadata SET maintenance=0,staging_bytes=staging_bytes+COALESCE((SELECT sum(bytes) FROM frame_payloads WHERE frame_id BETWEEN ? AND ?),0)").bind(first).bind(last).execute(conn).await?;
     Ok(())
 }
 

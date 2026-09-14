@@ -44,12 +44,22 @@ impl DatabaseManager {
         let _pin = self.storage_read_token().await?;
         let index = directory.join(&storage.descriptor.index);
         std::fs::create_dir_all(index.parent().unwrap())?;
-        lifecycle::copy_sqlite(
-            self.pool.clone(),
-            index.clone(),
-            storage.descriptor.budget.lifecycle_timeout_secs,
-        )
-        .await?;
+        // A sparse in-place index can have a large logical length. The page
+        // backup API materializes its holes; VACUUM INTO writes only live pages
+        // directly into the requested backup, without an intermediate copy.
+        {
+            let writer = self.coordinated_writer();
+            let permit = writer.lock().await?;
+            sqlx::query("VACUUM INTO ?")
+                .bind(
+                    index
+                        .to_str()
+                        .ok_or_else(|| storage_error("non-UTF8 backup path"))?,
+                )
+                .execute(permit.pool())
+                .await?;
+        }
+        std::fs::File::open(&index)?.sync_all()?;
         let mut conn =
             sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display())).await?;
         let files=sqlx::query("SELECT DISTINCT pf.search_path,pf.detail_path FROM payload_files pf JOIN frame_payloads p ON p.file_id=pf.id ORDER BY pf.id").fetch_all(&mut conn).await?;

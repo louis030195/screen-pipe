@@ -162,7 +162,7 @@ async fn privacy_completion_and_reader_leases_own_original_file_removal() {
 }
 
 #[tokio::test]
-async fn migration_preserves_original_until_explicit_deletion_on_live_generation() {
+async fn legacy_migration_preserves_original_until_explicit_deletion_on_live_generation() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("db.sqlite");
     let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
@@ -183,9 +183,35 @@ async fn migration_preserves_original_until_explicit_deletion_on_live_generation
         projected.push((projection, payloads));
     }
     db.close().await;
-    let report = migrate(root.path(), Default::default(), Default::default())
+    // Model the retained original from an already completed copy-based install.
+    // New migrations themselves never create this fixture copy.
+    let retained = root.path().join("legacy-original.sqlite");
+    std::fs::copy(&path, &retained).unwrap();
+    let mut report = migrate(root.path(), Default::default(), Default::default())
         .await
         .unwrap();
+    std::fs::rename(retained, &path).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    #[cfg(unix)]
+    let file_id = {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    };
+    #[cfg(not(unix))]
+    let file_id: Option<(u64, u64)> = None;
+    report.source_identity = Some(
+        serde_json::from_value(serde_json::json!({
+            "bytes":metadata.len(), "modified":metadata.modified().unwrap(), "file_id":file_id
+        }))
+        .unwrap(),
+    );
+    report.allocated_before_bytes = None;
+    report.allocated_after_bytes = None;
+    std::fs::write(
+        root.path().join("storage-migration-complete.json"),
+        serde_json::to_vec(&report).unwrap(),
+    )
+    .unwrap();
     assert_eq!(report.frames, 1);
     assert!(path.exists());
     assert!(root.path().join("storage.json").exists());
@@ -494,11 +520,11 @@ async fn legacy_exports_can_be_migrated_again() {
         screenpipe_db::storage::export_sqlite(&root, &exported_path, Default::default())
             .await
             .unwrap();
-        let original = std::fs::read(&exported_path).unwrap();
+
         migrate(&exported_root, Default::default(), Default::default())
             .await
             .unwrap();
-        assert_eq!(std::fs::read(&exported_path).unwrap(), original);
+        assert!(!exported_path.exists());
 
         let remigrated = DatabaseManager::new(exported_path.to_str().unwrap(), Default::default())
             .await
@@ -563,9 +589,10 @@ async fn storage_budget_rejects_before_acknowledging_and_accepts_after_reclamati
 #[tokio::test]
 async fn migration_crashes_resume_without_losing_acknowledged_records() {
     for point in [
-        "migration_schema_ready",
+        "migration_before_rename",
+        "migration_after_rename",
         "migration_schema_step",
-        "migration_elements_copied",
+        "migration_batch_staged",
         "seal_reserved",
         "seal_files_synced",
         "seal_before_commit",
@@ -602,9 +629,12 @@ async fn migration_crashes_resume_without_losing_acknowledged_records() {
             "{point}: {}",
             String::from_utf8_lossy(&killed.stderr)
         );
+        assert!(screenpipe_db::storage::migration_requires_resume(root.path()).unwrap());
         assert!(
-            path.exists(),
-            "original must survive interruption at {point}"
+            DatabaseManager::new(path.to_str().unwrap(), Default::default())
+                .await
+                .is_err(),
+            "{point}"
         );
         migrate(root.path(), Default::default(), Default::default())
             .await
@@ -612,14 +642,11 @@ async fn migration_crashes_resume_without_losing_acknowledged_records() {
         let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
             .await
             .unwrap();
-        assert!(
-            path.exists(),
-            "original must survive completion after {point}"
-        );
+        assert!(!path.exists(), "source becomes the index after {point}");
         assert!(
             db.retained_migration_source_bytes()
                 .unwrap_or_else(|error| panic!("{point}: {error}"))
-                .is_some(),
+                .is_none(),
             "{point}"
         );
         assert_eq!(db.upload_source_id().await.unwrap(), identity, "{point}");
@@ -668,11 +695,11 @@ async fn interrupted_initialization_resumes_its_recorded_generation() {
 
 #[cfg(feature = "storage-fault-injection")]
 #[tokio::test]
-async fn interrupted_desktop_migration_allows_recording_after_restart_and_safe_resume() {
+async fn interrupted_desktop_migration_blocks_recording_until_resume_completes() {
     use screenpipe_db::storage::pause_interrupted_migration;
 
     for point in [
-        "migration_schema_ready",
+        "migration_after_rename",
         "migration_ready",
         "migration_activated",
     ] {
@@ -691,52 +718,34 @@ async fn interrupted_desktop_migration_allows_recording_after_restart_and_safe_r
             .unwrap();
         assert_eq!(killed.status.code(), Some(86), "{point}");
 
-        if point != "migration_activated" {
-            assert!(
-                DatabaseManager::new(path.to_str().unwrap(), Default::default())
-                    .await
-                    .is_err()
-            );
-            let lock = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(root.path().join(".storage.lock"))
-                .unwrap();
-            fs2::FileExt::try_lock_exclusive(&lock).unwrap();
-            assert!(pause_interrupted_migration(root.path()).is_err());
-            drop(lock);
-        }
         pause_interrupted_migration(root.path()).unwrap();
-        pause_interrupted_migration(root.path()).unwrap();
-        let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
-            .await
-            .unwrap();
-        assert_eq!(
-            db.storage_descriptor().is_some(),
-            point == "migration_activated"
+        assert!(
+            DatabaseManager::new(path.to_str().unwrap(), Default::default())
+                .await
+                .is_err()
         );
-        seed(&db, 8, Some("after restart"), None).await;
-        let before = search(&db, "restart").await;
-        db.close().await;
-
         migrate(root.path(), Default::default(), Default::default())
             .await
             .unwrap();
         let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
             .await
             .unwrap();
-        assert_eq!(search(&db, "restart").await, before, "{point}");
+        assert_eq!(
+            db.frame_payloads(&[7], Projection::Search).await.unwrap()[&7].text(),
+            "before restart"
+        );
+        seed(&db, 8, Some("after restart"), None).await;
         assert!(db.storage_descriptor().is_some());
-        assert!(path.is_file(), "original retained at {point}");
+        assert!(!path.is_file(), "source reused at {point}");
         db.close().await;
     }
 }
 
 #[cfg(feature = "storage-fault-injection")]
 #[tokio::test]
-async fn cancellation_preserves_the_source_before_activation() {
+async fn in_place_cancellation_is_rejected_without_losing_progress() {
     for point in [
-        "migration_schema_ready",
+        "migration_after_rename",
         "migration_ready",
         "migration_activated",
     ] {
@@ -757,17 +766,11 @@ async fn cancellation_preserves_the_source_before_activation() {
         assert_eq!(killed.status.code(), Some(86));
         let cancelled =
             screenpipe_db::storage::cancel_migration(root.path(), Default::default()).await;
-        if point == "migration_activated" {
-            assert!(cancelled.is_err());
-            migrate(root.path(), Default::default(), Default::default())
-                .await
-                .unwrap();
-        } else {
-            cancelled.unwrap();
-            assert!(path.is_file());
-            assert!(!root.path().join("storage-migration.json").exists());
-            assert!(!root.path().join("storage.json").exists());
-        }
+        assert!(cancelled.is_err());
+        assert!(root.path().join("storage-migration.json").is_file());
+        migrate(root.path(), Default::default(), Default::default())
+            .await
+            .unwrap();
         let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
             .await
             .unwrap();
@@ -834,7 +837,20 @@ async fn migration_streams_large_payloads_with_bounded_temporary_space() {
                 if entry.path().is_dir() {
                     bytes(&entry.path())
                 } else {
-                    entry.metadata().map(|m| m.len()).unwrap_or(0)
+                    entry
+                        .metadata()
+                        .map(|m| {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::MetadataExt;
+                                m.blocks() * 512
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                m.len()
+                            }
+                        })
+                        .unwrap_or(0)
                 }
             })
             .sum()
@@ -863,11 +879,13 @@ async fn migration_streams_large_payloads_with_bounded_temporary_space() {
     let original = std::fs::metadata(&path).unwrap();
     let mut options = MigrationOptions::default();
     options.budget.file_bytes = 2 * 1024 * 1024;
+    options.budget.record_bytes = 2 * 1024 * 1024;
     // This permits at most 48 MiB of additional allocation before the reserve;
     // even one complete source copy would exceed it.
     let headroom = 48 * 1024 * 1024;
     options.budget.disk_reserve_bytes = fs2::available_space(root.path()).unwrap() - headroom;
     assert!(original.len() > headroom);
+    let original_allocated = bytes(root.path());
     let done = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU64::new(0));
     let monitor = {
@@ -918,14 +936,14 @@ async fn migration_streams_large_payloads_with_bounded_temporary_space() {
     let peak = peak.load(Ordering::Relaxed);
     eprintln!("streaming migration: source={} peak_candidate={} final_index={} parquet={} headroom={headroom}", original.len(), peak, report.index_bytes, report.payload_bytes);
     assert!(
-        peak < headroom,
+        peak < original_allocated + headroom,
         "peak {peak} exceeds batch headroom {headroom}"
     );
-    assert!(peak < original.len() / 2);
-    assert!(report.index_bytes + report.payload_bytes < original.len() / 4);
-    let retained = std::fs::metadata(&path).unwrap();
-    assert_eq!(original.len(), retained.len());
-    assert_eq!(original.modified().unwrap(), retained.modified().unwrap());
+    assert!(updates
+        .iter()
+        .any(|u| u.bytes_saved.unwrap_or(0) > original_allocated / 2));
+    assert!(report.allocated_after_bytes.unwrap() < original.len() / 4);
+    assert!(!path.exists());
     let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -947,14 +965,14 @@ async fn migration_streams_large_payloads_with_bounded_temporary_space() {
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        2
+        0
     );
-    assert_eq!(
+    assert!(
         sqlx::query_scalar::<_, i64>("PRAGMA freelist_count")
             .fetch_one(&db.pool)
             .await
-            .unwrap(),
-        0
+            .unwrap()
+            > 0
     );
     seed(&db, 65, Some("after migration"), None).await;
     assert_eq!(

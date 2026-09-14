@@ -472,6 +472,7 @@ mod outputs;
 mod search;
 mod semantic;
 mod setup;
+pub(crate) use setup::register_sqlite_extensions;
 mod source_identity;
 mod speakers;
 mod tags;

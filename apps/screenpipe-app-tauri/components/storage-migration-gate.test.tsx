@@ -15,7 +15,7 @@ vi.mock("@/lib/hooks/use-tauri-event", () => ({
 }));
 import { StorageMigrationGate } from "./storage-migration-gate";
 
-const idle: StorageMigrationActivity = { root: "/fixture", busy: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, completed: false };
+const idle: StorageMigrationActivity = { root: "/fixture", busy: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, bytes_saved: null, available_bytes: null, completed: false };
 const running = { ...idle, busy: true, message: "compressing recordings" };
 const notify = (payload: StorageMigrationActivity) => act(() => mock.onActivity({ payload }));
 
@@ -32,15 +32,17 @@ describe("app-wide migration modal", () => {
   it("shows measured conversion counts and elapsed time, then clears the percentage during verification", async () => {
     render(<StorageMigrationGate />);
     await waitFor(() => expect(mock.getActivity).toHaveBeenCalled());
-    notify({ ...running, completed_records: 250, total_records: 1000, elapsed_seconds: 125 });
+    notify({ ...running, completed_records: 250, total_records: 1000, elapsed_seconds: 125, bytes_saved: 3 * 1024 ** 3, available_bytes: 4 * 1024 ** 3 });
     expect(screen.getByRole("progressbar")).toHaveAttribute("value", "250");
     expect(screen.getByText("25%")).toBeTruthy();
     expect(screen.getByText("Elapsed: 2m 5s")).toBeTruthy();
+    expect(screen.getByText("Space saved: 3.0 GB")).toBeTruthy();
+    expect(screen.getByText("Free space: 4.0 GB")).toBeTruthy();
     expect(screen.getByText(/250 of 1,000 records/)).toBeTruthy();
     notify({ ...running, message: "checking storage and search", elapsed_seconds: 190 });
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(screen.getByText("Elapsed: 3m 10s")).toBeTruthy();
-    expect(screen.getByRole("dialog")).toHaveTextContent("resume automatically");
+    expect(screen.getByRole("dialog")).toHaveTextContent("recording preference will be restored");
   });
 
   it("blocks an already-running migration and stays mounted across page changes", async () => {

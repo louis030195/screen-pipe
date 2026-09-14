@@ -21,6 +21,8 @@ struct Operation {
     elapsed_seconds: u64,
     completed_records: Option<u64>,
     total_records: Option<u64>,
+    bytes_saved: Option<u64>,
+    available_bytes: Option<u64>,
     completed: bool,
 }
 
@@ -36,6 +38,8 @@ impl Operation {
                 .map_or(self.elapsed_seconds, |start| start.elapsed().as_secs()),
             completed_records: self.completed_records,
             total_records: self.total_records,
+            bytes_saved: self.bytes_saved,
+            available_bytes: self.available_bytes,
             completed: self.completed,
         }
     }
@@ -53,6 +57,8 @@ pub struct StorageMigrationActivity {
     pub elapsed_seconds: u64,
     pub completed_records: Option<u64>,
     pub total_records: Option<u64>,
+    pub bytes_saved: Option<u64>,
+    pub available_bytes: Option<u64>,
     pub completed: bool,
 }
 
@@ -82,11 +88,14 @@ pub struct StorageMigrationStatus {
     pub message: String,
     pub error: Option<String>,
     pub pending: bool,
+    pub in_place: bool,
     pub completed: bool,
     pub using_new_storage: bool,
     pub generation: Option<String>,
     pub source_bytes: u64,
     pub migrated_bytes: Option<u64>,
+    pub bytes_saved: Option<u64>,
+    pub available_bytes: Option<u64>,
     pub can_migrate: bool,
     pub can_cancel: bool,
     pub can_delete_source: bool,
@@ -123,7 +132,140 @@ fn progress(app: &tauri::AppHandle, update: MigrationProgress) {
         operation.message = update.message.into();
         operation.completed_records = update.completed_records;
         operation.total_records = update.total_records;
+        if update.bytes_saved.is_some() {
+            operation.bytes_saved = update.bytes_saved;
+        }
+        if update.available_bytes.is_some() {
+            operation.available_bytes = update.available_bytes;
+        }
     });
+}
+
+pub(crate) struct StartupMigration {
+    root: PathBuf,
+    _awake: screenpipe_engine::power::KeepAwakeGuard,
+}
+
+/// The ordinary startup path must finish an in-place conversion before opening
+/// any database consumers. The server lifecycle lock is held by the caller.
+pub(crate) async fn resume_before_startup(
+    app: &tauri::AppHandle,
+    recording: &RecordingState,
+) -> Result<Option<StartupMigration>, String> {
+    let settings = SettingsStore::get(app).ok().flatten().unwrap_or_default();
+    let root = crate::config::selected_recording_data_dir(&settings.data_dir)
+        .map_err(|e| e.to_string())?;
+    if !screenpipe_db::storage::migration_requires_resume(&root).map_err(|e| e.to_string())? {
+        return Ok(None);
+    }
+    if recording.server.lock().await.is_some() {
+        return Err("Stop Screenpipe before resuming migration.".into());
+    }
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let awake = screenpipe_engine::power::KeepAwakeGuard::acquire().map_err(|e| e.to_string())?;
+    update_operation(app, |operation| {
+        *operation = Operation {
+            root: Some(root.clone()),
+            busy: true,
+            message: "resuming saved migration".into(),
+            started_at: Some(Instant::now()),
+            ..Default::default()
+        };
+    });
+    let result = screenpipe_db::storage::migrate_with_progress(
+        &root,
+        Default::default(),
+        Default::default(),
+        |update| progress(app, update),
+    )
+    .await
+    .map_err(|e| e.to_string());
+    if let Err(error) = result {
+        finish_operation(app, &root, &Err(error.clone()));
+        return Err(error);
+    }
+    progress(
+        app,
+        MigrationProgress {
+            message: "reopening history and restoring recording",
+            completed_records: None,
+            total_records: None,
+            bytes_saved: None,
+            available_bytes: None,
+        },
+    );
+    Ok(Some(StartupMigration {
+        root,
+        _awake: awake,
+    }))
+}
+
+async fn verify_running(app: &tauri::AppHandle, root: &Path) -> Result<(), String> {
+    let recording = app.state::<RecordingState>();
+    let descriptor = StorageDescriptor::read(root)
+        .map_err(|e| e.to_string())?
+        .ok_or("The migrated storage is not active. Saved progress has been kept.")?;
+    {
+        let server = recording.server.lock().await;
+        let server = server
+            .as_ref()
+            .ok_or("Screenpipe has not restarted. Try again to finish migration.")?;
+        if server.data_dir.canonicalize().map_err(|e| e.to_string())? != root
+            || server.db.storage_descriptor() != Some(&descriptor)
+        {
+            return Err(
+                "Screenpipe has not opened the migrated storage. Try again to finish restarting."
+                    .into(),
+            );
+        }
+        server
+            .db
+            .query_raw_sql("SELECT id FROM frames LIMIT 1")
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if recording.capture_intended() && recording.capture.lock().await.is_none() {
+        return Err("Your history was migrated, but recording could not resume. Try again to finish restarting.".into());
+    }
+    Ok(())
+}
+
+fn finish_operation(app: &tauri::AppHandle, root: &Path, result: &Result<(), String>) {
+    if result.is_ok() {
+        track_completed_migration(app, root);
+    }
+    update_operation(app, |operation| {
+        operation.elapsed_seconds = operation.activity().elapsed_seconds;
+        operation.started_at = None;
+        operation.busy = false;
+        operation.completed = result.is_ok();
+        operation.error = result.as_ref().err().cloned();
+        operation.message = if operation.completed {
+            if app.state::<RecordingState>().capture_intended() {
+                "Your history has been migrated and recording has resumed."
+            } else {
+                "Your history has been migrated. Recording remains paused as you selected."
+            }
+        } else {
+            "Migration needs attention. Saved progress will resume when you try again."
+        }
+        .into();
+        operation.completed_records = None;
+        operation.total_records = None;
+    });
+}
+
+pub(crate) async fn finish_startup(
+    app: &tauri::AppHandle,
+    migration: StartupMigration,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    let result = match result {
+        Ok(()) => verify_running(app, &migration.root).await,
+        error => error,
+    };
+    finish_operation(app, &migration.root, &result);
+    result
 }
 
 fn track_completed_migration(app: &tauri::AppHandle, root: &Path) {
@@ -140,16 +282,19 @@ fn track_completed_migration(app: &tauri::AppHandle, root: &Path) {
             return;
         }
     };
-    let migrated_db_bytes = report.index_bytes.saturating_add(report.payload_bytes);
+    let migrated_db_bytes = report
+        .allocated_after_bytes
+        .unwrap_or_else(|| report.index_bytes.saturating_add(report.payload_bytes));
+    let original_db_bytes = report.allocated_before_bytes.unwrap_or(report.source_bytes);
     if migrated_db_bytes == 0 {
         return;
     }
     let event = "storage_migration_completed";
     let properties = serde_json::json!({
         "$insert_id": format!("{event}:{}", report.generation),
-        "original_db_bytes": report.source_bytes,
+        "original_db_bytes": original_db_bytes,
         "migrated_db_bytes": migrated_db_bytes,
-        "compression_multiplier": report.source_bytes as f64 / migrated_db_bytes as f64,
+        "compression_multiplier": original_db_bytes as f64 / migrated_db_bytes as f64,
     });
     let analytics = std::sync::Arc::clone(&analytics);
     // AnalyticsManager honors the existing telemetry preference. Delivery never
@@ -181,6 +326,13 @@ pub async fn get_storage_migration_status(
         .zip(report.as_ref())
         .is_some_and(|(d, r)| d.database_id == r.database_id && d.generation == r.generation);
     let pending = root.join("storage-migration.json").exists();
+    let in_place = if pending {
+        screenpipe_db::storage::migration_requires_resume(&root).map_err(|e| e.to_string())?
+    } else {
+        report
+            .as_ref()
+            .is_none_or(|r| r.allocated_before_bytes.is_some())
+    };
     let source_bytes = std::fs::metadata(root.join("db.sqlite"))
         .map(|m| m.len())
         .unwrap_or(0);
@@ -236,13 +388,24 @@ pub async fn get_storage_migration_status(
         },
         error: error.clone(),
         pending,
+        in_place,
         completed,
         using_new_storage,
         generation: descriptor.map(|d| d.generation),
         source_bytes,
-        migrated_bytes: report.map(|r| r.index_bytes.saturating_add(r.payload_bytes)),
+        migrated_bytes: report.as_ref().map(|r| {
+            r.allocated_after_bytes
+                .unwrap_or_else(|| r.index_bytes.saturating_add(r.payload_bytes))
+        }),
+        bytes_saved: report
+            .as_ref()
+            .and_then(|r| r.allocated_before_bytes.zip(r.allocated_after_bytes))
+            .map(|(before, after)| before.saturating_sub(after))
+            .or(operation.bytes_saved),
+        available_bytes: fs2::available_space(&root).ok(),
         can_migrate,
         can_cancel: !operation.busy
+            && !in_place
             && blocked_reason.is_none()
             && pending
             && !root.join("storage.json").exists(),
@@ -297,54 +460,31 @@ pub async fn start_storage_migration(
             let recording = app.state::<RecordingState>();
             crate::recording::stop_screenpipe_inner(&recording).await?;
             if !status.completed || status.pending {
-                screenpipe_db::storage::migrate_with_progress(&root, Default::default(), Default::default(), |message| progress(&app, message))
-                    .await.map_err(|e| e.to_string())?;
+                screenpipe_db::storage::migrate_with_progress(
+                    &root,
+                    Default::default(),
+                    Default::default(),
+                    |message| progress(&app, message),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             }
             require_selected_root(&app, &root.display().to_string())?;
-            progress(&app, MigrationProgress {
-                message: "resuming recording on the new storage",
-                completed_records: None,
-                total_records: None,
-            });
+            progress(
+                &app,
+                MigrationProgress {
+                    message: "resuming recording on the new storage",
+                    completed_records: None,
+                    total_records: None,
+                    bytes_saved: None,
+                    available_bytes: None,
+                },
+            );
             crate::recording::spawn_screenpipe_inner(&recording, app.clone()).await?;
-            let descriptor = StorageDescriptor::read(&root).map_err(|e| e.to_string())?
-                .ok_or("The new storage is not active. The original database has been kept.")?;
-            {
-            let server = recording.server.lock().await;
-            let server = server.as_ref().ok_or("Screenpipe has not restarted. The original database has been kept.")?;
-            if server.data_dir.canonicalize().map_err(|e| e.to_string())? != root
-                || server.db.storage_descriptor() != Some(&descriptor) {
-                return Err("Screenpipe has not switched to the new storage. The original database has been kept.".into());
-            }
-            server.db.query_raw_sql("SELECT id FROM frames LIMIT 1").await.map_err(|e| e.to_string())?;
-            }
-            if recording.capture_intended() && recording.capture.lock().await.is_none() {
-                return Err("Your history was migrated, but recording could not resume. Try again to finish restarting. The original database has been kept.".into());
-            }
-            Ok::<_, String>(())
-        }.await;
-        if result.is_ok() {
-            track_completed_migration(&app, &root);
+            verify_running(&app, &root).await
         }
-        update_operation(&app, |operation| {
-            operation.elapsed_seconds = operation.activity().elapsed_seconds;
-            operation.started_at = None;
-            operation.busy = false;
-            operation.completed = result.is_ok();
-            operation.error = result.err();
-            operation.message = if operation.completed {
-                if app.state::<RecordingState>().capture_intended() {
-                    "Your history has been migrated and recording has resumed."
-                } else {
-                    "Your history has been migrated. Recording remains paused as you selected."
-                }
-            } else {
-                "Migration needs attention. Your original database has been kept."
-            }
-            .into();
-            operation.completed_records = None;
-            operation.total_records = None;
-        });
+        .await;
+        finish_operation(&app, &root, &result);
     });
     Ok(())
 }

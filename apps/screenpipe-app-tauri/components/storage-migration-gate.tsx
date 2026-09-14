@@ -5,12 +5,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { commands, type StorageMigrationActivity } from "@/lib/utils/tauri";
-import { migrationElapsed, StorageMigrationPrompt } from "./storage-migration-prompt";
+import { migrationBytes, migrationElapsed, StorageMigrationPrompt } from "./storage-migration-prompt";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 
 /** One blocker per webview, driven only by this native process's active operation. */
 export function StorageMigrationGate({ offerMigration = false }: { offerMigration?: boolean }) {
-  const [activity, setActivity] = useState<StorageMigrationActivity>({ root: null, busy: false, message: "", error: null, completed: false, elapsed_seconds: 0, completed_records: null, total_records: null });
+  const [activity, setActivity] = useState<StorageMigrationActivity>({ root: null, busy: false, message: "", error: null, completed: false, elapsed_seconds: 0, completed_records: null, total_records: null, bytes_saved: null, available_bytes: null });
   const [unavailable, setUnavailable] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -103,7 +103,7 @@ export function StorageMigrationGate({ offerMigration = false }: { offerMigratio
         <div className="space-y-2">
           <h2 id="storage-migration-title" className="text-lg font-semibold">migrating storage</h2>
           <p id="storage-migration-description" className="text-sm text-muted-foreground">
-            Recording is paused while your history is converted and verified. It will resume automatically when finished. Keep Screenpipe open; your computer will stay awake.
+            Recording and history access are paused while your history is converted and verified. Your recording preference will be restored when finished. Keep Screenpipe open; your computer will stay awake.
           </p>
         </div>
         <div className="flex items-center gap-3 text-sm" role="status" aria-live="polite">
@@ -118,8 +118,12 @@ export function StorageMigrationGate({ offerMigration = false }: { offerMigratio
           <p className="text-xs text-muted-foreground tabular-nums">{converted.toLocaleString()} of {total.toLocaleString()} records. Verification follows conversion.</p>
         </div>}
         <p className="text-sm tabular-nums">Elapsed: {migrationElapsed(elapsed)}</p>
+        <div className="space-y-1 text-sm tabular-nums">
+          {activity.bytes_saved != null && <p>Space saved: {migrationBytes(activity.bytes_saved)}</p>}
+          {activity.available_bytes != null && <p>Free space: {migrationBytes(activity.available_bytes)}</p>}
+        </div>
         <p className="border-t border-border pt-4 text-xs text-muted-foreground">
-          Your original database is being kept. Deleting it is a separate action after migration.
+          Space is recovered as each batch is verified. If interrupted, migration resumes on the next launch.
         </p>
       </div>
     </dialog>

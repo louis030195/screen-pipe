@@ -11,11 +11,13 @@ mod codec;
 mod command;
 mod faults;
 mod import;
+mod in_place;
 mod inventory;
 mod lifecycle;
 mod maintenance;
 pub(crate) mod read_schema;
 mod reader;
+mod reclaim;
 pub(crate) mod schema;
 mod sealing;
 pub(crate) mod snapshot;
@@ -26,7 +28,7 @@ pub use backup::restore;
 pub use command::run_command;
 pub use inventory::{artifact_bytes, inventory};
 pub use lifecycle::{
-    cancel_migration, migrate, migrate_with_progress, migration_report,
+    cancel_migration, migrate, migrate_with_progress, migration_report, migration_requires_resume,
     pause_interrupted_migration, MigrationOptions, MigrationProgress, MigrationReport,
 };
 pub use maintenance::{compact, export_sqlite};
@@ -264,6 +266,11 @@ pub fn resolve_database_path(database: &Path) -> Result<PathBuf, sqlx::Error> {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     if database.file_name().is_some_and(|name| name == "db.sqlite") {
+        if lifecycle::migration_requires_resume(root)? {
+            return Err(storage_error(
+                "in-place migration pending; resume migration before opening history or recording",
+            ));
+        }
         if root.join("storage-maintenance.json").exists() {
             return Err(storage_error(
                 "offline index maintenance pending; resume compact before opening",

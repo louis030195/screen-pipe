@@ -411,7 +411,8 @@ async fn bulk_publication_interruptions_resume_with_full_parity() {
             "{point}: {}",
             String::from_utf8_lossy(&crashed.stderr)
         );
-        assert!(path.exists());
+        assert!(!path.exists());
+        assert!(screenpipe_db::storage::migration_requires_resume(root.path()).unwrap());
         screenpipe_db::storage::migrate(root.path(), Default::default(), Default::default())
             .await
             .unwrap();

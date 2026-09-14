@@ -12,10 +12,17 @@ import {
 
 export function StorageMigrationDescription() {
   return <>
-    <span className="mt-3 block">Screenpipe will pause recording while it converts and verifies your history, then resume recording automatically.</span>
+    <span className="mt-3 block">Screenpipe will pause recording and history access while it converts and verifies your history, then restore your recording preference.</span>
     <span className="mt-3 block">Keep the app open. Your computer will stay awake. Progress and elapsed time will be shown; the time needed depends on your database and computer.</span>
-    <span className="mt-3 block">Your original database will stay as a recovery copy. Deleting it is a separate, optional action in Settings → Storage.</span>
+    <span className="mt-3 block">Space is recovered as each batch is verified. Your existing database becomes the smaller index. If you close the app, migration resumes on the next launch.</span>
   </>;
+}
+
+export function migrationBytes(value: number | bigint) {
+  const amount = Number(value);
+  return amount >= 1024 ** 3
+    ? `${(amount / 1024 ** 3).toFixed(1)} GB`
+    : `${(amount / 1024 ** 2).toFixed(1)} MB`;
 }
 
 export function migrationElapsed(seconds: number) {
@@ -103,10 +110,11 @@ export function StorageMigrationPrompt({ activity }: { activity: StorageMigratio
         </AlertDialogHeader>
         {success && <div className="space-y-2 text-sm text-muted-foreground">
           <p>Completed in {migrationElapsed(activity.elapsed_seconds)}.</p>
-          <p>Your original database is kept as a recovery copy. You can delete it separately in Settings → Storage after reviewing your history.</p>
+          <p>{status?.in_place ? "Your existing database is now the smaller index. Space was recovered during migration." : "Your original database is kept as a recovery copy. You can delete it separately in Settings → Storage after reviewing your history."}</p>
+          {status?.bytes_saved != null && <p>Space saved: {migrationBytes(status.bytes_saved)}</p>}
         </div>}
         {failure && <p className="text-sm text-destructive" role="alert">{failure}</p>}
-        {!success && <p className="text-xs text-muted-foreground">You can also start later in Settings → Storage.</p>}
+        {!success && <p className="text-xs text-muted-foreground">{status?.pending && status.in_place ? "Resume migration to use history and recording again. Your completed progress is saved." : "You can also start later in Settings → Storage."}</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={submitting} onClick={dismiss}>{success ? "done" : "do later"}</AlertDialogCancel>
           {status?.can_cancel && !success && <Button variant="outline" disabled={submitting} onClick={() => void run(true)}>use original database</Button>}

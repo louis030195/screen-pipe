@@ -475,7 +475,7 @@ function handleWindowCommand(command: string): unknown {
 export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   let storageMigration: StorageMigrationStatus = {
     root: "/Users/screenpipe/.screenpipe", busy: false, message: "", error: null,
-    pending: false, completed: false, using_new_storage: false, generation: null,
+    pending: false, in_place: true, bytes_saved: null, available_bytes: 3_000_000_000, completed: false, using_new_storage: false, generation: null,
     source_bytes: 13_000_000_000, migrated_bytes: null, can_migrate: true,
     can_cancel: false, can_delete_source: false, blocked_reason: null,
   };
@@ -483,7 +483,7 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
   let migrationActivity = {
     root: null as string | null, busy: false, message: "", error: null as string | null,
     elapsed_seconds: 0, completed_records: null as number | null,
-    total_records: null as number | null, completed: false,
+    total_records: null as number | null, bytes_saved: null as number | null, available_bytes: 3_000_000_000 as number | null, completed: false,
   };
   const emitMigrationActivity = () => options.onEvent?.("storage-migration-activity", { ...migrationActivity });
   const stores = new Map<number, Map<string, unknown>>();
@@ -668,6 +668,8 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
           migrationActivity.elapsed_seconds = Math.floor((Date.now() - migrationStartedAt) / 1000);
           if (tick <= 10) {
             migrationActivity.completed_records = tick * 100;
+            migrationActivity.bytes_saved = tick * 1_087_000_000;
+            migrationActivity.available_bytes = 3_000_000_000 + migrationActivity.bytes_saved;
           } else {
             migrationActivity.completed_records = null;
             migrationActivity.total_records = null;
@@ -677,12 +679,12 @@ export function createBrowserIpcMock(options: BrowserIpcMockOptions) {
             clearInterval(timer);
             migrationActivity.busy = false;
             if (options.scenario === "backend-error") {
-              migrationActivity.error = "Migration paused because verification could not finish. Your original database has been kept.";
-              storageMigration = { ...storageMigration, busy: false, can_migrate: true, can_cancel: true, error: migrationActivity.error };
+              migrationActivity.error = "Migration paused because verification could not finish. Saved progress has been kept.";
+              storageMigration = { ...storageMigration, busy: false, can_migrate: true, can_cancel: false, error: migrationActivity.error };
             } else {
               migrationActivity.completed = true;
               migrationActivity.message = "Your history has been migrated and recording has resumed.";
-              storageMigration = { ...storageMigration, busy: false, pending: false, completed: true, using_new_storage: true, generation: "browser-migration", migrated_bytes: 2_130_000_000, can_delete_source: true };
+              storageMigration = { ...storageMigration, busy: false, pending: false, completed: true, using_new_storage: true, generation: "browser-migration", migrated_bytes: 2_130_000_000, source_bytes: 0, bytes_saved: 10_870_000_000, can_delete_source: false };
             }
           }
           storageMigration.message = migrationActivity.message;

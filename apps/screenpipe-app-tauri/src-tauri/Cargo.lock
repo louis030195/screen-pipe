@@ -11215,6 +11215,7 @@ dependencies = [
  "fix-path-env",
  "freedesktop-desktop-entry",
  "freedesktop-icon-lookup",
+ "fs2",
  "futures",
  "futures-channel",
  "gtk",
@@ -11525,6 +11526,7 @@ dependencies = [
  "fs2",
  "futures",
  "image 0.25.10",
+ "libc",
  "libsqlite3-sys",
  "oasgen",
  "once_cell",
@@ -11546,6 +11548,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.59.0",
  "zerocopy 0.7.35",
 ]
 

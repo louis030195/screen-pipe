@@ -7116,6 +7116,7 @@ dependencies = [
  "fs2",
  "futures",
  "image",
+ "libc",
  "libsqlite3-sys",
  "oasgen",
  "once_cell",
@@ -7137,6 +7138,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.59.0",
  "zerocopy 0.7.35",
 ]
 

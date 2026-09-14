@@ -32,7 +32,7 @@ impl HybridStorage {
         Ok(0)
     }
 
-    async fn select_bulk(
+    pub(in crate::storage) async fn select_bulk(
         self: &Arc<Self>,
         pool: &SqlitePool,
         table: &Table,
@@ -101,7 +101,7 @@ impl HybridStorage {
             .collect()
     }
 
-    async fn publish_bulk(
+    pub(in crate::storage) async fn publish_bulk(
         self: &Arc<Self>,
         pool: &SqlitePool,
         writer: &SqliteWritePool,

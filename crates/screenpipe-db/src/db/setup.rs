@@ -81,6 +81,28 @@ fn preflight_existing_database_header(path: &Path) -> Result<(), SqlxError> {
     Ok(())
 }
 
+pub(crate) fn register_sqlite_extensions() -> Result<(), sqlx::Error> {
+    unsafe {
+        // The current sqlite-vec Rust binding exposes this symbol as `fn()`, while its C
+        // implementation uses SQLite's three-argument extension ABI.
+        type SqliteExtensionInit = unsafe extern "C" fn(
+            *mut libsqlite3_sys::sqlite3,
+            *mut *mut std::ffi::c_char,
+            *const libsqlite3_sys::sqlite3_api_routines,
+        ) -> std::ffi::c_int;
+
+        let init =
+            std::mem::transmute::<unsafe extern "C" fn(), SqliteExtensionInit>(sqlite3_vec_init);
+        let rc = sqlite3_auto_extension(Some(init));
+        if rc != libsqlite3_sys::SQLITE_OK {
+            return Err(SqlxError::Protocol(format!(
+                "failed to register sqlite-vec auto-extension: SQLite error code {rc}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl DatabaseManager {
     /// Give an independently owned worker access to the dedicated write pool
     /// only while it participates in this database's single-writer protocol.
@@ -120,25 +142,7 @@ impl DatabaseManager {
         );
         let connection_string = format!("sqlite:{}", database_path);
 
-        unsafe {
-            // The current sqlite-vec Rust binding exposes this symbol as `fn()`, while its C
-            // implementation uses SQLite's three-argument extension ABI.
-            type SqliteExtensionInit = unsafe extern "C" fn(
-                *mut libsqlite3_sys::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const libsqlite3_sys::sqlite3_api_routines,
-            ) -> std::ffi::c_int;
-
-            let init = std::mem::transmute::<unsafe extern "C" fn(), SqliteExtensionInit>(
-                sqlite3_vec_init,
-            );
-            let rc = sqlite3_auto_extension(Some(init));
-            if rc != libsqlite3_sys::SQLITE_OK {
-                return Err(SqlxError::Protocol(format!(
-                    "failed to register sqlite-vec auto-extension: SQLite error code {rc}"
-                )));
-            }
-        }
+        register_sqlite_extensions()?;
 
         // Ensure the data dir exists before opening the file — a missing parent
         // dir makes SQLite fail with "unable to open database file"
