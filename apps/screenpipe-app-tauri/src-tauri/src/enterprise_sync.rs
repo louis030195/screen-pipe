@@ -1575,6 +1575,10 @@ mod imp {
                                 );
                             }
                         }
+                        // Hidden installs may never create the migration UI.
+                        // This returns after scheduling native maintenance so
+                        // policy revocation continues to be polled while it runs.
+                        crate::storage_migration::maybe_start_hidden_ui_migration(app.clone()).await;
                     }
                     NativeAuthorizationResult::RecordingDisabled => {
                         crate::enterprise_policy::update_recording_authorized(false);

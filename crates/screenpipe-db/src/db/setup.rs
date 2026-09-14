@@ -559,11 +559,15 @@ impl DatabaseManager {
 
         if background && !bootstrap_storage {
             if let Some(storage) = &db_manager.storage {
-                storage.spawn_maintenance(
-                    db_manager.pool.clone(),
-                    db_manager.coordinated_writer(),
-                    db_manager.close_token.clone(),
-                );
+                // A recovered migration keeps resident recording data in SQLite.
+                // Starting the sealer here would silently retry its conversion.
+                if !storage.root.join("storage-migration.json").exists() {
+                    storage.spawn_maintenance(
+                        db_manager.pool.clone(),
+                        db_manager.coordinated_writer(),
+                        db_manager.close_token.clone(),
+                    );
+                }
             }
         }
 

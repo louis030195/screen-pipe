@@ -14,7 +14,7 @@ export function StorageMigrationDescription() {
   return <>
     <span className="mt-3 block">Screenpipe will pause recording and history access while it converts and verifies your history, then restore your recording preference.</span>
     <span className="mt-3 block">Keep the app open. Your computer will stay awake. Progress and elapsed time will be shown; the time needed depends on your database and computer.</span>
-    <span className="mt-3 block">Space is recovered as each batch is verified. Your existing database becomes the smaller index. If you close the app, migration resumes on the next launch.</span>
+    <span className="mt-3 block">Space is recovered as each batch is verified. Your existing database becomes the smaller index. If migration fails or is interrupted, recording resumes with your saved preference. You can retry migration later.</span>
   </>;
 }
 
@@ -116,7 +116,7 @@ export function StorageMigrationPrompt({ activity }: { activity: StorageMigratio
           {status?.bytes_saved != null && <p>Space saved: {migrationBytes(status.bytes_saved)}</p>}
         </div>}
         {failure && <p className="text-sm text-destructive" role="alert">{failure}</p>}
-        {!success && <p className="text-xs text-muted-foreground">{status?.pending && status.in_place ? "Resume migration to use history and recording again. Your completed progress is saved." : "You can also start later in Settings → Storage."}</p>}
+        {!success && <p className="text-xs text-muted-foreground">{status?.pending && status.in_place ? "Your completed progress is saved. Recording uses your saved preference while migration waits for you to retry." : "You can also start later in Settings → Storage."}</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={submitting} onClick={dismiss}>{success ? "done" : "do later"}</AlertDialogCancel>
           {status?.can_cancel && !success && <Button variant="outline" disabled={submitting} onClick={() => void run(true)}>use original database</Button>}

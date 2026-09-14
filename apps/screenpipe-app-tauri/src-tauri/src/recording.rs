@@ -1061,6 +1061,9 @@ pub(crate) async fn spawn_screenpipe_inner(
     if let Some(resumed) = resumed {
         crate::storage_migration::finish_startup(&app, resumed, result).await
     } else {
+        if result.is_ok() {
+            crate::storage_migration::finish_recording_recovery(&app).await?;
+        }
         result
     }
 }

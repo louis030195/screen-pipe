@@ -337,6 +337,41 @@ async fn legacy_migration_preserves_original_until_explicit_deletion_on_live_gen
         "after activation"
     );
     db.close().await;
+    // Automatic hidden-UI cleanup must also survive the next app launch:
+    // opening the legacy path follows the active generation even when the
+    // original file is gone, preserving old history and subsequent writes.
+    let reopened = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert!(!path.exists());
+    let payloads = reopened
+        .frame_payloads(&[7, 8], Projection::Search)
+        .await
+        .unwrap();
+    assert_eq!(payloads[&7].text(), "migration café");
+    assert_eq!(payloads[&8].text(), "after activation");
+    assert_eq!(
+        search(&reopened, "migration")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    seed(&reopened, 9, Some("after cleanup restart"), None).await;
+    assert_eq!(
+        reopened
+            .frame_payloads(&[9], Projection::Search)
+            .await
+            .unwrap()[&9]
+            .text(),
+        "after cleanup restart"
+    );
+    assert_eq!(
+        search(&reopened, "cleanup").await.as_array().unwrap().len(),
+        1
+    );
+    reopened.close().await;
 }
 
 #[tokio::test]
@@ -725,10 +760,11 @@ async fn interrupted_initialization_resumes_its_recorded_generation() {
 
 #[cfg(feature = "storage-fault-injection")]
 #[tokio::test]
-async fn interrupted_desktop_migration_blocks_recording_until_resume_completes() {
-    use screenpipe_db::storage::pause_interrupted_migration;
+async fn interrupted_desktop_migration_restores_recording_without_conversion_retry() {
+    use screenpipe_db::storage::recover_interrupted_migration;
 
     for point in [
+        "migration_before_rename",
         "migration_after_rename",
         "migration_ready",
         "migration_activated",
@@ -748,15 +784,29 @@ async fn interrupted_desktop_migration_blocks_recording_until_resume_completes()
             .unwrap();
         assert_eq!(killed.status.code(), Some(86), "{point}");
 
-        pause_interrupted_migration(root.path()).unwrap();
-        assert!(
-            DatabaseManager::new(path.to_str().unwrap(), Default::default())
+        for id in 8..=9 {
+            recover_interrupted_migration(root.path(), Default::default())
                 .await
-                .is_err()
-        );
-        migrate(root.path(), Default::default(), Default::default())
+                .unwrap();
+            let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                db.frame_payloads(&[7], Projection::Search).await.unwrap()[&7].text(),
+                "before restart"
+            );
+            seed(&db, id, Some("recording with migration paused"), None).await;
+            assert_eq!(
+                search(&db, "recording").await.as_array().unwrap().len(),
+                (id - 7) as usize
+            );
+            db.close().await;
+        }
+        assert!(root.path().join("storage-migration.json").exists());
+        let report = migrate(root.path(), Default::default(), Default::default())
             .await
             .unwrap();
+        assert_eq!(report.frames, 3);
         let db = DatabaseManager::new(path.to_str().unwrap(), Default::default())
             .await
             .unwrap();
@@ -764,7 +814,14 @@ async fn interrupted_desktop_migration_blocks_recording_until_resume_completes()
             db.frame_payloads(&[7], Projection::Search).await.unwrap()[&7].text(),
             "before restart"
         );
-        seed(&db, 8, Some("after restart"), None).await;
+        seed(&db, 10, Some("after explicit retry"), None).await;
+        assert_eq!(
+            db.frame_payloads(&[8, 9, 10], Projection::Search)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
         assert!(db.storage_descriptor().is_some());
         assert!(!path.is_file(), "source reused at {point}");
         db.close().await;
