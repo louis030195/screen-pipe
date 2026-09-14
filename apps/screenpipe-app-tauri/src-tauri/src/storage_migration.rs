@@ -211,6 +211,11 @@ pub(crate) async fn resume_before_startup(
             wants_recording && crate::recording::recording_access_allowed(app, &settings),
         );
     }
+    // An explicit migration already owns progress, the wake lock and final
+    // activation verification. Its reopen must not start a second operation.
+    if is_running(app) {
+        return Ok(None);
+    }
     let needs_conversion = pending
         || migration_report(&root)
             .map_err(|e| e.to_string())?
