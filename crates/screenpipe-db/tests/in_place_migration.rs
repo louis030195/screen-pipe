@@ -614,6 +614,7 @@ async fn reuses_index_and_preserves_history_and_compact_backup() {
 }
 
 #[tokio::test]
+#[cfg(feature = "storage-fault-injection")]
 async fn recording_recovery_keeps_committed_payloads_and_survives_restarts() {
     use screenpipe_db::storage::{inventory, recover_interrupted_migration, PrivacyPolicy};
     for (point, hit) in [
@@ -745,6 +746,7 @@ async fn recording_recovery_keeps_committed_payloads_and_survives_restarts() {
 }
 
 #[tokio::test]
+#[cfg(feature = "storage-fault-injection")]
 async fn recording_recovery_child() {
     let Ok(root) = std::env::var("SCREENPIPE_TEST_RECOVERY_ROOT") else {
         return;
@@ -758,6 +760,7 @@ async fn recording_recovery_child() {
 }
 
 #[tokio::test]
+#[cfg(feature = "storage-fault-injection")]
 async fn recording_recovery_is_durable_when_interrupted_before_or_after_activation() {
     for point in ["migration_recovery_ready", "migration_recovery_activated"] {
         let root = tempfile::tempdir().unwrap();
