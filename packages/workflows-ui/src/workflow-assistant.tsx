@@ -4,18 +4,19 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowUp, Check, ChevronDown, Copy, MessageCircle, PanelRight, PanelRightClose, Plus, Search, Square, SquarePen, RotateCcw, X, Maximize2 } from "lucide-react";
+import { ArrowLeft, ArrowUp, Check, ChevronDown, Copy, MessageCircle, Minus, PanelRight, PanelRightClose, Plus, Search, Square, SquarePen, RotateCcw, X, Maximize2 } from "lucide-react";
 import { assistantContextSnapshot, emptyAssistantState, newAssistantConversation, isAssistantLink, type AssistantContext, type AssistantMessage, type AssistantState, type WorkflowsAssistantPlatform } from "./assistant";
 import { ChatMarkdown, ComposerTextArea, ChatJumpToLatest } from "./chat-primitives";
 import { matchesSidebarShortcut, useSidebarShortcuts } from "./sidebar-shortcuts";
 import styles from "./workflow-assistant.module.css";
 
-export function WorkflowAssistant({ platform, context, onDockChange, onWidthChange, onOpenChange, headerToggle = false, active = true }: {
+export function WorkflowAssistant({ platform, context, onDockChange, onWidthChange, onOpenChange, onModeChange, headerToggle = false, active = true }: {
   platform: WorkflowsAssistantPlatform;
   context: AssistantContext;
   onDockChange: (docked: boolean) => void;
   onWidthChange?: (width: number) => void;
   onOpenChange?: (open: boolean) => void;
+  onModeChange?: (mode: AssistantState["mode"]) => void;
   headerToggle?: boolean;
   active?: boolean;
 }) {
@@ -86,6 +87,7 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
   useEffect(() => { onDockChange(open && state.mode === "sidebar"); }, [open, state.mode, onDockChange]);
   useEffect(() => { onWidthChange?.(width); }, [width, onWidthChange]);
   useEffect(() => { onOpenChange?.(open); }, [open, onOpenChange]);
+  useEffect(() => { onModeChange?.(state.mode); }, [state.mode, onModeChange]);
   useEffect(() => { if (open && loaded) (historyOpen ? historyInput.current : input.current)?.focus(); }, [open, loaded, historyOpen]);
   useEffect(() => {
     if (displayOpen) displayMenu.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
@@ -255,8 +257,8 @@ export function WorkflowAssistant({ platform, context, onDockChange, onWidthChan
               <button role="menuitemradio" aria-checked={state.mode === "sidebar"} onClick={() => chooseMode("sidebar")}><PanelRight size={15} /><span>Sidebar</span>{state.mode === "sidebar" && <Check size={14} />}</button>
             </div>}
           </div>
-          <button aria-label="Collapse right sidebar" title={`Collapse chat (${shortcuts.right.keys.join(" ")})`} aria-expanded={true}
-            aria-controls="workflows-assistant" aria-keyshortcuts={shortcuts.right.aria} onClick={close}><PanelRightClose size={18} /></button>
+          <button aria-label={state.mode === "floating" ? "Minimize chat" : "Collapse right sidebar"} title={`${state.mode === "floating" ? "Minimize chat" : "Collapse right sidebar"} (${shortcuts.right.keys.join(" ")})`} aria-expanded={true}
+            aria-controls="workflows-assistant" aria-keyshortcuts={shortcuts.right.aria} onClick={close}>{state.mode === "floating" ? <Minus size={18} /> : <PanelRightClose size={18} />}</button>
         </div>
       </header>
       <div className={styles.body} ref={scroll} data-workflows-chat-scroll role={historyOpen ? undefined : "log"} aria-label={historyOpen ? undefined : "Conversation"} aria-live="off"

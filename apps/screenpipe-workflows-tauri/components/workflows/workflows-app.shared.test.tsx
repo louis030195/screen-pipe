@@ -38,7 +38,33 @@ describe("shared workflows experience", () => {
     expect(await screen.findByRole("button", { name: "Open left sidebar" })).toHaveAttribute("aria-expanded", "false");
     fireEvent.keyDown(window, { key: "k", metaKey: true });
     expect(screen.getByText("Toggle left sidebar")).toBeVisible();
-    expect(screen.getByText("Toggle right sidebar")).toBeVisible();
+    expect(screen.getByText("Toggle chat")).toBeVisible();
+  });
+
+  it("uses minimize and chat controls in floating mode and preserves the draft when reopened", async () => {
+    render(<WorkflowsApp platform={createFixtureWorkflowsPlatform()} initialAnalysis={fixtureWorkflowAnalysis} storageKey={null} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open right sidebar" }));
+    const input = await screen.findByRole("textbox", { name: "Ask Screenpipe" });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "Keep my floating draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Chat display" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Floating" }));
+    const minimizeButtons = screen.getAllByRole("button", { name: "Minimize chat" });
+    expect(minimizeButtons).toHaveLength(2);
+    for (const button of minimizeButtons) expect(button.querySelector("svg")).toHaveClass("lucide-minus");
+    expect(screen.queryByRole("button", { name: "Collapse right sidebar" })).not.toBeInTheDocument();
+    fireEvent.click(minimizeButtons[1]);
+    const reopen = screen.getByRole("button", { name: "Open chat" });
+    expect(reopen.querySelector("svg")).toHaveClass("lucide-message-circle");
+    fireEvent.click(reopen);
+    expect(screen.getByRole("textbox", { name: "Ask Screenpipe" })).toHaveValue("Keep my floating draft");
+    fireEvent.keyDown(input, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+    expect(screen.getByRole("button", { name: "Open chat" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Open chat" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chat display" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Sidebar" }));
+    expect(screen.getByRole("button", { name: "Collapse right sidebar" }).querySelector("svg")).toHaveClass("lucide-panel-right-close");
+    expect(screen.queryByRole("button", { name: "Minimize chat" })).not.toBeInTheDocument();
   });
 
   it("ignores workspace shortcuts while inactive and retains the draft when returning", async () => {

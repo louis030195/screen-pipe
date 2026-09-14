@@ -6,7 +6,7 @@
 import { matchesSidebarShortcut, useSidebarShortcuts } from "./sidebar-shortcuts";
 import { WorkflowAssistant } from "./workflow-assistant";
 import { CapturedMomentButton, WorkflowReplay } from "./workflow-replay";
-import type { AssistantContext } from "./assistant";
+import type { AssistantContext, AssistantState } from "./assistant";
 
 import {
   AlertTriangle,
@@ -32,6 +32,8 @@ import {
   ListTree,
   LogIn,
   LockKeyhole,
+  MessageCircle,
+  Minus,
   Plus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -389,6 +391,10 @@ function AppShell({
 }) {
   const [assistantDocked, setAssistantDocked] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantMode, setAssistantMode] = useState<AssistantState["mode"]>("sidebar");
+  const assistantToggleLabel = assistantMode === "floating"
+    ? assistantOpen ? "Minimize chat" : "Open chat"
+    : assistantOpen ? "Collapse right sidebar" : "Open right sidebar";
   const [navigationCollapsed, setNavigationCollapsed] = useState(false);
   const shortcuts = useSidebarShortcuts();
   const toggleNavigation = useCallback(() => {
@@ -476,10 +482,12 @@ function AppShell({
           <Pill tone={runtime?.recording ? "green" : "plain"}><span className={styles.liveDot} />{statusLabel}</Pill>
           {assistant && !assistantDocked && <button className={styles.panelToggle} data-workflows-assistant-toggle
             onClick={() => window.dispatchEvent(new Event("workflows:toggle-assistant"))}
-            aria-label={assistantOpen ? "Collapse right sidebar" : "Open right sidebar"}
-            title={`${assistantOpen ? "Collapse" : "Open"} chat (${shortcuts.right.keys.join(" ")})`}
+            aria-label={assistantToggleLabel}
+            title={`${assistantToggleLabel} (${shortcuts.right.keys.join(" ")})`}
             aria-expanded={assistantOpen} aria-controls="workflows-assistant" aria-keyshortcuts={shortcuts.right.aria}>
-            {assistantOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+            {assistantMode === "floating"
+              ? assistantOpen ? <Minus size={18} /> : <MessageCircle size={18} />
+              : assistantOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
           </button>}
         </header>
         {embedded && <nav className={styles.embeddedNav} aria-label="Workflows sections">
@@ -489,7 +497,7 @@ function AppShell({
         </nav>}
         <main className={styles.main}>{children}</main>
       </section>
-      {assistant && <WorkflowAssistant active={active} platform={assistant.platform} context={assistant.context} onDockChange={setAssistantDocked} onWidthChange={setAssistantWidth} onOpenChange={setAssistantOpen} headerToggle />}
+      {assistant && <WorkflowAssistant active={active} platform={assistant.platform} context={assistant.context} onDockChange={setAssistantDocked} onWidthChange={setAssistantWidth} onOpenChange={setAssistantOpen} onModeChange={setAssistantMode} headerToggle />}
     </div>
   );
 }
@@ -1447,8 +1455,8 @@ export function WorkflowsApp({ platform, initialAnalysis = null, storageKey = "s
         action: () => window.dispatchEvent(new Event("workflows:toggle-navigation")),
       }] : []),
       ...(platform.assistant ? [{
-        id: "action-assistant", label: "Toggle right sidebar", detail: "Ask Screenpipe · collapse or reopen chat",
-        group: "Actions" as const, icon: PanelRightClose, shortcut: shortcuts.right.keys,
+        id: "action-assistant", label: "Toggle chat", detail: "Ask Screenpipe · hide or reopen chat",
+        group: "Actions" as const, icon: MessageCircle, shortcut: shortcuts.right.keys,
         action: () => window.dispatchEvent(new Event("workflows:toggle-assistant")),
       }] : []),
       {

@@ -24,6 +24,8 @@ Next.js development badge; it was hidden for the subsequent captures.
 | 10-onboarding-first-task.png | Production first-task component in the maintained mock harness |
 | 11-onboarding-workflow-focus.png | Optional workflow focus, examples, and skip |
 | 12-compact-work-profile.png | Work profile at 900 × 720 with navigation collapsed |
+| 13-floating-chat-minimize.png | Floating chat with mode-aware minus controls and a fictional draft |
+| 14-floating-chat-reopen.png | Minimized floating chat with a speech-bubble reopening control |
 
 Onboarding placement: existing login → acquisition (consumer) → permissions →
 optional timeline choice → engine → plan when required → recommended setup →
@@ -45,3 +47,8 @@ chats, independent pane toggles, the correct command menu in the active mode,
 profile navigation, and the 900px layout. macOS key events were exercised in the
 browser. Windows/Linux modifier semantics are covered by unit tests; their
 native windows have not been exercised for this PR.
+
+Floating-mode verification: clicking minimize and pressing Option+Cmd+B both hide
+the panel; reopening preserves its draft and floating mode. These captures retain
+the Next.js preview badge. The focused UI suites pass 37 tests, including Windows/
+Linux modifier semantics and switching back to the docked sidebar icon.
