@@ -2177,6 +2177,10 @@ async fn main() {
                                 ).await {
                                     error!("Could not finish migration startup: {error}");
                                 }
+                            } else if let Err(error) = crate::storage_migration::finish_recording_recovery(
+                                &app_for_owned,
+                            ).await {
+                                error!("Could not finish recording recovery: {error}");
                             }
                             is_starting_clone
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
