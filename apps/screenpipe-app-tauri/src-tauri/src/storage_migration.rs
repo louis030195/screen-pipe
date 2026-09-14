@@ -126,6 +126,41 @@ fn progress(app: &tauri::AppHandle, update: MigrationProgress) {
     });
 }
 
+fn track_completed_migration(app: &tauri::AppHandle, root: &Path) {
+    let Some(analytics) = app.try_state::<std::sync::Arc<crate::analytics::AnalyticsManager>>()
+    else {
+        return;
+    };
+    // Use sizes captured in the verified conversion receipt, so resumed recording
+    // cannot change the comparison. Exclude the recovery copy and external media.
+    let report = match migration_report(root) {
+        Ok(Some(report)) => report,
+        result => {
+            tracing::warn!(?result, "migration telemetry receipt unavailable");
+            return;
+        }
+    };
+    let migrated_db_bytes = report.index_bytes.saturating_add(report.payload_bytes);
+    if migrated_db_bytes == 0 {
+        return;
+    }
+    let event = "storage_migration_completed";
+    let properties = serde_json::json!({
+        "$insert_id": format!("{event}:{}", report.generation),
+        "original_db_bytes": report.source_bytes,
+        "migrated_db_bytes": migrated_db_bytes,
+        "compression_multiplier": report.source_bytes as f64 / migrated_db_bytes as f64,
+    });
+    let analytics = std::sync::Arc::clone(&analytics);
+    // AnalyticsManager honors the existing telemetry preference. Delivery never
+    // holds up the migration UI, recording, or release of the wake lock.
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = analytics.send_event(event, Some(properties)).await {
+            tracing::warn!(%error, event, "migration telemetry delivery failed");
+        }
+    });
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_storage_migration_status(
@@ -288,6 +323,9 @@ pub async fn start_storage_migration(
             }
             Ok::<_, String>(())
         }.await;
+        if result.is_ok() {
+            track_completed_migration(&app, &root);
+        }
         update_operation(&app, |operation| {
             operation.elapsed_seconds = operation.activity().elapsed_seconds;
             operation.started_at = None;
