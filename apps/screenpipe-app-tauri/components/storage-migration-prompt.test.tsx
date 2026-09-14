@@ -18,7 +18,9 @@ let status: StorageMigrationStatus;
 beforeEach(() => {
   vi.clearAllMocks();
   sessionStorage.clear();
+  window.localStorage.clear();
   status = {
+    app_session_id: "app-launch-1",
     root: "/fixture", busy: false, message: "", error: null, pending: false,
     completed: false, using_new_storage: false, generation: null, source_bytes: 20 * 1024 ** 3,
     migrated_bytes: null, can_migrate: true, can_cancel: false, can_delete_source: false,
@@ -44,14 +46,27 @@ describe("automatic storage migration prompt", () => {
     expect(commands.deleteOriginalStorageDatabase).not.toHaveBeenCalled();
   });
 
-  it("respects do later across remounts without starting or deleting anything", async () => {
+  it("respects do later when a webview is recreated in the same app process", async () => {
     const app = render(<StorageMigrationPrompt activity={idle} />);
     fireEvent.click(await screen.findByRole("button", { name: "do later" }));
     expect(screen.queryByRole("alertdialog")).toBeNull();
     app.unmount();
+    sessionStorage.clear();
     render(<StorageMigrationPrompt activity={idle} />);
     await waitFor(() => expect(commands.getStorageMigrationStatus).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(commands.startStorageMigration).not.toHaveBeenCalled();
+    expect(commands.deleteOriginalStorageDatabase).not.toHaveBeenCalled();
+  });
+
+  it("offers migration after every app process restart even with webview storage retained", async () => {
+    for (const session of ["app-launch-1", "app-launch-2", "app-launch-3"]) {
+      status.app_session_id = session;
+      const app = render(<StorageMigrationPrompt activity={idle} />);
+      fireEvent.click(await screen.findByRole("button", { name: "do later" }));
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+      app.unmount();
+    }
     expect(commands.startStorageMigration).not.toHaveBeenCalled();
     expect(commands.deleteOriginalStorageDatabase).not.toHaveBeenCalled();
   });

@@ -25,6 +25,7 @@ const migrated = (overrides: Partial<StorageMigrationStatus> = {}) => {
 beforeEach(() => {
   vi.clearAllMocks();
   status = {
+    app_session_id: "app-launch-1",
     root: "/fixture", busy: false, message: "", error: null, pending: false,
     completed: false, using_new_storage: false, generation: null, source_bytes: 12000,
     migrated_bytes: null, can_migrate: true, can_cancel: false, can_delete_source: false,

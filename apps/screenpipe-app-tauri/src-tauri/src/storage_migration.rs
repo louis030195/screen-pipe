@@ -6,10 +6,13 @@ use screenpipe_db::storage::{migration_report, MigrationProgress, StorageDescrip
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{LazyLock, Mutex},
     time::Instant,
 };
 use tauri::{Emitter, Manager, State};
+
+// Shared by every webview and recorder restart; renewed only by a new app process.
+static APP_SESSION_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
 #[derive(Default, Clone)]
 struct Operation {
@@ -78,6 +81,7 @@ fn update_operation(app: &tauri::AppHandle, update: impl FnOnce(&mut Operation))
 #[derive(Clone, Serialize, specta::Type)]
 pub struct StorageMigrationStatus {
     pub root: String,
+    pub app_session_id: String,
     pub busy: bool,
     pub message: String,
     pub error: Option<String>,
@@ -228,6 +232,7 @@ pub async fn get_storage_migration_status(
             || (completed && (!using_new_storage || error.is_some())));
     Ok(StorageMigrationStatus {
         root: root.display().to_string(),
+        app_session_id: APP_SESSION_ID.clone(),
         busy: operation.busy,
         message: if operation.busy {
             operation.message
