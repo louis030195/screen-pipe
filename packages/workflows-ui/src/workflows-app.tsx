@@ -91,13 +91,6 @@ import {
 import type { WorkflowAnalysisJob, WorkflowsAppProps, WorkflowsPlatform } from "./platform";
 import styles from "./workflows-app.module.css";
 
-const processingSteps = [
-  ["Gathering the selected period", "Preparing a bounded view of your recent work"],
-  ["Testing workflow hypotheses", "Checking each pattern against separate captured days"],
-  ["Removing overlaps", "Keeping aliases and related topics out of the catalog"],
-  ["Checking constraints", "Separating what you can change from external dependencies"],
-] as const;
-
 const primaryNavigation = [
   ["workflows", ListTree, "Workflows", ["G", "W"]],
   ["profile", UserRoundCog, "Work profile", ["G", "P"]],
@@ -516,21 +509,9 @@ function EmptyWorkMap({ analyzing, analyze }: { analyzing: boolean; analyze: () 
 }
 
 function ProcessingView() {
-  const [active, setActive] = useState(0);
-  useEffect(() => {
-    const timer = window.setInterval(() => setActive((value) => (value + 1) % processingSteps.length), 2400);
-    return () => window.clearInterval(timer);
-  }, []);
   return (
-    <section className={styles.processing}>
-      <div className={styles.processingHead}><span className={styles.spinner} /><div><h2>Building your workflow catalog</h2><p>Reviewing the last {WORKFLOW_CATALOG_DAYS} days. This can take a few minutes.</p></div></div>
-      <div className={styles.processingSteps}>
-        {processingSteps.map(([title, detail], index) => (
-          <div key={title} className={index === active ? styles.processingActive : ""}>
-            <span>{index + 1}</span><div><strong>{title}</strong><p>{detail}</p></div>
-          </div>
-        ))}
-      </div>
+    <section className={styles.processing} role="status">
+      <div className={styles.processingHead}><span className={styles.spinner} /><div><h2>Building your workflow catalog</h2><p>Reviewing captured work from the last {WORKFLOW_CATALOG_DAYS} days. Your catalog will appear when processing finishes.</p></div></div>
     </section>
   );
 }

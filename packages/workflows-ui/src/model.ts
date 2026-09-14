@@ -222,6 +222,7 @@ export type WorkflowAnalysis = {
   timeProfile?: TimeProfile | null;
   quality: AnalysisQuality;
   scope?: WorkflowScope;
+  diagnostics?: { agentRuns: number; sourceReads: number; elapsedMs: number };
   processing?: {
     location: "device" | "cloud" | "confidential-cloud";
     label: string;

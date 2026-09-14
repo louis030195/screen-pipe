@@ -2857,6 +2857,9 @@ pub async fn pi_start_inner(
         Some(crate::workflows_runtime::assistant_agent_context(&app).await?)
     } else { None };
     let user_token = assistant_context.as_ref().map(|(_, token)| token.clone()).or(user_token);
+    let workflow_api = if session_id.starts_with("__title:workflows-") {
+        Some(crate::workflows_runtime::workflow_recorder_context(&app).await?)
+    } else { None };
     let project_dir = project_dir.trim().to_string();
     if project_dir.is_empty() {
         return Err("Project directory is required".to_string());
@@ -3555,7 +3558,7 @@ pub async fn pi_start_inner(
     // Pass local API config so the Pi agent can authenticate to the runtime local API.
     {
         use crate::recording::local_api_context_from_app;
-        let api = assistant_context.as_ref().map(|(api, _)| api.clone())
+        let api = assistant_context.as_ref().map(|(api, _)| api.clone()).or(workflow_api)
             .unwrap_or_else(|| local_api_context_from_app(&app));
         apply_local_api_context(&mut cmd, &api);
     }

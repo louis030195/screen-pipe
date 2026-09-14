@@ -26,6 +26,7 @@ Next.js development badge; it was hidden for the subsequent captures.
 | 12-compact-work-profile.png | Work profile at 900 × 720 with navigation collapsed |
 | 13-floating-chat-minimize.png | Floating chat with mode-aware minus controls and a fictional draft |
 | 14-floating-chat-reopen.png | Minimized floating chat with a speech-bubble reopening control |
+| 15-processing-status.png | Honest pending status without timer-driven processing stages |
 
 Onboarding placement: existing login → acquisition (consumer) → permissions →
 optional timeline choice → engine → plan when required → recommended setup →
@@ -52,3 +53,7 @@ Floating-mode verification: clicking minimize and pressing Option+Cmd+B both hid
 the panel; reopening preserves its draft and floating mode. These captures retain
 the Next.js preview badge. The focused UI suites pass 37 tests, including Windows/
 Linux modifier semantics and switching back to the docked sidebar icon.
+
+Processing capture uses Processing preview → Build my workflow catalog in the
+maintained mock route. This deliberately leaves the fixture promise pending;
+switch preview states to exit. It demonstrates UI status only, not an agent run.

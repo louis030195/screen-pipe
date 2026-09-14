@@ -337,13 +337,6 @@
 .processingHead { display: flex; align-items: center; gap: 14px; padding-bottom: 22px; border-bottom: 1px solid #e6e7e1; }
 .processingHead h2 { margin: 0 0 5px; font-size: 17px; }
 .processingHead p { margin: 0; color: #7b7f74; font-size: 9px; }
-.processingSteps { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; padding-top: 18px; }
-.processingSteps > div { min-height: 92px; display: grid; grid-template-columns: 24px 1fr; gap: 9px; padding: 13px; border: 1px solid #e5e6e0; border-radius: 8px; opacity: .55; transition: .2s ease; }
-.processingSteps > div > span { width: 21px; height: 21px; display: grid; place-items: center; border: 1px solid #d7d9d1; border-radius: 50%; font-size: 8px; }
-.processingSteps strong { font-size: 9px; }
-.processingSteps p { margin: 5px 0 0; color: #898c83; font-size: 8px; line-height: 1.45; }
-.processingSteps .processingActive { border-color: #bdca9c; background: #f5f9e9; opacity: 1; }
-.processingSteps .processingActive > span { border-color: var(--ink); background: var(--ink); color: var(--lime); }
 .errorNotice { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 18px; padding: 14px 16px; border: 1px solid #efd1ca; border-radius: 9px; background: #fff4f1; color: #8c3e31; }
 .errorNotice > div { flex: 1; }
 .errorNotice strong { font-size: 10px; }
@@ -736,7 +729,6 @@
   .heroProof { max-width: 330px; }
   .timeMap > button { grid-template-columns: minmax(230px,1fr) minmax(180px,.9fr) 22px; }
   .timeLegend { display: none; }
-  .processingSteps { grid-template-columns: repeat(2,1fr); }
   .filterPanel { grid-template-columns: repeat(2,minmax(150px,1fr)); }
   .filterPanel > button { justify-self: start; }
   .qualityDetails { grid-template-columns: repeat(2,1fr); }
@@ -802,7 +794,6 @@
   .stageSummary > .stageChevron { grid-column: 3; grid-row: 1; }
   .bottleneckList article { grid-template-columns: 26px 1fr; }
   .bottleneckTime { grid-column: 2; padding: 10px 0 0; border: 0; }
-  .processingSteps { grid-template-columns: 1fr; }
   .filterBar { align-items: flex-start; flex-wrap: wrap; }
   .filterBar > div { width: 100%; }
   .filterPanel { grid-template-columns: 1fr; }

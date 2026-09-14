@@ -7,6 +7,7 @@ import extension, { memoryPath } from "../workflow-memory";
 describe("bounded local memory tools", () => {
   it("restricts paths and parameters regardless of agent arguments", () => {
     expect(memoryPath("search-content", { q: "hello & secret=true", limit: 1000, offset: -1, url: "https://evil.test", include_frames: true })).toBe("/search?limit=30&offset=0&q=hello+%26+secret%3Dtrue&include_frames=false");
+    expect(memoryPath("search-content", { offset: 2040 })).toContain("offset=2040");
     expect(() => memoryPath("delete", {})).toThrow();
     expect(() => memoryPath("get-meeting", { id: "../delete" })).toThrow();
     expect(memoryPath("get-meeting", { id: 23, include_transcript: true })).toBe("/meetings/23/transcript");
