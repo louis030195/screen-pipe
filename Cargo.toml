@@ -91,7 +91,7 @@ sysinfo = "0.29"
 axum = { version = "0.7", features = ["ws", "multipart"] }
 hex = "0.4"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 
 # Database
