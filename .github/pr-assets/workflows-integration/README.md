@@ -13,7 +13,7 @@ Next.js development badge; it was hidden for the subsequent captures.
 | Image | State |
 | --- | --- |
 | 01-before-main.png | Parent main navigation before the workspace menu |
-| 02-workspace-switcher.png | Screenpipe / Screenpipe Workflows menu open |
+| 02-workspace-switcher.png | Chat / Workflows menu open |
 | 03-first-workflow-empty.png | First entry, no catalog yet, explicit build action |
 | 04-workflow-catalog.png | Fictional catalog inside the main application |
 | 05-workflow-and-assistant.png | Workflow detail and fixture assistant response |
