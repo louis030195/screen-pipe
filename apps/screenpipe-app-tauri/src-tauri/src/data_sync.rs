@@ -31,6 +31,7 @@ mod imp {
     #[derive(Clone)]
     struct SyncConfig {
         token: String,
+        account_id: String,
         device_id: String,
         device_label: String,
         device_enabled_at: Option<DateTime<Utc>>,
@@ -215,6 +216,7 @@ mod imp {
         let cursor_path = app.path().app_data_dir().ok()?.join(CURSOR_FILENAME);
 
         Some(SyncConfig {
+            account_id: settings.user.id.clone()?,
             token,
             device_id: settings.device_id,
             device_label,
@@ -558,6 +560,33 @@ mod imp {
         cursor.clamp_to(Some(enabled_at));
         cursor.save(&config.cursor_path)?;
 
+        let db = app
+            .state::<crate::recording::RecordingState>()
+            .server
+            .lock()
+            .await
+            .as_ref()
+            .map(|server| std::sync::Arc::clone(&server.db))
+            .ok_or("recording database is not ready")?;
+        db.admit_consumer_sync()
+            .map_err(|error| error.to_string())?;
+        let read = db
+            .storage_read_token()
+            .await
+            .map_err(|error| error.to_string())?;
+        let binding = format!(
+            "consumer:{}:{}:{}",
+            config.ingest_url, config.account_id, config.device_id
+        );
+        if let Some(saved) = db
+            .upload_checkpoint(&binding)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            *cursor = serde_json::from_str(&saved)
+                .map_err(|error| format!("invalid source checkpoint: {error}"))?;
+            cursor.clamp_to(Some(enabled_at));
+        }
         let frames = local
             .frames(
                 cursor.last_frame_ts.as_deref().unwrap(),
@@ -619,7 +648,11 @@ mod imp {
         }
 
         for chunk in split_jsonl(body) {
-            let response = http
+            let admission = read
+                .admit(&db.pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            let upload = http
                 .post(&config.ingest_url)
                 .bearer_auth(&config.token)
                 .header("Content-Type", "application/x-ndjson")
@@ -628,7 +661,9 @@ mod imp {
                 .header("X-Screenpipe-Version", &config.app_version)
                 .header("X-Screenpipe-Platform", std::env::consts::OS)
                 .body(chunk)
-                .send()
+                .send();
+            drop(admission);
+            let response = upload
                 .await
                 .map_err(|error| format!("ingest request failed: {error}"))?;
             if !response.status().is_success() {
@@ -666,6 +701,12 @@ mod imp {
             &parsed,
             |row| &row.timestamp,
         );
+        db.save_upload_checkpoint(
+            &binding,
+            &serde_json::to_string(cursor).map_err(|error| error.to_string())?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         cursor.save(&config.cursor_path)?;
         debug!(
             "data sync uploaded frames={} audio={} ui={} memories={} parsed={}",

@@ -11,6 +11,9 @@ repository.workspace = true
 license-file.workspace = true
 edition.workspace = true
 
+[features]
+storage-fault-injection = []
+
 [dependencies]
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -21,6 +24,7 @@ sqlx = { workspace = true, features = [
 ] }
 sqlite-vec = "0.1.3"
 libsqlite3-sys = { workspace = true }
+rusqlite = { workspace = true, features = ["vtab"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true, features = ["std"] }
@@ -41,11 +45,20 @@ oasgen = { workspace = true }
 tracing-subscriber = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
+parquet = { version = "59.0.0", default-features = false, features = ["zstd"] }
+sha2 = { workspace = true }
+fs2 = "0.4"
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
 
 [dev-dependencies]
 screenpipe-core = { path = "../screenpipe-core" }
 screenpipe-secrets = { path = "../screenpipe-secrets" }
-tempfile = { workspace = true }
 
 [[bench]]
 name = "db_benchmarks"

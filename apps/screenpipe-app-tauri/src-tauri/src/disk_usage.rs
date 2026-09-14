@@ -484,14 +484,14 @@ pub(crate) async fn disk_usage_in(
 
     // Calculate capture and credential database size, including live sidecars.
     info!("Calculating database size");
-    let mut database_size: u64 = 0;
-    for file_name in [
-        "db.sqlite",
-        "db.sqlite-wal",
-        "db.sqlite-shm",
-        "secrets.sqlite",
-        "secrets.sqlite-journal",
-    ] {
+    let storage_files =
+        screenpipe_db::storage::inventory(&screenpipe_dir).map_err(|error| error.to_string())?;
+    let mut database_size: u64 = storage_files
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum();
+    for file_name in ["secrets.sqlite", "secrets.sqlite-journal"] {
         let db_path = screenpipe_dir.join(file_name);
         if db_path.exists() {
             if let Ok(metadata) = fs::metadata(&db_path) {

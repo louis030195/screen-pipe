@@ -52,11 +52,21 @@ static SQLITE_RUNTIME_CHECK: OnceLock<Result<SqliteRuntimeIdentity, String>> = O
 pub struct SqliteWritePool {
     pool: SqlitePool,
     coordinator: Arc<Semaphore>,
+    admission_gate: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl SqliteWritePool {
     pub fn new(pool: SqlitePool, coordinator: Arc<Semaphore>) -> Self {
-        Self { pool, coordinator }
+        Self {
+            pool,
+            coordinator,
+            admission_gate: None,
+        }
+    }
+
+    pub fn with_admission_gate(mut self, gate: Option<Arc<tokio::sync::Mutex<()>>>) -> Self {
+        self.admission_gate = gate;
+        self
     }
 
     /// Build a standalone capability for tests or independently owned
@@ -79,6 +89,10 @@ impl SqliteWritePool {
         Ok(SqliteWritePermit {
             pool: self.pool.clone(),
             _permit: permit,
+            _admission: match &self.admission_gate {
+                Some(gate) => Some(Arc::clone(gate).lock_owned().await),
+                None => None,
+            },
         })
     }
 }
@@ -87,6 +101,7 @@ impl SqliteWritePool {
 pub struct SqliteWritePermit {
     pool: SqlitePool,
     _permit: OwnedSemaphorePermit,
+    _admission: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl SqliteWritePermit {
@@ -116,6 +131,7 @@ pub struct SqliteManagerLease {
     key: PathBuf,
     owner: u64,
     released: AtomicBool,
+    process_lock: Mutex<Option<std::fs::File>>,
 }
 
 impl SqliteManagerLease {
@@ -130,6 +146,10 @@ impl SqliteManagerLease {
         if owners.get(&self.key) == Some(&self.owner) {
             owners.remove(&self.key);
         }
+        self.process_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 }
 
@@ -155,11 +175,26 @@ pub fn acquire_sqlite_manager_lease(
         ));
     }
     let owner = NEXT_SQLITE_MANAGER_OWNER.fetch_add(1, Ordering::Relaxed);
+    let ownership_path = PathBuf::from(format!("{}.owner", key.display()));
+    let process_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&ownership_path)
+        .map_err(|e| format!("cannot open database ownership file: {e}"))?;
+    fs2::FileExt::try_lock_exclusive(&process_lock).map_err(|_| {
+        format!(
+            "another process owns the database {}; close it before changing storage",
+            key.display()
+        )
+    })?;
     owners.insert(key.clone(), owner);
     Ok(SqliteManagerLease {
         key,
         owner,
         released: AtomicBool::new(false),
+        process_lock: Mutex::new(Some(process_lock)),
     })
 }
 

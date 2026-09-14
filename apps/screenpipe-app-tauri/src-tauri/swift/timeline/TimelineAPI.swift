@@ -107,14 +107,21 @@ struct SpeakerReassignResponse: Decodable, Equatable {
     }
 }
 
+struct FrameStreamCompletion: Equatable {
+    var start: Date
+    var end: Date
+    var error: String?
+}
+
 /// What a single websocket text frame turned out to be.
 enum FrameStreamMessage: Equatable {
     case keepAlive
     case batch([StreamTimeSeriesResponse])
     case audioUpdate(AudioUpdate)
     case serverError(String)
+    case complete(FrameStreamCompletion)
 
-    /// The server sends four different things down one socket. Decoding is pure
+    /// The server sends typed messages down one socket. Decoding is pure
     /// so the tests can cover every branch without a socket.
     static func decode(_ text: String) -> FrameStreamMessage? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -140,6 +147,13 @@ enum FrameStreamMessage: Equatable {
         if trimmed.hasPrefix("{") {
             guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return nil
+            }
+            if obj["type"] as? String == "stream_complete" {
+                guard let start = obj["start_time"] as? String,
+                      let end = obj["end_time"] as? String,
+                      let startDate = TimelineTime.parse(start),
+                      let endDate = TimelineTime.parse(end) else { return nil }
+                return .complete(FrameStreamCompletion(start: startDate, end: endDate, error: obj["error"] as? String))
             }
             if let err = obj["error"] as? String {
                 return .serverError(err)
@@ -210,6 +224,7 @@ protocol FrameStreamClientDelegate: AnyObject {
     func frameStream(didReceive batch: [StreamTimeSeriesResponse])
     func frameStream(didReceive audioUpdate: AudioUpdate)
     func frameStream(didChangeState state: FrameStreamClient.State)
+    func frameStream(didComplete completion: FrameStreamCompletion)
     func frameStream(didFail message: String)
 }
 
@@ -373,6 +388,8 @@ final class FrameStreamClient: NSObject {
             delegate?.frameStream(didReceive: batch)
         case .some(.audioUpdate(let update)):
             delegate?.frameStream(didReceive: update)
+        case .some(.complete(let completion)):
+            delegate?.frameStream(didComplete: completion)
         case .some(.serverError(let message)):
             delegate?.frameStream(didFail: message)
         case .some(.keepAlive):

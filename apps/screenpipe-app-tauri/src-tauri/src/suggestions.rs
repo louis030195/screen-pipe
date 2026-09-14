@@ -1201,21 +1201,53 @@ struct AudioSnippet {
     speaker_name: Option<String>,
 }
 
-async fn fetch_accessibility_snippets(api: &LocalApiContext) -> Vec<AccessibilitySnippet> {
+/// Shared typed frame query for suggestion inputs in both storage modes.
+async fn recent_frame_text(
+    api: &LocalApiContext,
+    minutes: i64,
+    min_length: usize,
+    limit: usize,
+) -> serde_json::Value {
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
     let client = reqwest::Client::new();
-    let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT app_name, window_name, SUBSTR(full_text, 1, 200) as snippet FROM frames WHERE datetime(timestamp) > datetime('now', '-15 minutes') AND LENGTH(full_text) > 30 AND app_name != 'screenpipe' AND full_text IS NOT NULL ORDER BY timestamp DESC LIMIT 8"
-        }))
+    let response = api
+        .apply_auth(client.get(api.url("/search")))
+        .query(&[
+            ("content_type", "ocr".to_owned()),
+            ("start_time", since),
+            ("min_length", min_length.to_string()),
+            ("limit", limit.to_string()),
+            ("order", "descending".to_owned()),
+        ])
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-        _ => vec![],
+    match response {
+        Ok(response) if response.status().is_success() => response.json().await.unwrap_or_default(),
+        _ => serde_json::Value::Null,
     }
+}
+
+async fn fetch_accessibility_snippets(api: &LocalApiContext) -> Vec<AccessibilitySnippet> {
+    let body = recent_frame_text(api, 15, 31, 32).await;
+    body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let row = &item["content"];
+            let app_name = row["app_name"].as_str()?;
+            if app_name == "screenpipe" {
+                return None;
+            }
+            Some(AccessibilitySnippet {
+                app_name: app_name.to_owned(),
+                window_name: row["window_name"].as_str().unwrap_or_default().to_owned(),
+                snippet: row["text"].as_str()?.chars().take(200).collect(),
+            })
+        })
+        .take(8)
+        .collect()
 }
 
 async fn fetch_audio_snippets(api: &LocalApiContext) -> Vec<AudioSnippet> {
@@ -1236,59 +1268,25 @@ async fn fetch_audio_snippets(api: &LocalApiContext) -> Vec<AudioSnippet> {
 }
 
 async fn fetch_ocr_snippets(api: &LocalApiContext) -> Vec<String> {
-    let client = reqwest::Client::new();
-    let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT SUBSTR(f.full_text, 1, 150) as snippet FROM frames f WHERE datetime(f.timestamp) > datetime('now', '-15 minutes') AND f.full_text IS NOT NULL AND LENGTH(f.full_text) > 20 ORDER BY RANDOM() LIMIT 5"
-        }))
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            #[derive(Deserialize)]
-            struct Row {
-                snippet: String,
-            }
-            r.json::<Vec<Row>>()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| r.snippet)
-                .collect()
-        }
-        _ => vec![],
-    }
+    use std::hash::BuildHasher;
+    let body = recent_frame_text(api, 15, 21, 100).await;
+    let mut rows: Vec<String> = body["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["content"]["text"].as_str())
+        .map(|text| text.chars().take(150).collect())
+        .collect();
+    let sampler = std::collections::hash_map::RandomState::new();
+    rows.sort_by_cached_key(|text| sampler.hash_one(text));
+    rows.truncate(5);
+    rows
 }
 
 async fn count_accessibility_rows(api: &LocalApiContext) -> i64 {
-    let client = reqwest::Client::new();
-    let resp = api
-        .apply_auth(client.post(api.url("/raw_sql")))
-        .json(&serde_json::json!({
-            "query": "SELECT COUNT(*) as cnt FROM frames WHERE datetime(timestamp) > datetime('now', '-30 minutes') AND full_text IS NOT NULL"
-        }))
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            #[derive(Deserialize)]
-            struct Row {
-                cnt: i64,
-            }
-            r.json::<Vec<Row>>()
-                .await
-                .unwrap_or_default()
-                .first()
-                .map(|r| r.cnt)
-                .unwrap_or(0)
-        }
-        _ => 0,
-    }
+    recent_frame_text(api, 30, 0, 1).await["pagination"]["total"]
+        .as_i64()
+        .unwrap_or(0)
 }
 
 /// Build a context string that fits within ~4500 chars (~1100 tokens) using

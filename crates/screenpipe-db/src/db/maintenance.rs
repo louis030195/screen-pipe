@@ -46,7 +46,16 @@ async fn run_guarded_routine_wal_checkpoint(
 impl DatabaseManager {
     /// Execute trusted, row-returning dynamic SQL on the query pool.
     pub async fn query_raw_sql(&self, query: &str) -> Result<serde_json::Value, sqlx::Error> {
-        Self::raw_sql_on_pool(&self.pool, query).await
+        if self.storage.is_some() {
+            crate::storage::sql::validate_resident_query(&self.pool, query).await?;
+        }
+        self.consistent_read(|| async {
+            let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+                .fetch_all(&mut *self.acquire_read().await?)
+                .await?;
+            Ok(Self::raw_sql_rows(&rows))
+        })
+        .await
     }
 
     /// Execute trusted dynamic SQL that may mutate the database through the
@@ -55,6 +64,14 @@ impl DatabaseManager {
         &self,
         query: &str,
     ) -> Result<serde_json::Value, sqlx::Error> {
+        if self.storage.as_ref().is_some_and(|s| s.has_bulk()) {
+            let mut tx = self.begin_immediate_with_retry().await?;
+            let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+                .fetch_all(&mut **tx.conn())
+                .await?;
+            tx.commit().await?;
+            return Ok(Self::raw_sql_rows(&rows));
+        }
         let writer = self.coordinated_writer().lock().await?;
         Self::raw_sql_on_pool(writer.pool(), query).await
     }
@@ -69,12 +86,20 @@ impl DatabaseManager {
             .fetch_all(pool)
             .await?;
 
+        Ok(Self::raw_sql_rows(&rows))
+    }
+
+    fn raw_sql_rows(rows: &[sqlx::sqlite::SqliteRow]) -> serde_json::Value {
         let result: Vec<serde_json::Map<String, serde_json::Value>> = rows
             .iter()
             .map(|row| {
                 let mut map = serde_json::Map::new();
                 for (i, column) in row.columns().iter().enumerate() {
                     if let Ok(value) = row.try_get_raw(i) {
+                        if value.is_null() {
+                            map.insert(column.name().to_string(), serde_json::Value::Null);
+                            continue;
+                        }
                         let json_value = match value.type_info().name() {
                             "TEXT" => {
                                 let s: String = row.try_get(i).unwrap_or_default();
@@ -99,9 +124,7 @@ impl DatabaseManager {
             })
             .collect();
 
-        Ok(serde_json::Value::Array(
-            result.into_iter().map(serde_json::Value::Object).collect(),
-        ))
+        serde_json::Value::Array(result.into_iter().map(serde_json::Value::Object).collect())
     }
 
     pub async fn delete_time_range(
@@ -685,6 +708,7 @@ impl DatabaseManager {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<StripTextResult, sqlx::Error> {
+        let archived_stripped = self.strip_archived_frame_details(start, end).await?;
         let mut tx = self.begin_immediate_with_retry().await?;
 
         let start_str = start.to_rfc3339();
@@ -763,7 +787,7 @@ impl DatabaseManager {
         .bind(&end_str)
         .execute(&mut **tx.conn())
         .await?;
-        let frames_stripped = frames_result.rows_affected();
+        let frames_stripped = frames_result.rows_affected() + archived_stripped;
 
         // Delete the UI event stream (its delete trigger keeps ui_events_fts in sync)
         let ui_events_result =
@@ -1458,21 +1482,53 @@ impl DatabaseManager {
     /// multi-GB database. On failure we log loudly with the exact recovery
     /// command so the user can self-heal via the existing `screenpipe db
     /// recover` path (which backs up the original before rebuilding).
+    fn startup_integrity_pool(&self) -> sqlx::SqlitePool {
+        // SQLite's FTS5 xIntegrity callback can retain a structure from a prior
+        // search on a pooled connection. Verification owns a fresh read-only
+        // connection, with the same VFS and hybrid functions as normal reads.
+        crate::storage::bulk::pool_options(self.storage.clone(), true)
+            .max_connections(1)
+            .connect_lazy_with((*self.pool.connect_options()).clone())
+    }
+
     pub(crate) fn spawn_startup_integrity_check(&self, database_path: Arc<str>) {
-        let pool = self.pool.clone();
+        let pool = self.startup_integrity_pool();
+        crate::recovery::register_database_pool(std::path::Path::new(&*database_path), &pool);
+        let timeout = Duration::from_secs(self.storage.as_ref().map_or_else(
+            || crate::storage::StorageBudget::default().lifecycle_timeout_secs,
+            |storage| storage.descriptor.budget.lifecycle_timeout_secs,
+        ));
         let health = self.write_queue_health.clone();
         let shutdown = self.close_token.clone();
         let persistent_failure_hook = self.persistent_failure_hook.clone();
         tokio::spawn(async move {
             // Let boot settle so the scan doesn't compete with migrations
             // and the first capture writes for I/O.
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                _ = shutdown.cancelled() => { pool.close().await; return; }
+            }
             // quick_check(1) stops after the first error — we only need a
             // yes/no signal here, not the full corruption inventory.
-            match sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
-                .fetch_one(&pool)
-                .await
-            {
+            let result = async {
+                let mut connection = crate::cancellable_query::CancellableReadConnection::acquire(
+                    &pool,
+                    std::time::Instant::now() + timeout,
+                    shutdown.clone(),
+                )
+                .await?;
+                let result = sqlx::query_scalar::<_, String>("PRAGMA quick_check(1)")
+                    .fetch_one(&mut *connection)
+                    .await;
+                connection.release().await?;
+                result
+            }
+            .await;
+            pool.close().await;
+            if shutdown.is_cancelled() {
+                return;
+            }
+            match result {
                 Ok(result) if result == "ok" => {
                     debug!("startup integrity check: ok");
                 }
@@ -1536,6 +1592,9 @@ impl DatabaseManager {
     /// Create an atomic backup of the database using `VACUUM INTO`.
     /// The destination path must not already exist.
     pub async fn backup_to(&self, dest: &str) -> Result<(), sqlx::Error> {
+        if self.storage.is_some() {
+            return self.backup_hybrid(std::path::Path::new(dest)).await;
+        }
         let _write_guard = Arc::clone(&self.write_semaphore)
             .acquire_owned()
             .await
@@ -1598,6 +1657,50 @@ mod wal_maintenance_tests {
     use std::time::Duration;
 
     #[tokio::test]
+    async fn startup_integrity_uses_fresh_fts_state_after_concurrent_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DbConfig::for_tier(DeviceTier::Low);
+        config.read_pool_max = 1;
+        config.read_pool_min = 1;
+        let db = DatabaseManager::new(dir.path().join("db.sqlite").to_str().unwrap(), config)
+            .await
+            .unwrap();
+        db.execute_raw_sql_write(
+            "CREATE VIRTUAL TABLE integrity_fts USING fts5(t,content='',contentless_delete=1)",
+        )
+        .await
+        .unwrap();
+        db.execute_raw_sql_write("INSERT INTO integrity_fts(integrity_fts,rank) VALUES('pgsz',64)")
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            db.execute_raw_sql_write("INSERT INTO integrity_fts(t) VALUES('one two three four five six seven eight nine ten eleven twelve')").await.unwrap();
+        }
+        let mut reused = db.pool.acquire().await.unwrap();
+        sqlx::query("SELECT count(*) FROM integrity_fts WHERE integrity_fts MATCH 'one'")
+            .fetch_one(&mut *reused)
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            db.execute_raw_sql_write("INSERT INTO integrity_fts(t) VALUES('one two three four five six seven eight nine ten eleven twelve')").await.unwrap();
+        }
+        drop(reused);
+        let fresh = db.startup_integrity_pool();
+        let result: String = sqlx::query_scalar("PRAGMA quick_check(1)")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(result, "ok", "valid FTS writes must not be quarantined");
+        let query_only: i64 = sqlx::query_scalar("PRAGMA query_only")
+            .fetch_one(&fresh)
+            .await
+            .unwrap();
+        assert_eq!(query_only, 1);
+        fresh.close().await;
+        db.close().await;
+    }
+
+    #[tokio::test]
     async fn raw_sql_writes_wait_for_coordinator_and_reads_return_rows() {
         let dir = tempfile::tempdir().expect("temp dir");
         let db_path = dir.path().join("db.sqlite");
@@ -1635,6 +1738,68 @@ mod wal_maintenance_tests {
             .expect("query through reader API");
         assert_eq!(rows, serde_json::json!([{ "value": 42 }]));
 
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn raw_sql_retries_after_a_concurrent_storage_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DbConfig::for_tier(DeviceTier::Low);
+        config.read_pool_max = 1;
+        let db = Arc::new(
+            DatabaseManager::new_hybrid(dir.path(), config, Default::default())
+                .await
+                .unwrap(),
+        );
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp) VALUES(1,'2026-09-13')")
+            .await
+            .unwrap();
+
+        // Pause SQLite after the read token is taken, inside the SELECT itself.
+        let started = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&started);
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let mut paused = false;
+        {
+            let mut connection = db.pool.acquire().await.unwrap();
+            connection
+                .lock_handle()
+                .await
+                .unwrap()
+                .set_progress_handler(1_000, move || {
+                    if !paused {
+                        paused = true;
+                        signal.notify_one();
+                        return resumed.recv_timeout(Duration::from_secs(5)).is_ok();
+                    }
+                    true
+                });
+        }
+        let reader = Arc::clone(&db);
+        let reading = tokio::spawn(async move {
+            reader.query_raw_sql("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) SELECT (SELECT MAX(id) FROM frames) AS id,SUM(x) AS total FROM n").await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        db.execute_raw_sql_write("INSERT INTO frames(id,timestamp) VALUES(2,'2026-09-13')")
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), reading)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, serde_json::json!([{"id":2,"total":2001000}]));
+        db.pool
+            .acquire()
+            .await
+            .unwrap()
+            .lock_handle()
+            .await
+            .unwrap()
+            .remove_progress_handler();
         db.close().await;
     }
 

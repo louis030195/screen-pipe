@@ -140,6 +140,13 @@ impl CancellableReadConnection {
         })
     }
 
+    pub(crate) async fn discard(mut self) {
+        self.lifetime.cancel();
+        if let Some(c) = self.connection.take() {
+            let _ = c.close().await;
+        }
+    }
+
     /// Return the cancellation source observed by SQLite, if the progress
     /// handler has interrupted a statement.
     pub fn interrupt_reason(&self) -> Option<SqliteInterruptReason> {
@@ -226,18 +233,10 @@ impl DatabaseManager {
         CancellableReadConnection::acquire(&self.pool, deadline, request_cancellation).await
     }
 
-    /// Acquire a read connection with the standard search-statement deadline.
-    ///
-    /// The fresh token is intentionally local: existing search helpers do not
-    /// need a signature change, and dropping their future still interrupts
-    /// SQLite through the connection guard's lifetime token. Callers that have
-    /// an explicit request token should use [`Self::acquire_cancellable_read`].
-    pub async fn acquire_search_read(&self) -> Result<CancellableReadConnection, sqlx::Error> {
-        self.acquire_cancellable_read(
-            Instant::now() + SEARCH_QUERY_TIMEOUT,
-            CancellationToken::new(),
-        )
-        .await
+    pub async fn acquire_search_read(
+        &self,
+    ) -> Result<crate::storage::snapshot::ReadConnection, sqlx::Error> {
+        crate::storage::snapshot::search(&self.pool).await
     }
 }
 

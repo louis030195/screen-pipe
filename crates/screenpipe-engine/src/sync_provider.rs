@@ -258,18 +258,26 @@ impl ScreenpipeSyncProvider {
         // 2026-06; frames.full_text is the OCR/search text). app_name/window_name
         // included for cross-machine sync.
         type OcrRow = (i64, String, bool, Option<String>, Option<String>);
-        let ocr_results: Vec<OcrRow> = sqlx::query_as(
-            r#"
-            SELECT id AS frame_id, full_text AS text, COALESCE(focused, 0) AS focused, app_name, window_name
-            FROM frames
-            WHERE id IN (SELECT value FROM json_each(?))
-              AND full_text IS NOT NULL AND full_text != ''
-            "#,
-        )
-        .bind(serde_json::to_string(&frame_ids).unwrap())
-        .fetch_all(pool)
-        .await
-        .map_err(|e| SyncError::Database(format!("failed to query OCR: {}", e)))?;
+        let metadata: Vec<(i64, bool, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, COALESCE(focused,0), app_name, window_name FROM frames WHERE id IN (SELECT value FROM json_each(?))"
+        ).bind(serde_json::to_string(&frame_ids).unwrap()).fetch_all(pool).await
+            .map_err(|e| SyncError::Database(e.to_string()))?;
+        let payloads = self
+            .db
+            .frame_payloads(&frame_ids, screenpipe_db::storage::Projection::Search)
+            .await
+            .map_err(|e| SyncError::Database(e.to_string()))?;
+        let ocr_results: Vec<OcrRow> = metadata
+            .into_iter()
+            .filter_map(|(id, focused, app, window)| {
+                let text = payloads
+                    .get(&id)?
+                    .full_text
+                    .as_ref()
+                    .filter(|text| !text.is_empty())?;
+                Some((id, text.clone(), focused, app, window))
+            })
+            .collect();
 
         // Build frame records with sync_ids
         let mut frame_records = Vec::new();
@@ -389,8 +397,9 @@ impl ScreenpipeSyncProvider {
     ) -> SyncResult<Option<(SyncChunk, String, String)>> {
         let pool = &self.db.pool;
 
-        let records: Vec<(i64, String, String, String, String, Option<String>)> = sqlx::query_as(
-            r#"
+        let mut records: Vec<(i64, String, String, String, String, Option<String>)> =
+            sqlx::query_as(
+                r#"
             SELECT id, timestamp,
                    COALESCE(app_name, ''), COALESCE(window_name, ''),
                    COALESCE(full_text, ''), browser_url
@@ -399,14 +408,31 @@ impl ScreenpipeSyncProvider {
             ORDER BY timestamp ASC
             LIMIT ?
             "#,
-        )
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| SyncError::Database(format!("failed to query accessibility frames: {}", e)))?;
+            )
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                SyncError::Database(format!("failed to query accessibility frames: {}", e))
+            })?;
 
         if records.is_empty() {
             return Ok(None);
+        }
+
+        let ids: Vec<i64> = records.iter().map(|row| row.0).collect();
+        let payloads = self
+            .db
+            .frame_payloads(&ids, screenpipe_db::storage::Projection::Search)
+            .await
+            .map_err(|e| SyncError::Database(e.to_string()))?;
+        for row in &mut records {
+            row.4 = payloads
+                .get(&row.0)
+                .ok_or_else(|| SyncError::Database("frame payload missing".into()))?
+                .full_text
+                .clone()
+                .unwrap_or_default();
         }
 
         let time_start = records.first().map(|r| r.1.clone()).unwrap();
@@ -619,7 +645,11 @@ impl ScreenpipeSyncProvider {
                 // ocr_text retired (2026-06): dedup on whether the frame already
                 // carries text. The apply below is an idempotent UPDATE anyway.
                 let exists: Option<(i64,)> = sqlx::query_as(
-                    "SELECT 1 FROM frames WHERE id = ? AND full_text IS NOT NULL AND full_text != ''",
+                    if self.db.storage_mode() == screenpipe_db::storage::StorageMode::HybridParquetV1 {
+                        "SELECT 1 FROM frames WHERE id = ? AND payload_full_text_present AND payload_full_text_length > 0"
+                    } else {
+                        "SELECT 1 FROM frames WHERE id = ? AND full_text IS NOT NULL AND full_text != ''"
+                    },
                 )
                 .bind(frame_id)
                 .fetch_optional(pool)
@@ -881,6 +911,11 @@ impl SyncDataProvider for ScreenpipeSyncProvider {
         if !self.data_type_enabled(blob_type) {
             return Ok(Vec::new());
         }
+        let read = self
+            .db
+            .storage_read_token()
+            .await
+            .map_err(|e| SyncError::Database(e.to_string()))?;
         let chunk_result = match blob_type {
             BlobType::Ocr => self.get_unsynced_ocr_chunk(limit).await?,
             BlobType::Transcripts => self.get_unsynced_transcriptions_chunk(limit).await?,
@@ -896,7 +931,13 @@ impl SyncDataProvider for ScreenpipeSyncProvider {
                     SyncError::Database(format!("failed to serialize chunk: {}", e))
                 })?;
 
+                let _admission = read
+                    .admit(&self.db.pool)
+                    .await
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
                 Ok(vec![PendingBlob {
+                    storage_revision: Some(read.revision),
+                    read_lease: Some(Box::new(read)),
                     data,
                     time_start,
                     time_end,
@@ -909,6 +950,16 @@ impl SyncDataProvider for ScreenpipeSyncProvider {
             }
             None => Ok(Vec::new()),
         }
+    }
+
+    async fn admit_export(
+        &self,
+        blob: &PendingBlob,
+    ) -> SyncResult<Option<tokio::sync::OwnedMutexGuard<()>>> {
+        self.db
+            .admit_storage_revision(blob.storage_revision.unwrap_or(0))
+            .await
+            .map_err(|e| SyncError::Database(e.to_string()))
     }
 
     async fn mark_synced(

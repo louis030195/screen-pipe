@@ -67,6 +67,7 @@ export function installBrowserRuntime() {
       onStoreChange: (change) => {
         void emit("store://change", change);
       },
+      onEvent: (event, payload) => { void emit(event, payload); },
       warn: console.warn,
     }),
     { shouldMockEvents: true },

@@ -29,6 +29,7 @@ tauri-helper = { git = "https://github.com/screenpipe/tauri-helper", rev = "e25f
 cc = "1"
 
 [dependencies]
+fs2 = "0.4"
 tauri-helper = { git = "https://github.com/screenpipe/tauri-helper", rev = "e25ff1d2c5026189305a0251a1e06788efe1d2b3" }
 tauri = { version = "=2.11.2", features = [
   "protocol-asset",

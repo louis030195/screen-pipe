@@ -510,6 +510,28 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 					return;
 				}
 
+				if (data.type === "stream_complete") {
+					const start = new Date(get().currentDate);
+					start.setHours(0, 0, 0, 0);
+					const end = new Date(start);
+					end.setHours(23, 59, 59, 999);
+					if (Date.parse(data.start_time) === start.getTime() && Date.parse(data.end_time) === end.getTime()) {
+						get().flushFrameBuffer();
+						if (requestTimeoutTimer) clearTimeout(requestTimeoutTimer);
+						requestTimeoutTimer = null;
+						requestRetryCount = 0;
+						if (progressUpdateTimer) clearTimeout(progressUpdateTimer);
+						progressUpdateTimer = null;
+						set((state) => {
+							const frames = state.pendingDateSwap ? [] : state.frames;
+							return { frames, frameTimestamps: state.pendingDateSwap ? new Set<string>() : state.frameTimestamps,
+								pendingDateSwap: false, isLoading: false, error: data.error ?? null, message: null,
+								loadingProgress: { loaded: frames.length, isStreaming: false } };
+						});
+					}
+					return;
+				}
+
 				// Handle error messages
 				if (data.error) {
 					get().flushFrameBuffer(); // Flush before error

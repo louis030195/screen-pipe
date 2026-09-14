@@ -677,6 +677,17 @@ async fn sync_to_remote_inner(
     data_dir: &Path,
     opts: &SyncOptions,
 ) -> Result<SyncResult> {
+    if [
+        "storage.json",
+        "storage-migration.json",
+        "storage-init.json",
+        "storage-maintenance.json",
+    ]
+    .iter()
+    .any(|name| data_dir.join(name).exists())
+    {
+        anyhow::bail!("SSH directory sync requires SQLite storage; hybrid data is transferred with a verified storage backup or SQLite export");
+    }
     info!(
         "sync starting → {}@{}:{}",
         config.user, config.host, config.port
@@ -1124,6 +1135,25 @@ async fn discover_tailscale() -> Vec<DiscoveredHost> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hybrid_directory_sync_stops_before_network_transfer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("storage.json"), "{}").unwrap();
+        let config = SyncConfig {
+            host: "invalid.test".into(),
+            port: 22,
+            user: "test".into(),
+            key_path: String::new(),
+            remote_path: "test".into(),
+            interval_minutes: 5,
+            enabled: true,
+        };
+        let result = sync_to_remote(&config, root.path()).await;
+        assert!(!result.ok);
+        assert_eq!(result.files_transferred, 0);
+        assert!(result.error.unwrap().contains("verified storage backup"));
+    }
 
     #[tokio::test]
     async fn snapshot_reads_the_live_wal_without_a_file_backed_index_on_macos() {

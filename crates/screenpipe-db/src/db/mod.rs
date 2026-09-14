@@ -169,6 +169,7 @@ pub struct ImmediateTx {
     conn: Option<PoolConnection<Sqlite>>,
     committed: bool,
     _write_permit: Option<OwnedSemaphorePermit>,
+    _admission: Option<tokio::sync::OwnedMutexGuard<()>>,
     hard_fault_reporter: HardFaultReporter,
 }
 
@@ -184,6 +185,7 @@ impl ImmediateTx {
             conn: Some(conn),
             committed: false,
             _write_permit: Some(write_permit),
+            _admission: None,
             hard_fault_reporter: HardFaultReporter {
                 health,
                 persistent_failure_hook,
@@ -252,6 +254,7 @@ impl Drop for ImmediateTx {
                 // slot than poison the pool with a stuck transaction).
                 warn!("ImmediateTx dropped without commit — rolling back");
                 let permit = self._write_permit.take(); // Hold permit until rollback completes
+                let admission = self._admission.take();
                 let reporter = self.hard_fault_reporter.clone();
                 tokio::spawn(async move {
                     // The statement that made the caller abandon this transaction
@@ -289,6 +292,7 @@ impl Drop for ImmediateTx {
                         }
                     }
                     drop(permit); // Release the write permit so other writers can proceed
+                    drop(admission);
                 });
             }
         }
@@ -296,6 +300,7 @@ impl Drop for ImmediateTx {
 }
 
 pub struct DatabaseManager {
+    pub(crate) storage: Option<Arc<crate::storage::HybridStorage>>,
     upload_source_id: tokio::sync::OnceCell<String>,
     /// Read-only pool. Used for all SELECT queries.
     /// Separated from writes so read bursts (search, timeline, API) can never
@@ -467,6 +472,7 @@ mod outputs;
 mod search;
 mod semantic;
 mod setup;
+pub(crate) use setup::register_sqlite_extensions;
 mod source_identity;
 mod speakers;
 mod tags;

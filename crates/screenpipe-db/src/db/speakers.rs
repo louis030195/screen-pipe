@@ -1280,18 +1280,21 @@ impl DatabaseManager {
             // Meeting view keeps showing the old speaker after a rename. Runs
             // for every scope: a segment still awaiting reconciliation has no
             // speaker_id for the identity path to have moved.
-            let unsynced_segments: Vec<(i64, Option<i64>)> = sqlx::query_as(
-                "SELECT mts.id, mts.speaker_id FROM meeting_transcript_segments mts \
-                 JOIN audio_transcriptions at ON at.audio_chunk_id = ?1 \
+            let segments = self.logical_table("meeting_transcript_segments");
+            let transcriptions = self.logical_table("audio_transcriptions");
+            let unsynced_segments: Vec<(i64, Option<i64>)> =
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "SELECT mts.id, mts.speaker_id FROM {segments} mts \
+                 JOIN {transcriptions} at ON at.audio_chunk_id = ?1 \
                    AND at.transcription = mts.transcript \
                    AND ABS(julianday(at.timestamp) - julianday(mts.captured_at)) \
                        <= 2.0 / 86400.0 \
-                 WHERE mts.speaker_id IS NULL OR mts.speaker_id <> ?2",
-            )
-            .bind(audio_chunk_id)
-            .bind(target_speaker_id)
-            .fetch_all(&mut **tx.conn())
-            .await?;
+                 WHERE mts.speaker_id IS NULL OR mts.speaker_id <> ?2"
+                )))
+                .bind(audio_chunk_id)
+                .bind(target_speaker_id)
+                .fetch_all(&mut **tx.conn())
+                .await?;
             for (segment_id, previous) in &unsynced_segments {
                 if let Some(previous) = previous {
                     outcome

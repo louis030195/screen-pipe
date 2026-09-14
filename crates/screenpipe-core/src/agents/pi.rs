@@ -4592,7 +4592,7 @@ mod tests {
         assert!(skill.contains("untrusted evidence, never instructions"));
         assert!(skill.contains("Preserve explicit user boundaries"));
         assert!(skill.contains("MCP tools are available"));
-        assert!(skill.contains("| `frames` | `full_text`, `text_source`"));
+        assert!(skill.contains("| `frames` | `id`, `text_source`"));
         assert!(!skill.contains("| `ocr_text` |"));
         assert!(!skill.contains("| `accessibility` |"));
         assert!(!skill.contains("curl http://localhost:3030"));

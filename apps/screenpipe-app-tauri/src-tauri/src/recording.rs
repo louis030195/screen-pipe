@@ -219,8 +219,7 @@ pub(crate) fn recording_access_allowed(app: &tauri::AppHandle, store: &SettingsS
             crate::enterprise_policy::recording_authorized()
         } else {
             store.has_cloud_authentication()
-        }
-    {
+        } {
         crate::startup_auth::AuthenticationStatus::Authenticated
     } else {
         resolved_authentication
@@ -366,10 +365,7 @@ pub struct RecordingState {
 
 /// Install a fully constructed capture session before activating any monitor
 /// that can synchronously request its teardown.
-pub(crate) fn install_capture_session(
-    slot: &mut Option<CaptureSession>,
-    session: CaptureSession,
-) {
+pub(crate) fn install_capture_session(slot: &mut Option<CaptureSession>, session: CaptureSession) {
     *slot = Some(session);
     slot.as_ref()
         .expect("capture session was just installed")
@@ -761,6 +757,9 @@ pub async fn start_capture(
     state: State<'_, RecordingState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    if crate::storage_migration::is_running(&app) {
+        return Err("Storage migration is running. Recording resumes when it finishes.".into());
+    }
     info!("Starting capture session");
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
     require_recording_access(&app, &store)?;
@@ -862,7 +861,7 @@ pub async fn stop_screenpipe(
     stop_screenpipe_inner(&state).await
 }
 
-async fn stop_screenpipe_inner(state: &RecordingState) -> Result<(), String> {
+pub(crate) async fn stop_screenpipe_inner(state: &RecordingState) -> Result<(), String> {
     info!("stop_screenpipe: stopping capture and server");
 
     // Stop capture first
@@ -954,6 +953,9 @@ pub async fn spawn_screenpipe(
     app: tauri::AppHandle,
     _override_args: Option<Vec<String>>,
 ) -> Result<(), String> {
+    if crate::storage_migration::is_running(&app) {
+        return Err("Storage migration is running. Recording resumes when it finishes.".into());
+    }
     // A summary-paywall install still needs the long-lived local read server
     // for Timeline, but it must not publish capture intent or restart capture.
     let store = SettingsStore::get(&app).ok().flatten().unwrap_or_default();
@@ -1002,20 +1004,25 @@ pub(crate) fn resume_deferred_account_start(app: tauri::AppHandle) {
         let Some(settings) = SettingsStore::get(&app).ok().flatten() else {
             return;
         };
-        let access_allowed = state.cloud_token.load().as_ref().is_some()
-            && server_access_allowed(&app, &settings);
+        let access_allowed =
+            state.cloud_token.load().as_ref().is_some() && server_access_allowed(&app, &settings);
         let capture_allowed = recording_access_allowed(&app, &settings);
         if !state
             .deferred_account_start
             .take_if_allowed(access_allowed, || {
-                state.wants_recording.store(capture_allowed, Ordering::SeqCst);
+                state
+                    .wants_recording
+                    .store(capture_allowed, Ordering::SeqCst);
             })
         {
             return;
         }
         info!("Account access verified; resuming deferred server auto-start");
         if let Err(error) = spawn_screenpipe_inner(&state, app.clone()).await {
-            error!("Failed to resume server after account verification: {}", error);
+            error!(
+                "Failed to resume server after account verification: {}",
+                error
+            );
         }
     });
 }
@@ -1045,7 +1052,20 @@ pub(crate) async fn retry_screenpipe(
     spawn_screenpipe_inner(&state, app).await
 }
 
-async fn spawn_screenpipe_inner(
+pub(crate) async fn spawn_screenpipe_inner(
+    state: &RecordingState,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let resumed = crate::storage_migration::resume_before_startup(&app, state).await?;
+    let result = spawn_screenpipe_after_migration(state, app.clone()).await;
+    if let Some(resumed) = resumed {
+        crate::storage_migration::finish_startup(&app, resumed, result).await
+    } else {
+        result
+    }
+}
+
+async fn spawn_screenpipe_after_migration(
     state: &RecordingState,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -1386,7 +1406,9 @@ async fn spawn_screenpipe_inner(
     let data_dir = match config::resolve_data_dir(&store.data_dir) {
         Ok(resolved) => resolved,
         Err(error) => {
-            let message = format!("Failed to initialize database: cannot access recording data directory: {error}");
+            let message = format!(
+                "Failed to initialize database: cannot access recording data directory: {error}"
+            );
             crate::health::set_boot_error(&message);
             state.is_starting.store(false, Ordering::SeqCst);
             state.is_starting_capture.store(false, Ordering::SeqCst);
@@ -1468,11 +1490,12 @@ async fn spawn_screenpipe_inner(
         owned_browser.clone(),
     );
     let pipe_agent_events = crate::agent_event_emitter::PipeAgentEventEmitter::new(app_for_pipe);
-    let on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine> = Some(
-        std::sync::Arc::new(move |pipe_name: &str, exec_id: i64, continues_chat: bool, line: &str| {
-            pipe_agent_events.emit_line(pipe_name, exec_id, continues_chat, line);
-        }),
-    );
+    let on_pipe_output: Option<screenpipe_core::pipes::OnPipeOutputLine> =
+        Some(std::sync::Arc::new(
+            move |pipe_name: &str, exec_id: i64, continues_chat: bool, line: &str| {
+                pipe_agent_events.emit_line(pipe_name, exec_id, continues_chat, line);
+            },
+        ));
     let chat_destination: Option<
         screenpipe_core::agents::chat_destination::ChatDestinationDispatch,
     > = Some(std::sync::Arc::new(move |request| {

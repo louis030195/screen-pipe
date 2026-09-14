@@ -81,6 +81,28 @@ fn preflight_existing_database_header(path: &Path) -> Result<(), SqlxError> {
     Ok(())
 }
 
+pub(crate) fn register_sqlite_extensions() -> Result<(), sqlx::Error> {
+    unsafe {
+        // The current sqlite-vec Rust binding exposes this symbol as `fn()`, while its C
+        // implementation uses SQLite's three-argument extension ABI.
+        type SqliteExtensionInit = unsafe extern "C" fn(
+            *mut libsqlite3_sys::sqlite3,
+            *mut *mut std::ffi::c_char,
+            *const libsqlite3_sys::sqlite3_api_routines,
+        ) -> std::ffi::c_int;
+
+        let init =
+            std::mem::transmute::<unsafe extern "C" fn(), SqliteExtensionInit>(sqlite3_vec_init);
+        let rc = sqlite3_auto_extension(Some(init));
+        if rc != libsqlite3_sys::SQLITE_OK {
+            return Err(SqlxError::Protocol(format!(
+                "failed to register sqlite-vec auto-extension: SQLite error code {rc}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl DatabaseManager {
     /// Give an independently owned worker access to the dedicated write pool
     /// only while it participates in this database's single-writer protocol.
@@ -89,9 +111,27 @@ impl DatabaseManager {
             self.write_pool.clone(),
             Arc::clone(&self.write_semaphore),
         )
+        .with_admission_gate(self.storage.as_ref().map(|s| Arc::clone(&s.gate)))
     }
 
     pub async fn new(database_path: &str, config: DbConfig) -> Result<Self, sqlx::Error> {
+        let resolved =
+            if database_path.contains(":memory:") || database_path.contains("mode=memory") {
+                std::path::PathBuf::from(database_path)
+            } else {
+                crate::storage::resolve_database_path(Path::new(database_path))?
+            };
+        let storage = crate::storage::HybridStorage::for_index(&resolved)?;
+        Self::new_with_storage(&resolved.to_string_lossy(), config, storage, false, true).await
+    }
+
+    pub(crate) async fn new_with_storage(
+        database_path: &str,
+        config: DbConfig,
+        storage: Option<Arc<crate::storage::HybridStorage>>,
+        bootstrap_storage: bool,
+        background: bool,
+    ) -> Result<Self, sqlx::Error> {
         screenpipe_sqlite_coordinator::verify_sqlite_runtime().map_err(SqlxError::Protocol)?;
         debug!(
             "Initializing DatabaseManager with database path: {} (mmap={}MB, cache={}KB, read_pool={})",
@@ -100,27 +140,7 @@ impl DatabaseManager {
             config.cache_size_kb,
             config.read_pool_max,
         );
-        let connection_string = format!("sqlite:{}", database_path);
-
-        unsafe {
-            // The current sqlite-vec Rust binding exposes this symbol as `fn()`, while its C
-            // implementation uses SQLite's three-argument extension ABI.
-            type SqliteExtensionInit = unsafe extern "C" fn(
-                *mut libsqlite3_sys::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const libsqlite3_sys::sqlite3_api_routines,
-            ) -> std::ffi::c_int;
-
-            let init = std::mem::transmute::<unsafe extern "C" fn(), SqliteExtensionInit>(
-                sqlite3_vec_init,
-            );
-            let rc = sqlite3_auto_extension(Some(init));
-            if rc != libsqlite3_sys::SQLITE_OK {
-                return Err(SqlxError::Protocol(format!(
-                    "failed to register sqlite-vec auto-extension: SQLite error code {rc}"
-                )));
-            }
-        }
+        register_sqlite_extensions()?;
 
         // Ensure the data dir exists before opening the file — a missing parent
         // dir makes SQLite fail with "unable to open database file"
@@ -216,8 +236,14 @@ impl DatabaseManager {
         // cache_size + mmap_size are tier-configurable and applied here; the
         // WAL-safety pragmas that MUST be identical on every connection over this
         // file come from the single source of truth `WAL_SAFETY_PRAGMAS`.
-        let mut connect_options: SqliteConnectOptions = connection_string
-            .parse::<SqliteConnectOptions>()?
+        // Filesystem paths (including Windows' verbatim prefix) are not URLs.
+        // Keep URI parsing only for the existing in-memory connection forms.
+        let connect_options = if is_in_memory {
+            format!("sqlite:{database_path}").parse::<SqliteConnectOptions>()?
+        } else {
+            SqliteConnectOptions::new().filename(database_file)
+        };
+        let mut connect_options = connect_options
             .busy_timeout(Duration::from_secs(5))
             .pragma("cache_size", format!("-{}", config.cache_size_kb))
             .pragma("mmap_size", config.mmap_size.to_string());
@@ -247,6 +273,9 @@ impl DatabaseManager {
         }
         for (pragma, value) in screenpipe_config::WAL_SAFETY_PRAGMAS {
             connect_options = connect_options.pragma(pragma, value);
+        }
+        if storage.is_some() {
+            connect_options = connect_options.pragma("synchronous", "FULL");
         }
 
         // Fresh DB conversion to journal_mode=WAL requires an exclusive lock.
@@ -298,21 +327,43 @@ impl DatabaseManager {
         };
 
         // Read pool: handles all SELECT queries (search, timeline, API, pipes).
-        let read_pool = crate::write_queue::capture_pool_options()
-            .max_connections(config.read_pool_max)
-            .min_connections(config.read_pool_min)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect_with(read_connect_options)
-            .await
-            .map_err(|error| quarantine_startup_error(database_file, error))?;
+        let read_pool_options = crate::storage::bulk::pool_options(storage.clone(), true)
+            .max_connections(if storage.is_some() {
+                config.read_pool_max.max(2)
+            } else {
+                config.read_pool_max
+            })
+            .min_connections(if bootstrap_storage {
+                0
+            } else {
+                config.read_pool_min
+            })
+            .acquire_timeout(Duration::from_secs(5));
+        // An unpublished index has no readers yet. Defer their connections
+        // until schema construction is complete, rather than letting their
+        // initialization overlap its DDL and checkpoints. The published
+        // generation reopens with the ordinary configured pools.
+        let read_pool = if bootstrap_storage {
+            read_pool_options.connect_lazy_with(read_connect_options)
+        } else {
+            read_pool_options
+                .connect_with(read_connect_options)
+                .await
+                .map_err(|error| quarantine_startup_error(database_file, error))?
+        };
 
         crate::recovery::register_database_pool(database_file, &read_pool);
 
         // Write pool: dedicated to INSERT/UPDATE/DELETE via begin_immediate_with_retry().
         // Writes are serialized by write_semaphore so only 1 is active
         // at a time; extras absorb connection detach without killing the pool.
-        let write_pool = match crate::write_queue::capture_pool_options()
-            .max_connections(config.write_pool_max)
+        let write_pool_max = if bootstrap_storage {
+            1
+        } else {
+            config.write_pool_max
+        };
+        let write_pool = match crate::storage::bulk::pool_options(storage.clone(), false)
+            .max_connections(write_pool_max)
             .min_connections(1)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(connect_options.clone())
@@ -335,10 +386,11 @@ impl DatabaseManager {
             crate::write_queue::WriteQueueHealth::for_database_path(database_path);
         let write_pool_rebuilder = crate::write_queue::WritePoolRebuilder::new(
             connect_options,
-            config.write_pool_max,
+            write_pool_max,
             1,
             Duration::from_secs(10),
-        );
+        )
+        .with_storage(storage.clone());
         let persistent_failure_hook = crate::write_queue::persistent_failure_slot(None);
         let close_token = tokio_util::sync::CancellationToken::new();
         let write_queue = crate::write_queue::spawn_write_drain_with(
@@ -350,10 +402,12 @@ impl DatabaseManager {
                 on_persistent_failure: persistent_failure_hook.clone(),
                 health: write_queue_health.clone(),
                 shutdown: close_token.clone(),
+                admission_gate: storage.as_ref().map(|s| Arc::clone(&s.gate)),
                 ..Default::default()
             },
         );
         let db_manager = DatabaseManager {
+            storage,
             upload_source_id: tokio::sync::OnceCell::new(),
             pool: read_pool,
             write_pool,
@@ -401,7 +455,78 @@ impl DatabaseManager {
         }
         // Migrations mutate schema and migration bookkeeping, so keep them on
         // the same serialized writer boundary as application writes.
-        if let Err(error) = Self::run_migrations(&db_manager.write_pool).await {
+        let schema_result = async {
+            if db_manager.storage.is_none() {
+                let hybrid: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM sqlite_master WHERE name='_hybrid_migrations'",
+                )
+                .fetch_one(&db_manager.pool)
+                .await?;
+                if hybrid != 0 {
+                    return Err(crate::storage::storage_error(
+                        "hybrid index requires its storage descriptor",
+                    ));
+                }
+            }
+            if db_manager.storage.is_none() || bootstrap_storage {
+                Self::run_migrations(&db_manager.write_pool).await?;
+            }
+            if let Some(storage) = &db_manager.storage {
+                let mut conn = db_manager.write_pool.acquire().await?;
+                if bootstrap_storage {
+                    // Offline index construction spills large sorts to disk;
+                    // the connection resumes its configured capture settings
+                    // before entering the live pool.
+                    let temp_store: i64 = sqlx::query_scalar("PRAGMA temp_store")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA temp_store=FILE")
+                        .execute(&mut *conn)
+                        .await?;
+                    let root = storage.root.clone();
+                    let reserve = storage.descriptor.budget.disk_reserve_bytes;
+                    let mut checked = std::time::Instant::now() - Duration::from_secs(1);
+                    let exhausted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let progress_exhausted = Arc::clone(&exhausted);
+                    conn.lock_handle()
+                        .await?
+                        .set_progress_handler(10_000, move || {
+                            if checked.elapsed() < Duration::from_millis(100) {
+                                return true;
+                            }
+                            checked = std::time::Instant::now();
+                            let available = fs2::available_space(&root).unwrap_or(0);
+                            let proceed = available >= reserve;
+                            progress_exhausted
+                                .store(!proceed, std::sync::atomic::Ordering::Relaxed);
+                            proceed
+                        });
+                    // This generation is unpublished. Each construction step
+                    // commits before the next checkpoint; the lifecycle journal
+                    // rebuilds an interrupted schema from its intact source.
+                    let construction =
+                        crate::storage::schema::bootstrap(&mut conn, &storage.descriptor).await;
+                    conn.lock_handle().await?.remove_progress_handler();
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                        "PRAGMA temp_store={temp_store}"
+                    )))
+                    .execute(&mut *conn)
+                    .await?;
+                    if exhausted.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(crate::storage::storage_error(
+                            "offline construction reached disk reserve; source remains intact",
+                        ));
+                    }
+                    construction?;
+                }
+                crate::storage::schema::verify(&mut conn, &storage.descriptor).await?;
+                crate::storage::read_schema::upgrade(&mut conn, storage).await?;
+                storage.verify_catalog(&db_manager.pool).await?;
+            }
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+        if let Err(error) = schema_result {
             if crate::sqlite_error::is_sqlite_hard_fault(&error) {
                 db_manager.write_queue_health.latch_hard_fault(&error);
             }
@@ -416,7 +541,7 @@ impl DatabaseManager {
         // An in-memory database cannot carry corruption across startups, and a
         // quick_check on SQLite's shared in-memory cache takes table read locks
         // that can make concurrent writes fail immediately with SQLITE_LOCKED.
-        if !database_path.contains("mode=memory") && database_path != ":memory:" {
+        if background && !database_path.contains("mode=memory") && database_path != ":memory:" {
             db_manager.spawn_startup_integrity_check(Arc::from(database_path));
         }
 
@@ -428,7 +553,19 @@ impl DatabaseManager {
         // it: the desktop app runs the engine in-process and previously never
         // started it (only the standalone `screenpipe-engine` CLI did), so app
         // users got no periodic checkpointing at all.
-        db_manager.start_wal_maintenance();
+        if background {
+            db_manager.start_wal_maintenance();
+        }
+
+        if background && !bootstrap_storage {
+            if let Some(storage) = &db_manager.storage {
+                storage.spawn_maintenance(
+                    db_manager.pool.clone(),
+                    db_manager.coordinated_writer(),
+                    db_manager.close_token.clone(),
+                );
+            }
+        }
 
         Ok(db_manager)
     }
@@ -446,13 +583,27 @@ impl DatabaseManager {
     /// failure that kept recording down for hours on 2026-07-02.
     pub async fn close(&self) {
         self.close_token.cancel();
+        if let Some(storage) = &self.storage {
+            let _gate = storage.gate.lock().await;
+            storage.closing.cancel();
+        }
+        let drain_payloads = async {
+            let _file_job = match &self.storage {
+                Some(storage) => Some(storage.file_job.lock().await),
+                None => None,
+            };
+            let _payload_readers = match &self.storage {
+                Some(storage) => Some(storage.leases.write().await),
+                None => None,
+            };
+        };
         // Start closing both pools at the same time. `Pool::close()` marks a
         // pool closed immediately, then waits for checked-out connections to
         // return. Awaiting the write pool first meant one stuck writer kept the
         // read pool open indefinitely, so health/redaction work could continue
         // pinning the poisoned WAL-index while DB-wedge recovery was trying to
         // rebuild it.
-        tokio::join!(self.write_pool.close(), self.pool.close());
+        tokio::join!(self.write_pool.close(), self.pool.close(), drain_payloads);
         if let Some(lease) = self.manager_lease.as_ref() {
             lease.release();
         }
@@ -780,6 +931,11 @@ impl DatabaseManager {
             Err(_) => return Err(sqlx::Error::PoolTimedOut),
         };
 
+        let admission = match &self.storage {
+            Some(storage) => Some(Arc::clone(&storage.gate).lock_owned().await),
+            None => None,
+        };
+
         let max_retries = 3;
         let mut last_error = None;
         for attempt in 1..=max_retries {
@@ -812,6 +968,7 @@ impl DatabaseManager {
                         conn: Some(conn),
                         committed: false,
                         _write_permit: Some(permit),
+                        _admission: admission,
                         hard_fault_reporter: self.hard_fault_reporter(),
                     })
                 }

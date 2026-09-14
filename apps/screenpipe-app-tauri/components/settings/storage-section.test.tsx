@@ -44,6 +44,7 @@ vi.mock("@/components/ui/use-toast", () => ({
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("./storage-migration-card", () => ({ StorageMigrationCard: () => null }));
 vi.mock("./disk-usage-section", () => ({ DiskUsageSection: () => null }));
 vi.mock("./apply-restart-bar", () => ({ ApplyRestartBar: () => null }));
 vi.mock("@/components/enterprise-locked-setting", () => ({

@@ -19,6 +19,7 @@ import { RecentChatSwitcherController } from "@/components/chat/recent-chat-swit
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { AnnouncementHost } from "@/components/announcement-host";
 import { AdvisoryOverlay } from "@/components/advisory-overlay";
+import { StorageMigrationGate } from "@/components/storage-migration-gate";
 import { PipeAdvisoryWatcher } from "@/components/pipe-advisory-watcher";
 // TODO: vault lock UI disabled for now — vault is CLI-only until app UX is polished
 // import { VaultLockDialog } from "@/components/vault-lock-dialog";
@@ -339,6 +340,7 @@ export default function RootLayout({
             React #419 (hydration recovery) → #185 (infinite loop during
             recovery render) on every first launch after auto-update. */}
         <Providers>
+          <StorageMigrationGate offerMigration={pathname === "/home"} />
           {/* DeeplinkHandler is mounted in Providers (outside the entitlement
               gate) so the screenpipe:// login callback is always caught, even
               while the "sign in required" screen is showing. */}

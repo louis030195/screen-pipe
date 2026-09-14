@@ -33,6 +33,7 @@ mod db;
 mod failpoint_vfs;
 mod recovery;
 mod sqlite_error;
+pub mod storage;
 pub mod text_normalizer;
 pub mod text_similarity;
 mod types;

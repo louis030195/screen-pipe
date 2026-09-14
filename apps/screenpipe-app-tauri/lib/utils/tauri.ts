@@ -124,6 +124,14 @@ async calendarStatus() : Promise<Result<CalendarStatus, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async cancelStorageMigration(root: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_storage_migration", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async chatgptOauthCheckToken() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_check_token") };
@@ -400,6 +408,14 @@ async deleteCloudData() : Promise<Result<null, string>> {
 async deleteDeviceLocalData(machineId: string) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_device_local_data", { machineId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteOriginalStorageDatabase(root: string, generation: string, confirmPermanentDeletion: boolean) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_original_storage_database", { root, generation, confirmPermanentDeletion }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -792,6 +808,17 @@ async getScreenpipeAiGatewayUrl() : Promise<Result<string, string>> {
 async getScreenpipeBaseDir() : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_screenpipe_base_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getStorageMigrationActivity() : Promise<StorageMigrationActivity> {
+    return await TAURI_INVOKE("get_storage_migration_activity");
+},
+async getStorageMigrationStatus() : Promise<Result<StorageMigrationStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_storage_migration_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2821,6 +2848,17 @@ async startFeedbackUpload(request: FeedbackUploadRequest) : Promise<Result<strin
 }
 },
 /**
+ * Own the stop/convert/restart sequence in the native app even if settings closes.
+ */
+async startStorageMigration(root: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_storage_migration", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Stop recording without killing the server.
  * Pipes, memories, search, and the HTTP API remain accessible.
  */
@@ -4294,6 +4332,8 @@ headless?: boolean;
 headlessRecordOnly?: boolean }
 export type ShowRewindWindow = "Main" | { Home: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
 export type StartExportRecordingResponse = { jobId: string }
+export type StorageMigrationActivity = { root: string | null; busy: boolean; message: string; error: string | null; elapsed_seconds: number; completed_records: number | null; total_records: number | null; bytes_saved: number | null; available_bytes: number | null; completed: boolean }
+export type StorageMigrationStatus = { root: string; app_session_id: string; busy: boolean; message: string; error: string | null; pending: boolean; in_place: boolean; completed: boolean; using_new_storage: boolean; generation: string | null; source_bytes: number; migrated_bytes: number | null; bytes_saved: number | null; available_bytes: number | null; can_migrate: boolean; can_cancel: boolean; can_delete_source: boolean; blocked_reason: string | null }
 export type Suggestion = { text: string;
 /**
  * Short preview with real data (e.g. "1h20m in VS Code — auth.rs, api.rs")
