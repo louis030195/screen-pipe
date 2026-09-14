@@ -39,9 +39,9 @@ tokio = { version = "1.15", features = ["full", "tracing"] }
 crossbeam = "0.8.4"
 dashmap = "6.1.0"
 image = "0.25"
-criterion = { version = "0.5.1", features = ["async_tokio"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 cc = "1.0"
-oasgen = { version = "0.22.0", features = ["axum", "chrono"] }
+oasgen = { version = "0.25.0", features = ["axum", "chrono"] }
 once_cell = "1.20.2"
 sentry = { version = "0.36.0", features = ["tracing"] }
 tracing-oslog = "0.3.0"
@@ -61,7 +61,7 @@ serde_yaml = "0.9"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1"
+thiserror = "2"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
@@ -81,17 +81,17 @@ clap = { version = "4.3", features = ["derive"] }
 # Utilities
 tempfile = "3"
 url = "2"
-toml = "0.8"
+toml = "1.1"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 lazy_static = "1.4"
 libc = "0.2"
 env_logger = "0.10"
-sysinfo = "0.29"
-axum = { version = "0.7", features = ["ws", "multipart"] }
+sysinfo = "0.39"
+axum = { version = "0.8", features = ["ws", "multipart"] }
 hex = "0.4"
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 hmac = "0.12"
 
 # Database
@@ -104,12 +104,12 @@ sqlx = { version = "=0.9.0", default-features = false, features = [
 
 # Math / ML
 ndarray = "0.17"
-rand = "0.9"
+rand = "0.10"
 ort = { version = "=2.0.0-rc.12", default-features = false }
 
 # Platform
-dirs = "6"
-which = "7"
+dirs = "7"
+which = "8"
 # zbus 5.x has no `blocking` feature — the blocking API lives behind `blocking-api`
 # (the module) plus a runtime (`async-io`). These are in zbus's default set; #3815 set
 # `default-features = false` and listed `blocking` (the optional crate dep, not the API),
@@ -124,8 +124,8 @@ samplerate = "0.2.4"
 libsamplerate-sys = "0.1.10"
 
 # Crypto
-argon2 = "0.5"
-chacha20poly1305 = "0.10"
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # Tauri type generation
@@ -157,10 +157,10 @@ strsim = "0.10"
 objc = "0.2.7"
 accessibility-sys = { git = "https://github.com/eiz/accessibility.git", rev = "173e898d4a52ee0afe0224ecb458d324057856e7" }
 core-foundation = "0.10"
-core-graphics = { version = "0.24", features = ["highsierra"] }
+core-graphics = { version = "0.25", features = ["highsierra"] }
 
 # Windows platform deps
-uiautomation = "0.16.1"
+uiautomation = "0.25.0"
 
 
 [patch.crates-io]
