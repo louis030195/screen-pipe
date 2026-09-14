@@ -59,7 +59,7 @@ impl DatabaseManager {
                 .execute(permit.pool())
                 .await?;
         }
-        std::fs::File::open(&index)?.sync_all()?;
+        super::sync_file(&index)?;
         let mut conn =
             sqlx::SqliteConnection::connect(&format!("sqlite:{}?mode=ro", index.display())).await?;
         let files=sqlx::query("SELECT DISTINCT pf.search_path,pf.detail_path FROM payload_files pf JOIN frame_payloads p ON p.file_id=pf.id ORDER BY pf.id").fetch_all(&mut conn).await?;
@@ -97,7 +97,7 @@ impl DatabaseManager {
                 let target = checked_path(directory, &relative)?;
                 std::fs::create_dir_all(target.parent().unwrap())?;
                 std::fs::copy(source, &target)?;
-                std::fs::File::open(&target)?.sync_all()?;
+                super::sync_file(&target)?;
                 sync_directory(target.parent().unwrap())?;
                 paths.push(relative);
             }
@@ -186,7 +186,7 @@ pub async fn restore(
         let target = checked_path(temp.path(), &entry.path)?;
         std::fs::create_dir_all(target.parent().unwrap())?;
         std::fs::copy(source, &target)?;
-        std::fs::File::open(&target)?.sync_all()?;
+        super::sync_file(&target)?;
     }
     let mut descriptor = manifest.descriptor.clone();
     descriptor.generation = uuid::Uuid::new_v4().to_string();
@@ -203,7 +203,7 @@ pub async fn restore(
         .execute(&mut conn)
         .await?;
     conn.close().await?;
-    std::fs::File::open(&new_index)?.sync_all()?;
+    super::sync_file(&new_index)?;
     durable_json(&temp.path().join("storage.json"), &descriptor)?;
     let db = DatabaseManager::new(temp.path().join("db.sqlite").to_str().unwrap(), config).await?;
     let verification = async {

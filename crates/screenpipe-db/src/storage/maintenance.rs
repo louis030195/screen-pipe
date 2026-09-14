@@ -79,7 +79,7 @@ async fn update_descriptor(
         .execute(&mut conn)
         .await?;
     conn.close().await?;
-    std::fs::File::open(index)?.sync_all()?;
+    super::sync_file(index)?;
     Ok(())
 }
 
@@ -244,7 +244,7 @@ pub async fn export_sqlite(
         let exported=DatabaseManager::new(index.to_str().unwrap(),config).await?;
         let verified=exported.verify_storage().await;
         exported.close().await; verified?;
-        std::fs::File::open(&index)?.sync_all()?;
+        super::sync_file(&index)?;
         std::fs::rename(&index,destination)?;
         sync_directory(destination.parent().unwrap())
     }.await;

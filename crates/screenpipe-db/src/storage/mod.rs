@@ -329,6 +329,17 @@ pub(crate) fn checked_path(root: &Path, relative: &Path) -> Result<PathBuf, sqlx
     Ok(path)
 }
 
+pub(crate) fn sync_file(path: &Path) -> Result<(), sqlx::Error> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // Windows FlushFileBuffers requires GENERIC_WRITE, including when the
+    // completed file was written by SQLite or copied through another handle.
+    #[cfg(windows)]
+    options.write(true);
+    options.open(path)?.sync_all()?;
+    Ok(())
+}
+
 pub(crate) fn sync_directory(path: &Path) -> Result<(), sqlx::Error> {
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
@@ -337,6 +348,7 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), sqlx::Error> {
         use std::os::windows::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .read(true)
+            .write(true)
             .custom_flags(0x02000000)
             .open(path)?
             .sync_all()?;

@@ -814,7 +814,7 @@ pub(super) async fn compact_candidate(
         .await;
     conn.close().await?;
     vacuum?;
-    std::fs::File::open(&compact)?.sync_all()?;
+    super::sync_file(&compact)?;
     super::faults::checkpoint("candidate_compacted");
     std::fs::rename(&compact, index)?;
     sync_directory(index.parent().unwrap())
@@ -1051,7 +1051,7 @@ pub(super) async fn copy_sqlite(
             drop(locked);
             tx.commit().await?;
             result?;
-            std::fs::File::open(&destination)?.sync_all()?;
+            super::sync_file(&destination)?;
             sync_directory(destination.parent().unwrap())?;
             Ok(())
         })
