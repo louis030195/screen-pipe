@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "suite": "screenpipe-app-coding-agent-regressions",
-  "dataset_version": "2026-09-11.1",
+  "dataset_version": "2026-09-14.1",
   "suite_type": "regression",
   "owner": "screenpipe engineering",
   "policy": {
@@ -1284,6 +1284,42 @@
           }
         ],
         "command": "cd apps/screenpipe-app-tauri && NODE_OPTIONS=--localstorage-file=.eval-localstorage bun x vitest run --config vitest.config.ts lib/__tests__/ai-tools-mcp.test.ts lib/__tests__/eval-mcp-config-symlinks.test.ts"
+      }
+    },
+    {
+      "id": "app-provider-outage-vs-limit",
+      "name": "Separate hosted outages from usage limits",
+      "source": {
+        "kind": "git_regression",
+        "fix_commit": "42593c9b330a66ff39bc632bf87b2f34ad801b55",
+        "pull_request": "https://github.com/screenpipe/screenpipe/pull/6897"
+      },
+      "base_ref": "f04a0c8071ee38397cfe138e4ec3e1f433229ddd",
+      "oracle_ref": "42593c9b330a66ff39bc632bf87b2f34ad801b55",
+      "oracle_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/provider-errors.ts"
+      ],
+      "gate": "advisory",
+      "trigger_paths": [
+        "apps/screenpipe-app-tauri/lib/chat/provider-errors.ts"
+      ],
+      "tags": [
+        "regression",
+        "escaped-failure",
+        "classification",
+        "preserved-behavior"
+      ],
+      "prompt": "Screenpipe hosted chat labels service-unavailable errors as usage throttling and suggests upgrading. Treat hosted unavailability, including differently cased and status-prefixed messages, as a retryable cloud outage with retry guidance and no quota or upgrade claim. Preserve explicit rate-limit guidance (wait/retry and upgrade options), real daily allowance limits and tomorrow guidance, ordinary cloud connectivity recovery, local Ollama recovery instructions with the configured model, and non-retryable model refusals. Keep the existing public provider error message/presentation interfaces. Grade user-visible semantics rather than exact sentences; no live provider calls are needed.",
+      "agent_timeout_seconds": 900,
+      "grader": {
+        "timeout_seconds": 60,
+        "fixtures": [
+          {
+            "local_path": "graders/app-provider-outage-vs-limit.test.ts",
+            "destination_path": "evals/coding-agent/graders/app-provider-outage-vs-limit.test.ts"
+          }
+        ],
+        "command": "\"${BUN_BIN:-bun}\" test ./evals/coding-agent/graders/app-provider-outage-vs-limit.test.ts"
       }
     }
   ]

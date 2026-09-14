@@ -9,9 +9,9 @@ This is an agent eval suite, not a unit-test suite. Every case contains:
 - saved prompt, transcript, candidate patch, grader output, runtime fingerprint, and result;
 - repeated-trial reporting with success rate, `pass@k`, and `pass^k`.
 
-The current app corpus contains 41 git-mined regressions. See
+The current app corpus contains 42 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
-history-mining workflow. The companion website manifest contributes 20 more.
+history-mining workflow. The companion website manifest uses this same harness.
 
 The MCP config symlink case grades Settings-side IO with synthetic files and
 real links on a symlink-capable host. Its platform path-resolution port is
@@ -62,3 +62,5 @@ one harness implementation.
 - `--verify`: require baseline failure plus oracle success.
 
 Do not turn capability scores into a release gate after one run. Establish matched-environment repeated baselines first. Regression cases intended to block should target reliable `pass^k`, not a lucky `pass@k`.
+
+The app-provider-outage-vs-limit case uses standalone Bun tests without installed package dependencies. `BUN_BIN` may select an explicit Bun binary. It checks provider presentation semantics, not live model availability.
