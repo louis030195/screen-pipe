@@ -786,9 +786,8 @@ async getScreenpipeAiGatewayUrl() : Promise<Result<string, string>> {
 },
 /**
  * Tauri command: absolute path of the screenpipe base dir (where store.bin
- * lives). Honors SCREENPIPE_DATA_DIR; the webview must use this instead of
- * hardcoding ~/.screenpipe, or it reads/writes a different settings file
- * than the Rust side whenever the override is set.
+ * lives). Honors SCREENPIPE_DATA_DIR at launch and remains stable when startup
+ * selects a different recording folder, so the webview and Rust share a store.
  */
 async getScreenpipeBaseDir() : Promise<Result<string, string>> {
     try {

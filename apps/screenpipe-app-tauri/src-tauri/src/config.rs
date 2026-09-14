@@ -5,7 +5,27 @@
 use screenpipe_core::paths::{
     default_screenpipe_data_dir, ensure_spotlight_excluded, ensure_spotlight_excluded_best_effort,
 };
-use std::{fs, net::IpAddr, path::PathBuf};
+use std::{fs, net::IpAddr, path::PathBuf, sync::OnceLock};
+
+static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Settings and the cloud session belong to the directory selected at launch.
+/// Startup later points SCREENPIPE_DATA_DIR at the recording folder for the
+/// engine and its child processes; that must not move an already-open store.
+pub(crate) fn app_data_dir() -> &'static std::path::Path {
+    APP_DATA_DIR.get_or_init(default_screenpipe_data_dir)
+}
+
+/// Cloud sessions live with app settings; connected-service credentials live
+/// with recordings. Encryption changes must cover both before deleting a key.
+pub(crate) fn secret_store_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![app_data_dir().to_path_buf()];
+    let recording_dir = default_screenpipe_data_dir();
+    if dirs[0] != recording_dir {
+        dirs.push(recording_dir);
+    }
+    dirs
+}
 
 pub const SCREENPIPE_AI_GATEWAY_URL: &str =
     screenpipe_core::agents::pi::SCREENPIPE_API_URL;
@@ -89,12 +109,13 @@ pub async fn get_screenpipe_ai_gateway_url() -> Result<String, String> {
     screenpipe_ai_gateway_url()
 }
 
-pub fn get_base_dir(
-    _app: &tauri::AppHandle,
+pub fn get_base_dir<R: tauri::Runtime>(
+    _app: &tauri::AppHandle<R>,
     custom_path: Option<String>,
 ) -> anyhow::Result<PathBuf> {
-    let default_path = default_screenpipe_data_dir();
-    let local_data_dir = custom_path.map(PathBuf::from).unwrap_or(default_path);
+    let local_data_dir = custom_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_data_dir().to_path_buf());
 
     fs::create_dir_all(local_data_dir.join("data"))?;
     ensure_spotlight_excluded_best_effort(&local_data_dir);
@@ -102,9 +123,8 @@ pub fn get_base_dir(
 }
 
 /// Tauri command: absolute path of the screenpipe base dir (where store.bin
-/// lives). Honors SCREENPIPE_DATA_DIR; the webview must use this instead of
-/// hardcoding ~/.screenpipe, or it reads/writes a different settings file
-/// than the Rust side whenever the override is set.
+/// lives). Honors SCREENPIPE_DATA_DIR at launch and remains stable when startup
+/// selects a different recording folder, so the webview and Rust share a store.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_screenpipe_base_dir(app: tauri::AppHandle) -> Result<String, String> {
@@ -169,6 +189,131 @@ pub async fn validate_data_dir(path: String) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[tokio::test]
+    async fn custom_recording_dir_preserves_settings_and_cloud_session() {
+        // Startup remaps a process environment variable. Use a child test
+        // process so this regression cannot redirect any parallel test or the
+        // developer's settings and credentials.
+        const CHILD: &str = "SCREENPIPE_TEST_CUSTOM_RECORDING_DIR";
+        let Some(recording_dir) = std::env::var_os(CHILD).map(PathBuf::from) else {
+            let root = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::custom_recording_dir_preserves_settings_and_cloud_session",
+                    "--nocapture",
+                ])
+                .env("SCREENPIPE_DATA_DIR", root.path().join("app state"))
+                .env_remove("SCREENPIPE_ENCRYPT_STORE")
+                .env(CHILD, root.path().join("recordings"))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "isolated custom-directory regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr),
+            );
+            return;
+        };
+
+        use crate::store::{LocalPlanPolicy, SettingsStore};
+        use serde_json::json;
+        use tauri_plugin_store::StoreExt;
+
+        let launch_dir = default_screenpipe_data_dir();
+        assert_eq!(app_data_dir(), launch_dir);
+        assert_eq!(secret_store_dirs(), vec![launch_dir.clone()]);
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let native_dir = get_base_dir(app.handle(), None).unwrap();
+        let native_store = app
+            .store_builder(native_dir.join("store.bin"))
+            .build()
+            .unwrap();
+        let mut settings = SettingsStore::default();
+        settings.data_dir = recording_dir.to_string_lossy().into_owned();
+        settings.user.id = Some("custom-directory-account".into());
+        settings.user.subscription_plan = Some("pro".into());
+        settings.user.app_entitled = Some(true);
+        native_store.set("settings", json!(settings));
+        native_store.save().unwrap();
+        assert_eq!(settings.local_plan_policy(), LocalPlanPolicy::Unknown);
+        let pending = crate::startup_auth::DeferredAccountStart::default();
+        pending.defer();
+
+        let selected = resolve_data_dir(&settings.data_dir).unwrap();
+        assert_eq!(selected, recording_dir);
+        let other_store = recording_dir.join("store.bin");
+        let other_bytes = b"{\"settings\":{\"user\":{\"id\":\"other-account\"}}}";
+        fs::write(&other_store, other_bytes).unwrap();
+        // Same remapping as main.rs after the native settings store is cached.
+        std::env::set_var("SCREENPIPE_DATA_DIR", &selected);
+
+        // The webview's base-dir command delegates to this exact resolver.
+        let webview_dir = get_base_dir(app.handle(), None).unwrap();
+        assert_eq!(webview_dir, native_dir);
+        assert_eq!(default_screenpipe_data_dir(), recording_dir);
+        assert_eq!(
+            secret_store_dirs(),
+            vec![launch_dir.clone(), recording_dir.clone()],
+        );
+        let webview_store = app
+            .store_builder(webview_dir.join("store.bin"))
+            .build()
+            .unwrap();
+        settings.user.entitlement = Some(json!({
+            "plan": "pro", "active": true, "source": "subscription",
+            "checked_at": chrono::Utc::now().to_rfc3339(), "features": { "app": true }
+        }));
+        webview_store.set("settings", json!(settings));
+        webview_store.save().unwrap();
+        let refreshed: SettingsStore =
+            serde_json::from_value(native_store.get("settings").unwrap()).unwrap();
+        assert_eq!(refreshed.local_plan_policy(), LocalPlanPolicy::VerifiedPaid);
+        assert!(pending.take_if_allowed(
+            refreshed.local_plan_policy() != LocalPlanPolicy::Unknown,
+            || {},
+        ));
+        assert!(!pending.take_if_allowed(true, || {}));
+        assert_eq!(fs::read(&other_store).unwrap(), other_bytes);
+
+        // A refresh must persist its cloud session beside the startup store,
+        // so the next launch reads the same session. No keychain is needed.
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjdXN0b20tZGlyLXRlc3QifQ.signature";
+        crate::auth_token::store_cloud_token(Some(token))
+            .await
+            .unwrap();
+        let secrets = screenpipe_secrets::SecretStore::open_for_data_dir(app_data_dir(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get("cloud.auth_token").await.unwrap(),
+            Some(token.as_bytes().to_vec()),
+        );
+        assert!(!screenpipe_secrets::secrets_database_path(&recording_dir).exists());
+
+        crate::auth_token::seed_cloud_token(None);
+        fs::write(
+            launch_dir.join("auth.json"),
+            json!({"token": token}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(crate::commands::get_cloud_token().as_deref(), Some(token));
+
+        assert!(!crate::secrets::is_encryption_enabled());
+        screenpipe_secrets::mark_encryption_enabled(&launch_dir).unwrap();
+        assert!(crate::secrets::is_encryption_enabled());
+        assert!(!screenpipe_secrets::is_encryption_requested(&recording_dir));
+        screenpipe_secrets::mark_encryption_disabled(&launch_dir).unwrap();
+        assert!(!crate::secrets::is_encryption_enabled());
+        screenpipe_secrets::mark_encryption_enabled(&recording_dir).unwrap();
+        assert!(crate::secrets::is_encryption_enabled());
+        assert!(!screenpipe_secrets::is_encryption_requested(&launch_dir));
+    }
 
     #[test]
     fn test_resolve_default() {

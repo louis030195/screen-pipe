@@ -24,8 +24,8 @@
 //! plaintext file is left in place so the user is never silently signed out.
 //!
 //! ## Cross-platform
-//! Paths come from `default_screenpipe_data_dir()` and the SecretStore is
-//! opened from that directory on macOS and Windows. The `0o600` hardening on the scrubbed file is
+//! Paths come from the app's launch directory, alongside `store.bin`, even
+//! when recordings live elsewhere. The `0o600` hardening on the scrubbed file is
 //! `#[cfg(unix)]` (a no-op on Windows, which relies on ACLs).
 
 use std::path::Path;
@@ -114,7 +114,7 @@ async fn load_session_token_at(data_dir: &Path, key: Option<[u8; 32]>) -> Option
         .filter(|token| is_cloud_session_token(token))
 }
 
-// ── Public API (production: default data dir + resolved keychain key) ────────
+// ── Public API (production: app data dir + resolved keychain key) ────────────
 
 /// Persist the cloud token to the encrypted SecretStore and refresh the
 /// in-process cache. Empty/`None` clears it. Returns an error if persistence
@@ -123,19 +123,54 @@ pub async fn store_cloud_token(token: Option<&str>) -> anyhow::Result<()> {
     let normalized = normalize_cloud_token(token.map(str::to_string));
     let token = normalized.as_deref();
     seed_cloud_token(normalized.clone());
-    let dir = screenpipe_core::paths::default_screenpipe_data_dir();
+    let dir = crate::config::app_data_dir();
     match token {
-        Some(t) => store_token_at(&dir, write_encryption_key()?, Some(t)).await,
+        Some(t) => store_token_at(dir, write_encryption_key()?, Some(t)).await,
         None => {
             // Sign-out. Deleting the row needs no key, and the on-disk
             // fallbacks `get_cloud_token` reads must go too — a stale copy
             // would resurrect the session at the next settings hydration
             // (the zz-logout-resurrect bug class).
-            let result = store_token_at(&dir, None, None).await;
-            scrub_signout_fallbacks(&dir);
+            // Older custom-directory installs also wrote the session beside
+            // recordings. Clear that copy so a CLI or later migration cannot
+            // resurrect the signed-out account.
+            let result = clear_cloud_sessions(&crate::config::secret_store_dirs()).await;
+            scrub_signout_fallbacks(dir);
             result
         }
     }
+}
+
+async fn clear_cloud_sessions(dirs: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    let mut result = Ok(());
+    for dir in dirs {
+        let exists = screenpipe_secrets::secrets_database_path(dir)
+            .try_exists()
+            .and_then(|exists| {
+                if exists {
+                    Ok(true)
+                } else {
+                    dir.join("db.sqlite").try_exists()
+                }
+            });
+        match exists {
+            Ok(true) => {
+                if let Err(error) = store_token_at(dir, None, None).await {
+                    result = Err(error);
+                }
+            }
+            Err(error) => result = Err(error.into()),
+            Ok(false) => {}
+        }
+        if let Err(error) = std::fs::remove_file(dir.join("auth.json")) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                result = Err(error.into());
+            }
+        }
+        scrub_store_bin_token(&dir.join("store.bin"));
+        scrub_store_bin_token(&dir.join("store.bin.last-good"));
+    }
+    result
 }
 
 /// One-time migration (#3943): move the cloud token out of the plaintext files
@@ -739,6 +774,71 @@ mod tests {
         let got = migrate_at(&dir, None, None).await;
         assert_eq!(got, Some(JWT.to_string()));
         assert_eq!(read_back(&dir, None).await, Some(JWT.to_string()));
+    }
+
+    #[tokio::test]
+    async fn signout_clears_custom_directory_session_copies_and_preserves_connections() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = vec![root.path().join("app"), root.path().join("recordings")];
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+            store_token_at(dir, None, Some(JWT)).await.unwrap();
+            std::fs::write(dir.join("auth.json"), format!(r#"{{"token":"{JWT}"}}"#)).unwrap();
+            for file in ["store.bin", "store.bin.last-good"] {
+                std::fs::write(
+                    dir.join(file),
+                    serde_json::json!({
+                        "settings": { "user": { "id": "retained-account", "token": JWT } }
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            let store = secret_store_at(dir, None).await.unwrap();
+            store
+                .set("test.connection", b"connection-secret")
+                .await
+                .unwrap();
+        }
+
+        // Exercise the real deletion path without the separate ~/.pi cleanup.
+        clear_cloud_sessions(&dirs).await.unwrap();
+        for dir in &dirs {
+            assert_eq!(read_back(dir, None).await, None);
+            assert!(!dir.join("auth.json").exists());
+            for file in ["store.bin", "store.bin.last-good"] {
+                let bytes = std::fs::read(dir.join(file)).unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert!(json["settings"]["user"]["token"].is_null());
+                assert_eq!(json["settings"]["user"]["id"], "retained-account");
+            }
+            let store = secret_store_at(dir, None).await.unwrap();
+            assert_eq!(
+                store.get("test.connection").await.unwrap(),
+                Some(b"connection-secret".to_vec()),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn signout_reports_unavailable_store_and_still_clears_other_session_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = vec![
+            root.path().join("unavailable"),
+            root.path().join("recordings"),
+        ];
+        std::fs::create_dir_all(screenpipe_secrets::secrets_database_path(&dirs[0])).unwrap();
+        std::fs::create_dir_all(&dirs[1]).unwrap();
+        for dir in &dirs {
+            std::fs::write(dir.join("auth.json"), format!(r#"{{"token":"{JWT}"}}"#)).unwrap();
+        }
+        store_token_at(&dirs[1], None, Some(JWT)).await.unwrap();
+
+        assert!(clear_cloud_sessions(&dirs).await.is_err());
+        assert_eq!(read_back(&dirs[1], None).await, None);
+        for dir in &dirs {
+            assert!(!dir.join("auth.json").exists());
+        }
     }
 
     #[tokio::test]

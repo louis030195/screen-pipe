@@ -40,11 +40,11 @@ export async function piProjectDirForSession(
 
   let baseDir = defaultBaseDir;
   try {
-    const result = await commands.getScreenpipeBaseDir();
+    const result = await commands.getActiveDataDir();
     if (result.status === "ok" && result.data) baseDir = result.data;
   } catch {
-    // Production defaults to ~/.screenpipe. Isolated app/E2E data roots are
-    // returned by getScreenpipeBaseDir, so a command failure safely falls back.
+    // Pipes live with recordings, including custom and isolated data roots.
+    // Fall back to the default location if the active directory is unavailable.
   }
   return join(baseDir, "pipes", pipeName);
 }
