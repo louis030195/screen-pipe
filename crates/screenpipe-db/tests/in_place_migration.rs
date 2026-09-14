@@ -508,6 +508,9 @@ async fn exhausted_volume_resumes_after_space_is_restored() {
         })
         .collect();
     assert!(!files.is_empty());
+    // Release the allocation explicitly: Windows can defer freeing a deleted
+    // file while another handle (for example a scanner) still observes it.
+    std::fs::File::create(&filler).unwrap().sync_all().unwrap();
     std::fs::remove_file(filler).unwrap();
     migrate(root.path(), Default::default(), Default::default())
         .await

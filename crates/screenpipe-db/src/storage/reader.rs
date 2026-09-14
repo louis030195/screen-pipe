@@ -530,24 +530,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revision_conflicts_retry_selection_and_stop_at_the_budget() {
+    async fn privacy_revocations_retry_selection_and_stop_at_the_budget() {
         let root = tempfile::tempdir().unwrap();
         let db = DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default())
             .await
             .unwrap();
+        db.execute_raw_sql_write(
+            "INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-11','new capture')",
+        )
+        .await
+        .unwrap();
         let calls = AtomicUsize::new(0);
-        let selected=db.consistent_read(||async {
-            let attempt=calls.fetch_add(1,Ordering::SeqCst);
-            if attempt==0 {db.execute_raw_sql_write("INSERT INTO frames(id,timestamp,full_text) VALUES(1,'2026-09-11','new capture')").await?;}
-            Ok::<_,sqlx::Error>(attempt)
-        }).await.unwrap();
+        // Ordinary writes preserve the request snapshot; privacy revocation
+        // invalidates its admission and must retry the complete read.
+        let selected = db
+            .consistent_read(|| async {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                db.frame_payloads(&[1], Projection::All).await?;
+                if attempt == 0 {
+                    db.execute_raw_sql_write(
+                        "UPDATE _storage_revocation SET revision=revision+1 WHERE id=1",
+                    )
+                    .await?;
+                }
+                Ok::<_, sqlx::Error>(attempt)
+            })
+            .await
+            .unwrap();
         assert_eq!(selected, 1);
         calls.store(0, Ordering::SeqCst);
         let error = db
             .consistent_read(|| async {
                 calls.fetch_add(1, Ordering::SeqCst);
-                db.execute_raw_sql_write("UPDATE frames SET window_name='changed' WHERE id=1")
-                    .await?;
+                db.frame_payloads(&[1], Projection::All).await?;
+                db.execute_raw_sql_write(
+                    "UPDATE _storage_revocation SET revision=revision+1 WHERE id=1",
+                )
+                .await?;
                 Ok::<_, sqlx::Error>(())
             })
             .await

@@ -35,9 +35,9 @@ pub(super) async fn construction_checkpoint(
     if in_transaction {
         return Ok(());
     }
-    // Construction keeps pools open between batches. Copy committed frames
-    // without requesting a WAL restart under those connections.
-    let row = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+    // Let finishing cursors drain within the connection's busy timeout. FULL
+    // copies committed frames without requesting a WAL restart under the pools.
+    let row = sqlx::query("PRAGMA wal_checkpoint(FULL)")
         .fetch_one(&mut *conn)
         .await?;
     if row.try_get::<i64, _>(0)? != 0 || row.try_get::<i64, _>(1)? != row.try_get::<i64, _>(2)? {
@@ -382,4 +382,60 @@ pub(crate) async fn verify(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use sqlx::Connection;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn construction_waits_for_finishing_readers_and_rejects_pinned_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("index.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .pragma("journal_mode", "WAL")
+            .busy_timeout(Duration::from_secs(2));
+        let mut writer = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE records(id INTEGER PRIMARY KEY); INSERT INTO records VALUES(1);",
+        )
+        .execute(&mut writer)
+        .await
+        .unwrap();
+        let mut reader = SqliteConnection::connect_with(&options.read_only(true))
+            .await
+            .unwrap();
+        sqlx::query("BEGIN").execute(&mut reader).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM records")
+                .fetch_one(&mut reader)
+                .await
+                .unwrap(),
+            1
+        );
+        sqlx::query("INSERT INTO records VALUES(2)")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+
+        assert!(construction_checkpoint(&mut writer).await.is_err());
+        let (checkpoint, ()) = tokio::join!(construction_checkpoint(&mut writer), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            sqlx::query("ROLLBACK").execute(&mut reader).await.unwrap();
+        });
+        checkpoint.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM records")
+                .fetch_one(&mut reader)
+                .await
+                .unwrap(),
+            2
+        );
+        reader.close().await.unwrap();
+        writer.close().await.unwrap();
+    }
 }

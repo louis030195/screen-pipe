@@ -670,6 +670,7 @@
         "src/storage/bulk/tests.rs",
         "src/storage/lifecycle.rs",
         "src/storage/reclaim.rs",
+        "src/storage/schema.rs",
         "src/storage/sealing.rs",
         "src/types.rs",
         "src/write_queue.rs",

@@ -81,7 +81,7 @@ async fn cache_hits_and_unrelated_readers_progress_during_a_decode() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
     *storage.bulk.decode_hook.lock().unwrap() = Some(Arc::new(move |key| {
-        if key.starts_with("records:") && key.contains(&element_path) {
+        if key.starts_with("element-frame:") && key.contains(&element_path) {
             counter.fetch_add(1, Ordering::SeqCst);
             if let Some(started) = started.lock().unwrap().take() {
                 let _ = started.send(());
@@ -156,7 +156,7 @@ async fn cold_files_decode_concurrently_with_shared_bounded_admission() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
     *storage.bulk.decode_hook.lock().unwrap() = Some(Arc::new(move |key| {
-        if key.starts_with("records:") {
+        if key.starts_with("records:") || key.starts_with("element-frame:") {
             counter.fetch_add(1, Ordering::SeqCst);
             started.send(()).unwrap();
             Pause(hold.clone()).wait();
@@ -210,7 +210,7 @@ async fn cold_files_decode_concurrently_with_shared_bounded_admission() {
         2,
         "same-file readers must share the decode"
     );
-    assert_eq!(storage.decoder.available_permits(), 2);
+    // Join the already-dispatched frame decode before checking its permit.
     assert_eq!(
         db.frame_payloads(&[1], crate::storage::Projection::All)
             .await
@@ -219,6 +219,7 @@ async fn cold_files_decode_concurrently_with_shared_bounded_admission() {
             .as_deref(),
         Some("frame")
     );
+    assert_eq!(storage.decoder.available_permits(), 2);
     db.close().await;
 }
 

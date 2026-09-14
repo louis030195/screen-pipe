@@ -905,15 +905,16 @@ async fn migration_streams_large_payloads_with_bounded_temporary_space() {
     sqlx::query("INSERT INTO elements(id,frame_id,source,role,properties,parent_id) VALUES(1,1,'accessibility','AXText',?,2)")
         .bind(&payload).execute(&mut **tx.conn()).await.unwrap();
     tx.commit().await.unwrap();
+    let (busy, logged, checkpointed) = source.wal_checkpoint().await.unwrap();
+    assert_eq!((busy, logged), (0, checkpointed));
     source.close().await;
     let original = std::fs::metadata(&path).unwrap();
     let mut options = MigrationOptions::default();
     options.budget.file_bytes = 2 * 1024 * 1024;
     options.budget.record_bytes = 2 * 1024 * 1024;
-    // This permits at most 48 MiB of additional allocation before the reserve;
-    // even one complete source copy would exceed it.
+    // Measure bounded extra allocation here. Actual disk exhaustion is covered
+    // on marked disposable volumes, independent of other host/test writes.
     let headroom = 48 * 1024 * 1024;
-    options.budget.disk_reserve_bytes = fs2::available_space(root.path()).unwrap() - headroom;
     assert!(original.len() > headroom);
     let original_allocated = bytes(root.path());
     let done = Arc::new(AtomicBool::new(false));
