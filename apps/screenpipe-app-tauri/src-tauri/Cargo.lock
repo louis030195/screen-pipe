@@ -11221,7 +11221,7 @@ dependencies = [
  "gtk",
  "hmac 0.12.1",
  "hostname",
- "http 0.2.12",
+ "http 1.4.0",
  "image 0.25.10",
  "ini",
  "lazy_static",
