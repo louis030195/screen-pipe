@@ -92,6 +92,42 @@ describe("automatic storage migration prompt", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
+  it("stays closed across app launches while completed storage is reopening", async () => {
+    Object.assign(status, {
+      completed: true, using_new_storage: false, can_migrate: false,
+      generation: "migrated-generation",
+    });
+    for (const session of ["app-launch-1", "app-launch-2", "app-launch-3"]) {
+      status.app_session_id = session;
+      const app = render(<StorageMigrationPrompt activity={idle} />);
+      await waitFor(() => expect(commands.getStorageMigrationStatus).toHaveBeenCalled());
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+      app.unmount();
+      commands.getStorageMigrationStatus.mockClear();
+    }
+    expect(commands.startStorageMigration).not.toHaveBeenCalled();
+  });
+
+  it.each(["failure", "interruption"])("requires an explicit retry after %s across app launches", async (reason) => {
+    Object.assign(status, {
+      pending: true, in_place: true,
+      error: reason === "failure" ? "Not enough free disk space." : "The previous storage migration did not finish.",
+    });
+    for (const session of ["app-launch-1", "app-launch-2"]) {
+      status.app_session_id = session;
+      const app = render(<StorageMigrationPrompt activity={{ ...idle, error: status.error }} />);
+      await screen.findByRole("button", { name: "try again" });
+      expect(commands.startStorageMigration).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "do later" }));
+      app.unmount();
+    }
+    status.app_session_id = "app-launch-3";
+    render(<StorageMigrationPrompt activity={{ ...idle, error: status.error }} />);
+    fireEvent.click(await screen.findByRole("button", { name: "try again" }));
+    await waitFor(() => expect(commands.startStorageMigration).toHaveBeenCalledTimes(1));
+    expect(commands.startStorageMigration).toHaveBeenCalledWith("/fixture");
+  });
+
   it("surfaces start failures and permits retry without losing the original", async () => {
     commands.startStorageMigration.mockResolvedValueOnce({ status: "error", error: "Could not prevent sleep. Migration has not started." });
     render(<StorageMigrationPrompt activity={idle} />);
