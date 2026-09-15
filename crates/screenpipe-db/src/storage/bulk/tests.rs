@@ -57,6 +57,63 @@ async fn fixture() -> (tempfile::TempDir, Arc<DatabaseManager>) {
     fixture_mode(true).await
 }
 
+#[tokio::test]
+async fn element_scans_decode_each_file_once_and_point_reads_stay_selective() {
+    let root = tempfile::tempdir().unwrap();
+    let db = DatabaseManager::new_hybrid(root.path(), Default::default(), Default::default())
+        .await
+        .unwrap();
+    db.execute_raw_sql_write("INSERT INTO frames(id,timestamp) VALUES(1,'2026-09-15'),(2,'2026-09-15'),(3,'2026-09-15'); INSERT INTO elements(id,frame_id,source,role,text) VALUES(1,1,'accessibility','AXText','one'),(2,2,'accessibility','AXText','two'),(3,3,'accessibility','AXText','three');").await.unwrap();
+    while db.seal_payloads().await.unwrap() != 0 {}
+    let storage = db.storage.as_ref().unwrap();
+    let paths: Vec<String> =
+        sqlx::query_scalar("SELECT path FROM _bulk_files WHERE table_name='elements'")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(paths.len(), 1);
+    storage.bulk.cache.retire(&paths).unwrap();
+    let decoded = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed = decoded.clone();
+    *storage.bulk.decode_hook.lock().unwrap() = Some(Arc::new(move |key| {
+        observed.lock().unwrap().push(key.to_owned());
+    }));
+    // Migration receipts use ID windows across all frames, including multiple
+    // windows in one file. A frame projection must not be decoded per window.
+    for (id, expected) in [(1, "one"), (2, "two"), (3, "three")] {
+        let actual: String =
+            sqlx::query_scalar("SELECT text FROM elements WHERE id>=? ORDER BY id LIMIT 1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(actual, expected);
+    }
+    {
+        let keys = decoded.lock().unwrap();
+        assert_eq!(keys.iter().filter(|k| k.starts_with("records:")).count(), 1);
+        assert!(!keys.iter().any(|k| k.starts_with("element-frame:")));
+    }
+    for sql in [
+        "SELECT text FROM elements WHERE id=2",
+        "SELECT text FROM elements WHERE frame_id=2",
+    ] {
+        storage.bulk.cache.retire(&paths).unwrap();
+        decoded.lock().unwrap().clear();
+        let actual: String = sqlx::query_scalar(sql).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(actual, "two");
+        let keys = decoded.lock().unwrap();
+        assert_eq!(
+            keys.iter()
+                .filter(|k| k.starts_with("element-frame:"))
+                .count(),
+            1
+        );
+        assert!(!keys.iter().any(|k| k.starts_with("records:")));
+    }
+    db.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cache_hits_and_unrelated_readers_progress_during_a_decode() {
     let (_root, db) = fixture().await;
