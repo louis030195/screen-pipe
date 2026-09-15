@@ -682,7 +682,9 @@ async fn reuses_index_and_preserves_history_and_compact_backup() {
 #[tokio::test]
 #[cfg(feature = "storage-fault-injection")]
 async fn recording_recovery_keeps_committed_payloads_and_survives_restarts() {
-    use screenpipe_db::storage::{inventory, recover_interrupted_migration, PrivacyPolicy};
+    use screenpipe_db::storage::{
+        inventory, recover_interrupted_migration_with_progress, PrivacyPolicy,
+    };
     for (point, hit) in [
         ("migration_schema_step", 2),
         ("migration_schema_step", 8),
@@ -721,9 +723,27 @@ async fn recording_recovery_keeps_committed_payloads_and_survives_restarts() {
         let before = payloads();
         for id in 49..=50 {
             let started = std::time::Instant::now();
-            recover_interrupted_migration(root.path(), Default::default())
-                .await
-                .unwrap_or_else(|e| panic!("{point}/{hit}: {e}"));
+            let phases = std::sync::Mutex::new(Vec::new());
+            recover_interrupted_migration_with_progress(
+                root.path(),
+                Default::default(),
+                |progress| {
+                    // Recovery describes work without pretending it is another
+                    // conversion or inventing a percentage of the whole archive.
+                    assert!(progress.total_records.is_none());
+                    phases.lock().unwrap().push(progress.message);
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{point}/{hit}: {e}"));
+            let phases = phases.into_inner().unwrap();
+            if id == 49 {
+                assert_eq!(phases.first(), Some(&"checking interrupted storage"));
+                assert_eq!(phases.last(), Some(&"opening recovered history"));
+                assert!(phases.contains(&"restoring history search indexes"));
+            } else {
+                assert!(phases.is_empty(), "ready storage must not recover again");
+            }
             eprintln!(
                 "recording recovery {point}/{hit} launch {id}: {:?}",
                 started.elapsed()

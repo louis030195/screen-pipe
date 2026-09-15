@@ -60,8 +60,11 @@ pub(super) async fn convert(
 /// Restore the resident schema and search indexes without encoding payloads,
 /// reclaiming files, or completing the migration. Ordinary recording can then
 /// use committed Parquet plus resident SQLite until an explicit migration retry.
-pub(super) async fn recover_recording(storage: Arc<HybridStorage>) -> Result<(), sqlx::Error> {
-    run(storage, 0, 0, &|_| {}, false).await
+pub(super) async fn recover_recording(
+    storage: Arc<HybridStorage>,
+    progress: &(impl Fn(MigrationProgress) + Send + Sync),
+) -> Result<(), sqlx::Error> {
+    run(storage, 0, 0, progress, false).await
 }
 
 async fn run(
@@ -74,6 +77,9 @@ async fn run(
     let index = storage.root.join(&storage.descriptor.index);
     let lease = screenpipe_sqlite_coordinator::acquire_sqlite_manager_lease(&index)
         .map_err(storage_error)?;
+    if !archive {
+        progress(MigrationProgress::phase("checking interrupted storage"));
+    }
     crate::recovery::verify_database_before_reopen(&index).await?;
     crate::db::register_sqlite_extensions()?;
     // Do not close this fd while SQLite holds its process-wide Unix locks.
@@ -106,6 +112,7 @@ async fn run(
     let mut last_report = None;
     let result = async {
         if archive { reserve(&storage)?; }
+        else { progress(MigrationProgress::phase("restoring the recording database")); }
         {
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;
@@ -148,6 +155,7 @@ async fn run(
             let reclaimed = reclaim(&storage, &writer, file, &mut reclamation, true).await?;
             report(&storage, &pool, original_allocated, total_records, progress, &mut last_report, reclaimed).await?;
         }
+        if !archive { progress(MigrationProgress::phase("restoring saved screen records")); }
         loop {
             if archive { reserve(&storage)?; }
             if archive && storage.seal_once(&pool, &writer).await? != 0 {
@@ -175,6 +183,7 @@ async fn run(
         }
         let source_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='_bulk_elements_source')").fetch_one(&pool).await?;
         if source_exists {
+            if !archive { progress(MigrationProgress::phase("restoring saved accessibility records")); }
             let columns = super::import::columns(&pool, "_bulk_elements_source").await?;
             loop {
                 if archive { reserve(&storage)?; }
@@ -216,6 +225,7 @@ async fn run(
             let permit = writer.lock().await?;
             sqlx::query("DROP TABLE _bulk_elements_source").execute(permit.pool()).await?;
         }
+        if !archive { progress(MigrationProgress::phase("restoring history search indexes")); }
         for table in bulk::TABLES.iter().filter(|t| t.name != "elements") {
             while archive {
                 reserve(&storage)?;
@@ -237,6 +247,7 @@ async fn run(
             }
             backfill_resident_fts(&storage, &pool, &writer, table, file, &mut reclamation, archive).await?;
         }
+        if !archive { progress(MigrationProgress::phase("finishing recording recovery")); }
         {
             let permit = writer.lock().await?;
             let mut conn = permit.pool().acquire().await?;

@@ -101,7 +101,7 @@ export function StorageMigrationCard({ dataDirectory, onBusyChange }: {
         {status?.blocked_reason && <p className="text-xs text-muted-foreground">{status.blocked_reason}</p>}
         {status?.pending && !status.busy && (
           <p className="text-xs text-muted-foreground">
-            {status.in_place ? "Migration is unfinished. Completed progress is saved. Recording uses your saved preference; retry migration when ready." : "Migration is unfinished. Resume to continue. Your original database is still kept."}
+            {status.in_place ? "Migration is unfinished. Completed progress is saved; retry migration when ready." : "Migration is unfinished. Resume to continue. Your original database is still kept."}
           </p>
         )}
         {status?.completed && !status.using_new_storage && !status.busy && (

@@ -101,9 +101,9 @@ export function StorageMigrationGate({ offerMigration = false }: { offerMigratio
     >
       <div className="space-y-5">
         <div className="space-y-2">
-          <h2 id="storage-migration-title" className="text-lg font-semibold">migrating storage</h2>
+          <h2 id="storage-migration-title" className="text-lg font-semibold">preparing storage</h2>
           <p id="storage-migration-description" className="text-sm text-muted-foreground">
-            Recording and history access are paused while your history is converted and verified. Your recording preference will be restored when finished. Keep Screenpipe open; your computer will stay awake.
+            Recording and history access are paused while Screenpipe prepares and verifies your history. Your recording preference will be restored when finished. Keep Screenpipe open; your computer will stay awake.
           </p>
         </div>
         <div className="flex items-center gap-3 text-sm" role="status" aria-live="polite">
@@ -123,7 +123,7 @@ export function StorageMigrationGate({ offerMigration = false }: { offerMigratio
           {activity.available_bytes != null && <p>Free space: {migrationBytes(activity.available_bytes)}</p>}
         </div>
         <p className="border-t border-border pt-4 text-xs text-muted-foreground">
-          Space is recovered as each batch is verified. If interrupted, recording resumes with your saved preference. Migration waits for you to retry.
+          Keep Screenpipe open until storage is ready. If interrupted, Screenpipe restores recording from the saved progress before migration can be retried.
         </p>
       </div>
     </dialog>
