@@ -796,6 +796,29 @@ describe("enterprise onboarding authentication", () => {
     );
   });
 
+  it("keeps checkout before default setup when an unfinished new install restarts onboarding", async () => {
+    mocks.enterprisePolicy.isManagedDeployment = false;
+    mocks.trialActivationVariant = "control";
+    mocks.settings.user = {
+      has_payment_method: false,
+      entitlement_source: "none",
+      token: "tok",
+    };
+    // Native reset preserves this flag until activation is complete. After
+    // repeating login/permissions, the engine must still lead to checkout.
+    onboardingData.trialActivationFreshInstall = true;
+    onboardingData.currentStep = "engine";
+
+    render(<OnboardingPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "finish engine" }),
+    );
+
+    expect(await screen.findByText("plan selection")).toBeInTheDocument();
+    expect(screen.queryByText("recommended setup")).not.toBeInTheDocument();
+    expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+  });
+
   it("never enrolls an upgraded free install after onboarding reset", async () => {
     mocks.enterprisePolicy.isManagedDeployment = false;
     mocks.trialActivationVariant = "summary_first";
