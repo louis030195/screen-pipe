@@ -81,7 +81,7 @@ clap = { version = "4.3", features = ["derive"] }
 # Utilities
 tempfile = "3"
 url = "2"
-toml = "0.8"
+toml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 lazy_static = "1.4"
