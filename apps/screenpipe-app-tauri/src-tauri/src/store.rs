@@ -1295,10 +1295,16 @@ impl OnboardingStore {
     }
 
     pub fn reset(&mut self) {
+        // Resetting setup must not turn an unfinished new install into an
+        // upgraded install and remove its checkout. Summary-first onboarding
+        // is marked complete before activation, so retain that pending gate
+        // too. Completed and explicitly unlocked installs stay exempt.
+        self.trial_activation_fresh_install = self.trial_activation_fresh_install
+            && self.current_step.as_deref() != Some(TRIAL_ACTIVATION_UNLOCKED_STEP)
+            && (!self.is_completed || self.blocks_trial_activation_app());
         self.is_completed = false;
         self.completed_at = None;
         self.current_step = None;
-        self.trial_activation_fresh_install = false;
         self.first_run_summary_phase = "idle".to_string();
         self.first_run_summary_started_at = None;
         self.first_run_summary_chat_id = None;
@@ -3207,7 +3213,7 @@ mod tests {
     }
 
     #[test]
-    fn upgraded_and_reset_installs_never_become_trial_activation_eligible() {
+    fn upgraded_installs_never_become_trial_activation_eligible_after_reset() {
         let mut upgraded: OnboardingStore = serde_json::from_value(json!({
             "isCompleted": true,
             "completedAt": "2026-08-01T00:00:00Z",
@@ -3221,10 +3227,63 @@ mod tests {
 
         upgraded.reset();
         assert!(!upgraded.trial_activation_fresh_install);
+    }
 
-        let mut fresh = OnboardingStore::new_install();
-        fresh.reset();
-        assert!(!fresh.trial_activation_fresh_install);
+    #[test]
+    fn reset_preserves_unfinished_trial_activation_across_reload_and_repeated_reset() {
+        for step in [None, Some("engine"), Some("plan")] {
+            let mut onboarding = OnboardingStore::new_install();
+            onboarding.current_step = step.map(str::to_string);
+            onboarding.reset();
+
+            // Exercise the persisted shape that the frontend uses to decide
+            // whether checkout belongs in the resumed onboarding route.
+            let value = serde_json::to_value(&onboarding).unwrap();
+            assert_eq!(value["trialActivationFreshInstall"], true);
+            let mut restored: OnboardingStore = serde_json::from_value(value).unwrap();
+            restored.reset();
+            assert!(restored.trial_activation_fresh_install);
+            assert!(!restored.is_completed);
+            assert!(restored.completed_at.is_none());
+            assert!(restored.current_step.is_none());
+        }
+    }
+
+    #[test]
+    fn reset_preserves_trial_activation_when_summary_first_setup_is_marked_complete() {
+        for step in [TRIAL_ACTIVATION_SUMMARY_STEP, TRIAL_ACTIVATION_PAYWALL_STEP] {
+            let mut onboarding = OnboardingStore::new_install();
+            onboarding.current_step = Some(step.to_string());
+            onboarding.complete();
+            assert!(onboarding.blocks_trial_activation_app());
+
+            onboarding.reset();
+            assert!(onboarding.trial_activation_fresh_install);
+            assert!(!onboarding.is_completed);
+            assert!(onboarding.current_step.is_none());
+            onboarding.reset();
+            assert!(onboarding.trial_activation_fresh_install);
+        }
+    }
+
+    #[test]
+    fn reset_keeps_completed_and_explicitly_unlocked_installs_exempt() {
+        let mut completed = OnboardingStore::new_install();
+        completed.current_step = Some("recommended-setup".to_string());
+        completed.complete();
+        completed.reset();
+        assert!(!completed.trial_activation_fresh_install);
+
+        for is_completed in [false, true] {
+            let mut unlocked = OnboardingStore::new_install();
+            unlocked.is_completed = is_completed;
+            unlocked.current_step = Some(TRIAL_ACTIVATION_UNLOCKED_STEP.to_string());
+            unlocked.reset();
+            unlocked.reset();
+            assert!(!unlocked.trial_activation_fresh_install);
+            assert!(!unlocked.blocks_trial_activation_app());
+            assert!(!unlocked.blocks_trial_activation_recording());
+        }
     }
 
     #[test]
