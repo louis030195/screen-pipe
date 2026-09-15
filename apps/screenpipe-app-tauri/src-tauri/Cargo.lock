@@ -11301,7 +11301,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-tungstenite",
- "toml 0.8.2",
+ "toml 0.9.12+spec-1.1.0",
  "tower 0.4.13",
  "tower-http 0.4.4",
  "tracing",
@@ -11410,7 +11410,7 @@ dependencies = [
  "serde_json",
  "specta",
  "sysinfo",
- "toml 0.8.2",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
