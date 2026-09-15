@@ -459,6 +459,11 @@ impl ServerCore {
         };
         info!("Database initialized at {}", db_path);
 
+        // A pending update may interrupt database recovery, but must exclude
+        // native model initialization until the old process exits. Retain the
+        // read guard through all remaining startup work, including errors.
+        let _native_startup = crate::update_restart::RESTART_SAFETY.native_startup().await;
+
         // --- Audio devices + manager (built but NOT started) ---
         let audio_devices = if config.disable_audio {
             Vec::new()

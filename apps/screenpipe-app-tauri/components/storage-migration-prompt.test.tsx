@@ -12,7 +12,7 @@ const commands = vi.hoisted(() => ({
 vi.mock("@/lib/utils/tauri", () => ({ commands }));
 import { StorageMigrationPrompt } from "./storage-migration-prompt";
 
-const idle: StorageMigrationActivity = { root: "/fixture", busy: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, bytes_saved: null, available_bytes: null, completed: false };
+const idle: StorageMigrationActivity = { root: "/fixture", busy: false, recovering: false, message: "", error: null, elapsed_seconds: 0, completed_records: null, total_records: null, bytes_saved: null, available_bytes: null, completed: false };
 let status: StorageMigrationStatus;
 
 beforeEach(() => {

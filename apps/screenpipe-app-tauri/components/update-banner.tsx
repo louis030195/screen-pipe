@@ -9,16 +9,10 @@ import { Sparkles, X } from "lucide-react";
 import { create } from "zustand";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { commands } from "@/lib/utils/tauri";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { platform, arch } from "@tauri-apps/plugin-os";
 import { useToast } from "@/components/ui/use-toast";
 import { cn } from "@/lib/utils";
-import { screenpipeWebUrl } from "@/lib/web-url";
-import { enterpriseUpdateAuthHeaders } from "@/lib/enterprise-auth-recovery";
-import { flushPendingSettingsWrites, useSettings, type Settings } from "@/lib/hooks/use-settings";
-import { resolveConsumerUpdateChannel } from "@/lib/update-channel";
+import { flushPendingSettingsWrites } from "@/lib/hooks/use-settings";
 
 interface UpdateInfo {
   version: string;
@@ -35,7 +29,6 @@ interface UpdateBannerState {
   isVisible: boolean;
   updateInfo: UpdateInfo | null;
   isInstalling: boolean;
-  pendingUpdate: Update | null;
   authRequired: AuthRequiredInfo | null;
   // Version the user dismissed in this session. Periodic re-checks and
   // providers-remount hydration would otherwise re-show the same banner
@@ -44,7 +37,6 @@ interface UpdateBannerState {
   setIsVisible: (visible: boolean) => void;
   setUpdateInfo: (info: UpdateInfo | null) => void;
   setIsInstalling: (installing: boolean) => void;
-  setPendingUpdate: (update: Update | null) => void;
   setAuthRequired: (info: AuthRequiredInfo | null) => void;
   dismiss: (version: string) => void;
   resetDismissed: () => void;
@@ -54,13 +46,11 @@ export const useUpdateBanner = create<UpdateBannerState>((set) => ({
   isVisible: false,
   updateInfo: null,
   isInstalling: false,
-  pendingUpdate: null,
   authRequired: null,
   dismissedVersion: null,
   setIsVisible: (visible) => set({ isVisible: visible }),
   setUpdateInfo: (info) => set({ updateInfo: info }),
   setIsInstalling: (installing) => set({ isInstalling: installing }),
-  setPendingUpdate: (update) => set({ pendingUpdate: update }),
   setAuthRequired: (info) => set({ authRequired: info }),
   dismiss: (version) => set({ isVisible: false, authRequired: null, dismissedVersion: version }),
   resetDismissed: () => set({ dismissedVersion: null }),
@@ -73,44 +63,12 @@ interface UpdateBannerProps {
   variant?: "default" | "sidebar";
 }
 
-async function getWindowsUpdateOptions(settings: Settings | null | undefined) {
-  const cpuArch = arch();
-  const isEnterprise = await commands.isEnterpriseBuildCmd().catch(() => false);
-  const channel = isEnterprise
-    ? "enterprise"
-    : resolveConsumerUpdateChannel(settings);
-  const headers: Record<string, string> = {};
-
-  if (isEnterprise) {
-    const [licenseKey, accountToken] = await Promise.all([
-      commands.getEnterpriseLicenseKey().catch(() => null),
-      commands.getCloudToken().catch(() => null),
-    ]);
-    Object.assign(
-      headers,
-      enterpriseUpdateAuthHeaders(licenseKey, accountToken),
-    );
-  }
-
-  return {
-    checkOptions: {
-      endpoints: [
-        screenpipeWebUrl(`/api/app-update/${channel}/windows-${cpuArch}/{{current_version}}`, "https://screenpipe.com"),
-      ],
-      ...(Object.keys(headers).length > 0 ? { headers } : {}),
-    },
-    downloadOptions: Object.keys(headers).length > 0 ? { headers } : undefined,
-  };
-}
-
 export function UpdateBanner({ className, compact = false, variant = "default" }: UpdateBannerProps) {
-  const { isVisible, updateInfo, isInstalling, setIsInstalling, pendingUpdate, authRequired, dismiss } = useUpdateBanner();
+  const { isVisible, updateInfo, isInstalling, setIsInstalling, authRequired, dismiss } = useUpdateBanner();
   const { toast } = useToast();
-  const { settings } = useSettings();
 
   const handleUpdate = async () => {
     setIsInstalling(true);
-    const os = platform();
 
     try {
       // A user can enable Auto-update and immediately click this banner. The
@@ -133,83 +91,24 @@ export function UpdateBanner({ className, compact = false, variant = "default" }
         return;
       }
 
-      // Windows: NSIS installer calls process::exit directly, bypassing our
-      // ExitRequested handler — plain relaunch is fine. macOS/Linux go through
-      // restart_for_update which sets QUIT_REQUESTED so the exit isn't blocked
-      // by main.rs (2026-06-10 "stuck on still starting" report).
-      if (os === "windows" && !updateInfo?.persistent) {
-        const gate = await commands.awaitSafeRestart(60);
-        if (gate !== "proceed") {
-          setIsInstalling(false);
-          toast({
-            title: "screenpipe is still starting up",
-            description:
-              gate === "errored"
-                ? "startup error — open settings to see details before restarting"
-                : "finish startup first, then click update again",
-            variant: "destructive",
-          });
-          return;
-        }
+      // Native code owns the download/install handoff on Windows and the
+      // staged restart elsewhere, including startup exclusion and bounded stop.
+      toast({
+        title: "installing update...",
+        description: "screenpipe will restart automatically",
+        duration: 10000,
+      });
+      const res = await commands.restartForUpdate(60);
+      const outcome = res.status === "ok" ? res.data : "errored";
+      if (outcome !== "proceed") {
+        setIsInstalling(false);
         toast({
-          title: "downloading update...",
-          description: "please wait while the update is downloaded",
-          duration: Infinity,
+          title: "update could not restart",
+          description: res.status === "error"
+            ? res.error
+            : "audio is still initializing — try updating again shortly",
+          variant: "destructive",
         });
-
-        // Stop screenpipe before update on Windows
-        try {
-          await commands.stopScreenpipe();
-        } catch (e) {
-          console.warn("failed to stop screenpipe:", e);
-        }
-
-        // Get or check for the update
-        let update = pendingUpdate;
-        const { checkOptions, downloadOptions } = await getWindowsUpdateOptions(settings);
-        if (!update) {
-          update = await check(checkOptions as any);
-        }
-
-        if (update?.available) {
-
-
-          await update.downloadAndInstall(undefined, downloadOptions);
-
-          toast({
-            title: "update complete",
-            description: "relaunching application",
-            duration: 3000,
-          });
-        }
-
-        // Fallback relaunch only if installer didn't run (no update available
-        // at click time); normal path: downloadAndInstall already exited.
-        await relaunch();
-      } else {
-        // macOS/Linux: bundle already staged by backend. `restart_for_update`
-        // gates internally, so no separate `awaitSafeRestart` call needed.
-        toast({
-          title: "installing update...",
-          description: "screenpipe will restart automatically",
-          duration: 10000,
-        });
-        const res = await commands.restartForUpdate(60);
-        const outcome = res.status === "ok" ? res.data : "errored";
-        if (outcome !== "proceed") {
-          setIsInstalling(false);
-          toast({
-            title: "screenpipe is still starting up",
-            description:
-              outcome === "errored"
-                ? "startup error — open settings to see details before restarting"
-                : "finish startup first, then click update again",
-            variant: "destructive",
-          });
-          return;
-        }
-        // restart scheduled off-thread; runtime will tear down shortly.
-        // Leave button on "restarting…" until the process is replaced.
       }
     } catch (error) {
       console.error("failed to update:", error);
