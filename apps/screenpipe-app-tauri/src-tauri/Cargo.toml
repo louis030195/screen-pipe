@@ -69,7 +69,7 @@ plist = "1"
 arc-swap = "1"
 
 tower-http = { version = "0.4.0", features = ["cors", "trace"] }
-http = "0.2"
+http = "1.4"
 
 # TypeScript bindings
 specta = { version = "=2.0.0-rc.20", features = [
