@@ -136,7 +136,7 @@
     "lucide-react": "^0.414.0",
     "mammoth": "^1.12.0",
     "mdast-util-to-string": "^4.0.0",
-    "mermaid": "^11.12.3",
+    "mermaid": "^12.0.0",
     "next": "15.5.21",
     "nuqs": "^2.8.9",
     "posthog-js": "^1.359.1",
