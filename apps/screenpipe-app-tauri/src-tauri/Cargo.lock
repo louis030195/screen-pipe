@@ -775,7 +775,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "getrandom 0.3.4",
- "rand 0.9.2",
+ "rand 0.9.5",
  "reqwest 0.13.4",
  "secrecy",
  "serde",
@@ -1762,7 +1762,7 @@ dependencies = [
  "num_cpus",
  "objc2-foundation 0.3.2",
  "objc2-metal",
- "rand 0.9.2",
+ "rand 0.9.5",
  "rand_distr",
  "rayon",
  "safetensors 0.7.0",
@@ -4294,7 +4294,7 @@ checksum = "c2d1f04709a8ac06e8e8042875a3c466cc4832d3c1a18dbcb9dba3c6e83046bc"
 dependencies = [
  "half",
  "num-traits",
- "rand 0.9.2",
+ "rand 0.9.5",
  "rand_distr",
 ]
 
@@ -5476,7 +5476,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "crunchy",
  "num-traits",
- "rand 0.9.2",
+ "rand 0.9.5",
  "rand_distr",
  "zerocopy 0.8.47",
 ]
@@ -5619,7 +5619,7 @@ dependencies = [
  "log",
  "native-tls",
  "num_cpus",
- "rand 0.9.2",
+ "rand 0.9.5",
  "reqwest 0.12.12",
  "serde",
  "serde_json",
@@ -10035,9 +10035,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.2"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -10124,7 +10124,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
 dependencies = [
  "num-traits",
- "rand 0.9.2",
+ "rand 0.9.5",
 ]
 
 [[package]]
@@ -10190,7 +10190,7 @@ dependencies = [
  "num-traits",
  "paste",
  "profiling",
- "rand 0.9.2",
+ "rand 0.9.5",
  "rand_chacha 0.9.0",
  "simd_helpers",
  "thiserror 2.0.18",
@@ -11353,7 +11353,7 @@ dependencies = [
  "once_cell",
  "ort",
  "ort-sys",
- "rand 0.9.2",
+ "rand 0.10.1",
  "realfft",
  "reqwest 0.13.4",
  "rubato",
@@ -11489,7 +11489,7 @@ dependencies = [
  "objc",
  "objc-foundation",
  "once_cell",
- "rand 0.9.2",
+ "rand 0.10.1",
  "regex",
  "reqwest 0.13.4",
  "screenpipe-cpu-features",
@@ -11531,7 +11531,7 @@ dependencies = [
  "oasgen",
  "once_cell",
  "parquet",
- "rand 0.9.2",
+ "rand 0.10.1",
  "regex",
  "rusqlite",
  "screenpipe-config",
@@ -11685,7 +11685,7 @@ dependencies = [
  "once_cell",
  "opf",
  "ort",
- "rand 0.9.2",
+ "rand 0.10.1",
  "regex",
  "reqwest 0.13.4",
  "screenpipe-db",
@@ -11772,7 +11772,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "keyring",
- "rand 0.9.2",
+ "rand 0.10.1",
  "screenpipe-sqlite-coordinator",
  "serde",
  "serde_json",
@@ -11823,7 +11823,7 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "hex",
- "rand 0.9.2",
+ "rand 0.10.1",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -11851,7 +11851,7 @@ version = "0.4.50"
 dependencies = [
  "argon2 0.5.3",
  "chacha20poly1305",
- "rand 0.9.2",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -12159,7 +12159,7 @@ version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "deaa38b94e70820ff3f1f9db3c8b0aef053b667be130f618e615e0ff2492cbcc"
 dependencies = [
- "rand 0.9.2",
+ "rand 0.9.5",
  "sentry-types 0.42.0",
  "serde",
  "serde_json",
@@ -12268,7 +12268,7 @@ checksum = "e477f4d4db08ddb4ab553717a8d3a511bc9e81dde0c808c680feacbb8105c412"
 dependencies = [
  "debugid",
  "hex",
- "rand 0.9.2",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -14212,7 +14212,7 @@ checksum = "01fc2c5ff41105bd1f7242d8201fdf3efd70749b82fa013a17f2126357d194cc"
 dependencies = [
  "log",
  "notify-rust",
- "rand 0.9.2",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "serde_repr",
@@ -14919,7 +14919,7 @@ dependencies = [
  "monostate",
  "onig",
  "paste",
- "rand 0.9.2",
+ "rand 0.9.5",
  "rayon",
  "rayon-cond",
  "regex",
@@ -14952,7 +14952,7 @@ dependencies = [
  "monostate",
  "onig",
  "paste",
- "rand 0.9.2",
+ "rand 0.9.5",
  "rayon",
  "rayon-cond",
  "regex",
@@ -17430,7 +17430,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "percent-encoding",
  "pipewire",
- "rand 0.9.2",
+ "rand 0.9.5",
  "scopeguard",
  "serde",
  "thiserror 2.0.18",
