@@ -124,7 +124,7 @@ samplerate = "0.2.4"
 libsamplerate-sys = "0.1.10"
 
 # Crypto
-argon2 = "0.5"
+argon2 = "0.6"
 chacha20poly1305 = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 
