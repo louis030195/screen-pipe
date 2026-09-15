@@ -18,6 +18,7 @@ pub enum AudioTranscriptionEngine {
     Qwen3Asr,
     Parakeet,
     ParakeetMlx,
+    Orukeet,
     Disabled,
 }
 
@@ -32,8 +33,8 @@ impl AudioTranscriptionEngine {
         match self {
             Self::Qwen3Asr => true,
             Self::Deepgram | Self::OpenAICompatible | Self::Disabled => false,
-            Self::Parakeet | Self::ParakeetMlx => false, // ONNX Runtime: runtime CPU dispatch
-            _ => true,                                   // all Whisper variants (ggml)
+            Self::Parakeet | Self::ParakeetMlx | Self::Orukeet => false, // ONNX Runtime: runtime CPU dispatch
+            _ => true, // all Whisper variants (ggml)
         }
     }
 }
@@ -53,6 +54,7 @@ impl std::str::FromStr for AudioTranscriptionEngine {
             "qwen3-asr" => Ok(Self::Qwen3Asr),
             "parakeet" | "parakeet-tdt-0.6b-v2" => Ok(Self::Parakeet),
             "parakeet-mlx" => Ok(Self::ParakeetMlx),
+            "orukeet" => Ok(Self::Orukeet),
             "disabled" => Ok(Self::Disabled),
             _ => Err(format!("unknown audio engine: {s}")),
         }
@@ -77,6 +79,7 @@ impl fmt::Display for AudioTranscriptionEngine {
             AudioTranscriptionEngine::Qwen3Asr => write!(f, "Qwen3Asr"),
             AudioTranscriptionEngine::Parakeet => write!(f, "Parakeet"),
             AudioTranscriptionEngine::ParakeetMlx => write!(f, "ParakeetMlx"),
+            AudioTranscriptionEngine::Orukeet => write!(f, "Orukeet"),
             AudioTranscriptionEngine::Disabled => write!(f, "Disabled"),
         }
     }
@@ -177,6 +180,11 @@ mod tests {
         assert!(AudioTranscriptionEngine::WhisperLargeV3TurboQuantized.requires_avx2());
         assert!(AudioTranscriptionEngine::Qwen3Asr.requires_avx2());
         assert!(!AudioTranscriptionEngine::Parakeet.requires_avx2());
+        assert!(!AudioTranscriptionEngine::Orukeet.requires_avx2());
+        assert_eq!(
+            "orukeet".parse::<AudioTranscriptionEngine>().unwrap(),
+            AudioTranscriptionEngine::Orukeet
+        );
         assert!(!AudioTranscriptionEngine::ParakeetMlx.requires_avx2());
         assert!(!AudioTranscriptionEngine::Deepgram.requires_avx2());
         assert!(!AudioTranscriptionEngine::OpenAICompatible.requires_avx2());

@@ -129,7 +129,7 @@ pub fn default_max_batch_duration_secs(engine: &AudioTranscriptionEngine) -> u64
     match engine {
         AudioTranscriptionEngine::Deepgram => 480,
         AudioTranscriptionEngine::OpenAICompatible => 3000,
-        AudioTranscriptionEngine::Parakeet => 45,
+        AudioTranscriptionEngine::Parakeet | AudioTranscriptionEngine::Orukeet => 45,
         _ => 600,
     }
 }

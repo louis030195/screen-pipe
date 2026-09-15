@@ -2148,6 +2148,7 @@ impl AudioManager {
                 AudioTranscriptionEngine::Qwen3Asr
                     | AudioTranscriptionEngine::Parakeet
                     | AudioTranscriptionEngine::ParakeetMlx
+                    | AudioTranscriptionEngine::Orukeet
             );
 
             if should_try_audiopipe_refresh && engine_needs_refresh {

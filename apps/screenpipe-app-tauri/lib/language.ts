@@ -278,6 +278,7 @@ const ENGINE_LANGUAGE_SUPPORT: Record<string, readonly Language[]> = {
   deepgram: DEEPGRAM_NOVA3_SUPPORTED_LANGUAGES,
   "screenpipe-cloud": DEEPGRAM_NOVA3_SUPPORTED_LANGUAGES,
   parakeet: PARAKEET_SUPPORTED_LANGUAGES,
+  orukeet: PARAKEET_SUPPORTED_LANGUAGES,
   "parakeet-mlx": PARAKEET_SUPPORTED_LANGUAGES,
   "qwen3-asr": QWEN3_ASR_SUPPORTED_LANGUAGES,
 };
@@ -286,6 +287,7 @@ const ENGINE_LANGUAGE_SUPPORT_KEYS: Record<string, string> = {
   deepgram: "deepgram-nova-3",
   "screenpipe-cloud": "deepgram-nova-3",
   parakeet: "parakeet",
+  orukeet: "parakeet",
   "parakeet-mlx": "parakeet",
   "qwen3-asr": "qwen3-asr",
 };
@@ -318,7 +320,7 @@ export function getTranscriptionEngineLanguageSupportKey(engine: string): string
 }
 
 export function transcriptionEngineUsesLanguageHints(engine: string): boolean {
-  return !["disabled", "parakeet", "parakeet-mlx", "qwen3-asr"].includes(engine);
+  return !["disabled", "parakeet", "parakeet-mlx", "orukeet", "qwen3-asr"].includes(engine);
 }
 
 export function filterLanguagesForTranscriptionEngine(

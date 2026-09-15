@@ -10,6 +10,8 @@ pub mod deepgram;
 pub mod diarization;
 pub mod engine;
 pub mod openai_compatible;
+#[cfg(feature = "parakeet")]
+pub mod orukeet;
 pub mod stt;
 pub mod whisper;
 

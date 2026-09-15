@@ -61,7 +61,7 @@ describe("computeManagedSettingUpdates", () => {
   });
 
   it("supports every transcription engine currently shown by the app", () => {
-    for (const engine of ["qwen3-asr", "parakeet", "openai-compatible", "disabled"]) {
+    for (const engine of ["qwen3-asr", "parakeet", "orukeet", "openai-compatible", "disabled"]) {
       expect(
         computeManagedSettingUpdates({ audioTranscriptionEngine: engine }, {}).engineUpdates
           .audioTranscriptionEngine,

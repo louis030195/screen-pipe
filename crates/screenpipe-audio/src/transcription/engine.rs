@@ -144,6 +144,7 @@ pub enum TranscriptionEngine {
     #[cfg(feature = "parakeet")]
     Parakeet {
         model: Arc<StdMutex<audiopipe::Model>>,
+        config: AudioTranscriptionEngine,
         vocabulary: Vec<VocabularyEntry>,
     },
     #[cfg(feature = "parakeet-mlx")]
@@ -373,6 +374,7 @@ impl TranscriptionEngine {
                         Ok(model) => {
                             info!("parakeet-tdt-0.6b-v3 (multilingual) model loaded successfully");
                             Ok(Self::Parakeet {
+                                config: AudioTranscriptionEngine::Parakeet,
                                 model: Arc::new(StdMutex::new(model)),
                                 vocabulary,
                             })
@@ -392,6 +394,30 @@ impl TranscriptionEngine {
                     Err(anyhow!(
                         "parakeet engine selected but neither 'parakeet' nor 'parakeet-mlx' feature is enabled"
                     ))
+                }
+            }
+
+            AudioTranscriptionEngine::Orukeet => {
+                #[cfg(feature = "parakeet")]
+                {
+                    let model = tokio::task::spawn_blocking(super::orukeet::load_cached)
+                        .await
+                        .map_err(|e| anyhow!("Orukeet loading task panicked: {e}"))??;
+                    match model {
+                        Some(model) => Ok(Self::Parakeet {
+                            model: Arc::new(StdMutex::new(model)),
+                            config: AudioTranscriptionEngine::Orukeet,
+                            vocabulary,
+                        }),
+                        None => {
+                            super::orukeet::spawn_download();
+                            Ok(Self::Disabled)
+                        }
+                    }
+                }
+                #[cfg(not(feature = "parakeet"))]
+                {
+                    Err(anyhow!("Orukeet requires the 'parakeet' feature"))
                 }
             }
 
@@ -537,8 +563,13 @@ impl TranscriptionEngine {
                 vocabulary: merge_keyterms(vocabulary, extra_keyterms),
             }),
             #[cfg(feature = "parakeet")]
-            Self::Parakeet { model, vocabulary } => Ok(TranscriptionSession::Parakeet {
+            Self::Parakeet {
+                model,
+                vocabulary,
+                config,
+            } => Ok(TranscriptionSession::Parakeet {
                 model: model.clone(),
+                config: config.clone(),
                 vocabulary: merge_keyterms(vocabulary, extra_keyterms),
             }),
             #[cfg(feature = "parakeet-mlx")]
@@ -593,7 +624,7 @@ impl TranscriptionEngine {
             #[cfg(feature = "qwen3-asr")]
             Self::Qwen3Asr { .. } => AudioTranscriptionEngine::Qwen3Asr,
             #[cfg(feature = "parakeet")]
-            Self::Parakeet { .. } => AudioTranscriptionEngine::Parakeet,
+            Self::Parakeet { config, .. } => config.clone(),
             #[cfg(feature = "parakeet-mlx")]
             Self::ParakeetMlx { .. } => AudioTranscriptionEngine::ParakeetMlx,
             Self::Deepgram { .. } => AudioTranscriptionEngine::Deepgram,
@@ -622,6 +653,7 @@ pub enum TranscriptionSession {
     #[cfg(feature = "parakeet")]
     Parakeet {
         model: Arc<StdMutex<audiopipe::Model>>,
+        config: AudioTranscriptionEngine,
         vocabulary: Vec<VocabularyEntry>,
     },
     #[cfg(feature = "parakeet-mlx")]
@@ -787,7 +819,9 @@ impl TranscriptionSession {
             }
 
             #[cfg(feature = "parakeet")]
-            Self::Parakeet { model, vocabulary } => {
+            Self::Parakeet {
+                model, vocabulary, ..
+            } => {
                 let mut engine = model.lock().map_err(|e| anyhow!("stt model lock: {}", e))?;
                 // Contextual biasing: feed the vocabulary as keyterms so Parakeet
                 // prefers known names/products (audiopipe shallow-fusion; measured
@@ -989,6 +1023,37 @@ mod merge_keyterms_tests {
         VocabularyEntry {
             word: word.to_string(),
             replacement: None,
+        }
+    }
+
+    #[cfg(feature = "parakeet")]
+    #[tokio::test]
+    #[ignore = "requires a complete cached Orukeet installation"]
+    async fn cached_orukeet_preserves_model_identity_and_shares_sessions() {
+        let engine = TranscriptionEngine::new(
+            Arc::new(AudioTranscriptionEngine::Orukeet),
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert_eq!(engine.config(), AudioTranscriptionEngine::Orukeet);
+        let TranscriptionEngine::Parakeet { model, .. } = &engine else {
+            panic!("expected the shared ONNX runtime");
+        };
+        for _ in 0..2 {
+            let TranscriptionSession::Parakeet {
+                model: session_model,
+                config,
+                ..
+            } = engine.create_session().unwrap()
+            else {
+                panic!("expected the shared ONNX session");
+            };
+            assert_eq!(config, AudioTranscriptionEngine::Orukeet);
+            assert!(Arc::ptr_eq(model, &session_model));
         }
     }
 

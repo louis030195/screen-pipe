@@ -118,4 +118,12 @@ describe("transcription engine language support", () => {
       )
     ).toEqual([]);
   });
+
+  it("Orukeet shares Parakeet languages and automatic detection", () => {
+    expect(getLanguageOptionsForTranscriptionEngine("orukeet")).toEqual(
+      getLanguageOptionsForTranscriptionEngine("parakeet")
+    );
+    expect(getTranscriptionEngineLanguageSupportKey("orukeet")).toBe("parakeet");
+    expect(transcriptionEngineUsesLanguageHints("orukeet")).toBe(false);
+  });
 });

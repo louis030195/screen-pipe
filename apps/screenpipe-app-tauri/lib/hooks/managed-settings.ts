@@ -45,6 +45,7 @@ export const ALLOWED_TRANSCRIPTION_ENGINES = [
   "whisper-tiny-quantized",
   "qwen3-asr",
   "parakeet",
+  "orukeet",
   "openai-compatible",
   "disabled",
 ] as const;

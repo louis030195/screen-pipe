@@ -200,6 +200,7 @@ pub async fn stt(
         }
     } else if *audio_transcription_engine == AudioTranscriptionEngine::Qwen3Asr
         || *audio_transcription_engine == AudioTranscriptionEngine::Parakeet
+        || *audio_transcription_engine == AudioTranscriptionEngine::Orukeet
     {
         // Qwen3-ASR / Parakeet via alternate STT engine (audiopipe)
         if let Some(ref engine) = alternate_stt {

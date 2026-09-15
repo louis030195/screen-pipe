@@ -51,7 +51,7 @@ struct Args {
 
     /// Comma-separated list of `name[=cap]` entries. Names: `tiny`,
     /// `tiny-quantized`, `whisper-large-v3-turbo`, `whisper-large-v3-turbo-quantized`,
-    /// `whisper-large` (large-v3), `whisper-large-quantized`, `parakeet`. When
+    /// `whisper-large` (large-v3), `whisper-large-quantized`, `parakeet`, `orukeet`. When
     /// `=cap` is omitted, falls back to `--max-utterances`. Each model is run in
     /// listed order and emitted as its own JSON row.
     #[arg(long, default_value = "tiny")]
@@ -85,6 +85,7 @@ fn parse_engine(name: &str) -> Result<AudioTranscriptionEngine> {
             Ok(AudioTranscriptionEngine::WhisperLargeV3TurboQuantized)
         }
         "parakeet" => Ok(AudioTranscriptionEngine::Parakeet),
+        "orukeet" => Ok(AudioTranscriptionEngine::Orukeet),
         // `base` is not a screenpipe engine variant; surface clearly rather
         // than silently substituting tiny.
         "base" | "whisper-base" => anyhow::bail!(
@@ -138,6 +139,11 @@ fn parse_models(spec: &str, default_cap: usize) -> Result<Vec<ModelSpec>> {
 /// cache-only check and spawns a background download otherwise.
 async fn prime_model(engine: &AudioTranscriptionEngine) -> Result<()> {
     match engine {
+        AudioTranscriptionEngine::Orukeet => {
+            tokio::task::spawn_blocking(screenpipe_audio::transcription::orukeet::download_model)
+                .await??;
+            Ok(())
+        }
         AudioTranscriptionEngine::Parakeet => {
             // Match the CPU model name used at engine.rs (parakeet-mlx is not
             // available on Linux CI anyway).

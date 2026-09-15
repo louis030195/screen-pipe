@@ -11,12 +11,8 @@
 //! - Full audio vs chunked
 //!
 //! Usage:
-//!   cargo run --example bench_quality --features parakeet --release
+//!   cargo run -p screenpipe-audio --example bench_quality --features parakeet --release -- [parakeet|orukeet]
 
-use screenpipe_audio::core::engine::AudioTranscriptionEngine;
-use screenpipe_audio::TranscriptionEngine;
-use screenpipe_core::Language;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// WER (Word Error Rate) via Levenshtein on word sequences
@@ -278,22 +274,18 @@ async fn main() -> anyhow::Result<()> {
 
     let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    // Load model once
-    println!("Loading parakeet model...");
+    // Same decoder, preprocessing and chunk policies for both models.
+    let name = std::env::args().nth(1).unwrap_or_else(|| "parakeet".into());
     let t0 = Instant::now();
-    let te = TranscriptionEngine::new(
-        Arc::new(AudioTranscriptionEngine::Parakeet),
-        None,
-        None,
-        vec![Language::English],
-        vec![],
-    )
-    .await?;
-    println!("Model loaded in {:.1}s\n", t0.elapsed().as_secs_f64());
-
-    // Use audiopipe directly for fine-grained control over transcription options
-    let _ = te; // keep engine alive (model weights cached)
-    let mut model = audiopipe::Model::from_pretrained("parakeet-tdt-0.6b-v3")?;
+    let mut model = match name.as_str() {
+        "parakeet" => audiopipe::Model::from_pretrained("parakeet-tdt-0.6b-v3")?,
+        "orukeet" => {
+            let directory = screenpipe_audio::transcription::orukeet::download_model()?;
+            audiopipe::Model::from_dir(&directory, "parakeet")?
+        }
+        _ => anyhow::bail!("usage: bench_quality [parakeet|orukeet]"),
+    };
+    println!("{} loaded in {:.1}s\n", name, t0.elapsed().as_secs_f64());
 
     // Test configurations
     struct Config {

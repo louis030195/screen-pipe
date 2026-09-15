@@ -360,6 +360,11 @@ pub fn is_engine_unsafe_for_cpu(engine: &str, tier: DeviceTier, has_avx2: bool) 
         return true;
     }
 
+    // Orukeet shares the ONNX memory budget but never initializes MLX.
+    if engine == "orukeet" {
+        return tier != DeviceTier::High;
+    }
+
     let is_parakeet = engine == "parakeet" || engine == "parakeet-mlx";
     if !is_parakeet {
         return false;
@@ -490,6 +495,13 @@ mod tests {
     #[test]
     fn best_engine_low_tier_always_whisper_tiny() {
         assert_eq!(best_engine_for_platform(DeviceTier::Low), "whisper-tiny");
+    }
+
+    #[test]
+    fn orukeet_keeps_memory_guard_without_mlx_os_or_avx2_requirement() {
+        assert!(is_engine_unsafe_for_cpu("orukeet", DeviceTier::Low, false));
+        assert!(is_engine_unsafe_for_cpu("orukeet", DeviceTier::Mid, true));
+        assert!(!is_engine_unsafe_for_cpu("orukeet", DeviceTier::High, false));
     }
 
     #[test]

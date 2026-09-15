@@ -235,6 +235,7 @@ const TRANSCRIPTION_ENGINE_LABELS: Record<string, string> = {
   "openai-compatible": "OpenAI Compatible",
   "qwen3-asr": "Qwen3-ASR",
   parakeet: "Parakeet",
+  orukeet: "Orukeet",
   "parakeet-mlx": "Parakeet MLX",
   disabled: "Disabled (capture only)",
 };
@@ -2826,6 +2827,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                       <SelectItem value="whisper-tiny-quantized">Whisper Tiny (fast)</SelectItem>
                       {!isMacOS && <SelectItem value="qwen3-asr">Qwen3-ASR</SelectItem>}
                       <SelectItem value="parakeet">Parakeet{isMacOS ? " (experimental)" : ""}</SelectItem>
+                      <SelectItem value="orukeet">Orukeet</SelectItem>
                     </SelectGroup>
                     <SelectGroup>
                       <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">other</SelectLabel>

@@ -829,7 +829,9 @@ fn meeting_retranscribe_max_batch_duration_secs(engine: &AudioTranscriptionEngin
     match engine {
         AudioTranscriptionEngine::Deepgram => 5000,
         AudioTranscriptionEngine::OpenAICompatible => 3000,
-        AudioTranscriptionEngine::Parakeet | AudioTranscriptionEngine::ParakeetMlx => 30,
+        AudioTranscriptionEngine::Parakeet
+        | AudioTranscriptionEngine::ParakeetMlx
+        | AudioTranscriptionEngine::Orukeet => 30,
         _ => 600,
     }
 }

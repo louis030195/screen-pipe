@@ -311,7 +311,7 @@ fn selected_engine_model(session: &TranscriptionSession) -> Option<String> {
         #[cfg(feature = "qwen3-asr")]
         TranscriptionSession::Qwen3Asr { .. } => AudioTranscriptionEngine::Qwen3Asr.to_string(),
         #[cfg(feature = "parakeet")]
-        TranscriptionSession::Parakeet { .. } => AudioTranscriptionEngine::Parakeet.to_string(),
+        TranscriptionSession::Parakeet { config, .. } => config.to_string(),
         #[cfg(feature = "parakeet-mlx")]
         TranscriptionSession::ParakeetMlx { .. } => {
             AudioTranscriptionEngine::ParakeetMlx.to_string()
