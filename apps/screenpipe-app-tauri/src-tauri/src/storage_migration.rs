@@ -54,6 +54,7 @@ fn clear_migration_error(root: &Path) -> Result<(), String> {
 struct Operation {
     root: Option<PathBuf>,
     busy: bool,
+    recovering: bool,
     message: String,
     error: Option<String>,
     started_at: Option<Instant>,
@@ -71,6 +72,7 @@ impl Operation {
         StorageMigrationActivity {
             root: self.root.as_ref().map(|root| root.display().to_string()),
             busy: self.busy,
+            recovering: self.recovering,
             message: self.message.clone(),
             error: self.error.clone(),
             elapsed_seconds: self
@@ -93,6 +95,7 @@ pub struct StorageMigrationState(Mutex<Operation>);
 pub struct StorageMigrationActivity {
     pub root: Option<String>,
     pub busy: bool,
+    pub recovering: bool,
     pub message: String,
     pub error: Option<String>,
     pub elapsed_seconds: u64,
@@ -316,6 +319,7 @@ pub(crate) async fn resume_before_startup(
                 root: Some(root.clone()),
                 busy: true,
                 message: "restoring recording after an interrupted migration".into(),
+                recovering: true,
                 started_at: Some(Instant::now()),
                 ..Default::default()
             };
