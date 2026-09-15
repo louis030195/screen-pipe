@@ -29,6 +29,18 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("app-wide migration modal", () => {
+  it("shows startup recovery until recording is ready without offering duplicate retries", async () => {
+    mock.getActivity.mockResolvedValue({ ...running, message: "restoring saved screen records" });
+    render(<StorageMigrationGate />);
+    const dialog = await screen.findByRole("dialog", { name: "preparing storage" });
+    expect(dialog).toHaveTextContent("restoring saved screen records");
+    expect(screen.queryByRole("button", { name: /try again|do later/i })).toBeNull();
+    notify({ ...running, message: "starting recording on recovered storage" });
+    expect(dialog).toHaveTextContent("starting recording on recovered storage");
+    notify(idle);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("shows measured conversion counts and elapsed time, then clears the percentage during verification", async () => {
     render(<StorageMigrationGate />);
     await waitFor(() => expect(mock.getActivity).toHaveBeenCalled());
@@ -48,7 +60,7 @@ describe("app-wide migration modal", () => {
   it("blocks an already-running migration and stays mounted across page changes", async () => {
     mock.getActivity.mockResolvedValue(running);
     const app = render(<><StorageMigrationGate /><main>settings</main></>);
-    expect(await screen.findByRole("dialog", { name: "migrating storage" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "preparing storage" })).toBeTruthy();
     app.rerender(<><StorageMigrationGate /><main>chat</main></>);
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /close|cancel|dismiss/i })).toBeNull();

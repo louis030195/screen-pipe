@@ -33,6 +33,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("automatic storage migration prompt", () => {
+  it.each([
+    { busy: true },
+    { blocked_reason: "Screenpipe is restarting or restoring recording. Wait for startup to finish." },
+  ])("withholds retry and recording-resumed claims while startup owns storage: %j", async (startup) => {
+    Object.assign(status, {
+      pending: true, in_place: true, error: "The previous storage migration did not finish.",
+      ...startup,
+    });
+    const app = render(<StorageMigrationPrompt activity={idle} />);
+    await waitFor(() => expect(commands.getStorageMigrationStatus).toHaveBeenCalled());
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "try again" })).toBeNull();
+    app.unmount();
+    Object.assign(status, { busy: false, blocked_reason: null });
+    render(<StorageMigrationPrompt activity={idle} />);
+    fireEvent.click(await screen.findByRole("button", { name: "try again" }));
+    await waitFor(() => expect(commands.startStorageMigration).toHaveBeenCalledOnce());
+  });
+
   it("offers only resume for an interrupted in-place conversion", async () => {
     Object.assign(status, { pending: true, in_place: true, can_cancel: false, error: "Free more disk space to resume." });
     render(<StorageMigrationPrompt activity={{ ...idle, error: status.error }} />);

@@ -189,6 +189,16 @@ pub async fn recover_interrupted_migration(
     root: &Path,
     config: DbConfig,
 ) -> Result<(), sqlx::Error> {
+    recover_interrupted_migration_with_progress(root, config, |_| {}).await
+}
+
+/// The desktop owns recovery for the whole startup, including its visible
+/// progress. Recovery still leaves archival paused until an explicit retry.
+pub async fn recover_interrupted_migration_with_progress(
+    root: &Path,
+    config: DbConfig,
+    progress: impl Fn(MigrationProgress) + Send + Sync,
+) -> Result<(), sqlx::Error> {
     if !root.join("storage-migration.json").exists() {
         return Ok(());
     }
@@ -230,7 +240,8 @@ pub async fn recover_interrupted_migration(
         ));
     }
     let storage = HybridStorage::new(root.clone(), journal.descriptor.clone())?;
-    super::in_place::recover_recording(storage.clone()).await?;
+    super::in_place::recover_recording(storage.clone(), &progress).await?;
+    progress(MigrationProgress::phase("opening recovered history"));
     let db = DatabaseManager::new_with_storage(
         index.to_str().unwrap(),
         config,
@@ -315,7 +326,7 @@ pub struct MigrationProgress {
 }
 
 impl MigrationProgress {
-    fn phase(message: &'static str) -> Self {
+    pub(super) fn phase(message: &'static str) -> Self {
         Self {
             message,
             completed_records: None,
