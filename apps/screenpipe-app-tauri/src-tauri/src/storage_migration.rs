@@ -456,6 +456,12 @@ fn track_completed_migration(app: &tauri::AppHandle, root: &Path) {
     });
 }
 
+fn needs_storage_activation(using_new_storage: Option<bool>, error: Option<&str>) -> bool {
+    // No open server is normal during startup. Only an observed mismatch or
+    // an actual migration failure makes a completed migration retryable.
+    using_new_storage == Some(false) || error.is_some()
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_storage_migration_status(
@@ -487,7 +493,7 @@ pub async fn get_storage_migration_status(
         .map(|m| m.len())
         .unwrap_or(0);
     let mut blocked_reason = None;
-    let mut using_new_storage = false;
+    let mut using_new_storage = None;
     let mut can_delete_source = false;
     {
         let server = recording.server.try_lock();
@@ -501,10 +507,11 @@ pub async fn get_storage_migration_status(
                         "Apply the data directory change and restart before migrating.".into(),
                     );
                 } else {
-                    using_new_storage = descriptor.is_some()
-                        && server.db.storage_descriptor() == descriptor.as_ref()
-                        && !server.db.pool.is_closed();
-                    if completed && using_new_storage {
+                    using_new_storage = (!server.db.pool.is_closed()).then(|| {
+                        descriptor.is_some()
+                            && server.db.storage_descriptor() == descriptor.as_ref()
+                    });
+                    if completed && using_new_storage == Some(true) {
                         match server.db.retained_migration_source_bytes() {
                             Ok(bytes) => can_delete_source = bytes.is_some(),
                             Err(error) => blocked_reason = Some(error.to_string()),
@@ -530,7 +537,7 @@ pub async fn get_storage_migration_status(
         && blocked_reason.is_none()
         && (pending
             || (!completed && descriptor.is_none() && source_bytes > 0)
-            || (completed && (!using_new_storage || error.is_some())));
+            || (completed && needs_storage_activation(using_new_storage, error.as_deref())));
     Ok(StorageMigrationStatus {
         root: root.display().to_string(),
         app_session_id: APP_SESSION_ID.clone(),
@@ -544,7 +551,7 @@ pub async fn get_storage_migration_status(
         pending,
         in_place,
         completed,
-        using_new_storage,
+        using_new_storage: using_new_storage.unwrap_or(false),
         generation: descriptor.map(|d| d.generation),
         source_bytes,
         migrated_bytes: report.as_ref().map(|r| {
@@ -888,6 +895,25 @@ pub async fn delete_original_storage_database(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_migration_does_not_prompt_during_server_startup_or_restart() {
+        // The receipt already matches, but startup has not installed the
+        // server yet. Opening the migrated DB must not require user action.
+        assert!(!needs_storage_activation(None, None));
+        assert!(!needs_storage_activation(Some(true), None));
+    }
+
+    #[test]
+    fn completed_migration_keeps_actual_activation_failures_retryable() {
+        assert!(needs_storage_activation(Some(false), None));
+        for using_new_storage in [None, Some(false), Some(true)] {
+            assert!(needs_storage_activation(
+                using_new_storage,
+                Some("Your history was migrated, but recording could not resume.")
+            ));
+        }
+    }
 
     fn legacy_status() -> StorageMigrationStatus {
         StorageMigrationStatus {
