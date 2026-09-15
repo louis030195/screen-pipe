@@ -1573,7 +1573,18 @@ impl UpdatesManager {
                     return Result::Ok(true);
                 }
 
-                // Only the first trigger applies; defer to an in-flight restart.
+                let _ = self.app.emit(
+                    "update-restarting",
+                    serde_json::json!({
+                        "version": update.version,
+                        "delay_secs": 30,
+                    }),
+                );
+                wait_for_meeting_restart_window(&self.app).await;
+
+                // Claim the restart only after the meeting wait so a manual
+                // banner/tray click can proceed while auto-update is deferred.
+                // If it already did, avoid a second teardown and relaunch.
                 if UPDATE_RESTART_STARTED.swap(true, Ordering::SeqCst) {
                     info!("auto-update: update-restart already in progress, deferring");
                     return Result::Ok(true);
@@ -1583,15 +1594,6 @@ impl UpdatesManager {
 
                 let persistent_update =
                     enterprise_route == EnterpriseUpdateRoute::PersistentPackage;
-
-                let _ = self.app.emit(
-                    "update-restarting",
-                    serde_json::json!({
-                        "version": update.version,
-                        "delay_secs": 30,
-                    }),
-                );
-                wait_for_meeting_restart_window(&self.app).await;
                 if persistent_update {
                     request_persistent_update_for_restart().map_err(std::io::Error::other)?;
                 }
