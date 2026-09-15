@@ -77,6 +77,9 @@ describe("default onboarding setup", () => {
     let fail = true;
     mocks.fetch.mockImplementation((path, init) => path === "/pipes/speaker-reconciliation/config" && fail ? Promise.resolve(Response.json({ error: "failed" }, { status: 500 })) : normalFetch(path, init));
     const next = vi.fn(); render(<FinalSetupStep handleNextSlide={next} />); start(); await screen.findByRole("alert");
+    expect(mocks.capture).toHaveBeenCalledWith("onboarding_default_setup_failed", expect.objectContaining({
+      step: "speaker-reconciliation", operation: "configure", error_code: "http_error", http_status: 500, attempt_id: expect.any(String),
+    }));
     expect(next).not.toHaveBeenCalled(); expect(tasks.get("digital-clone")?.enabled).toBe(true); expect(tasks.get("speaker-reconciliation")?.enabled).toBe(false);
     fail = false; fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
     await waitFor(() => expect(next).toHaveBeenCalledTimes(1)); expect(writes().filter(([path]) => path === "/pipes/digital-clone/enable")).toHaveLength(1);

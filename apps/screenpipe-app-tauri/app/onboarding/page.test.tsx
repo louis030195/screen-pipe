@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   showWindow: vi.fn(async () => undefined),
   applyEnterpriseUiVisibility: vi.fn(async () => false),
   completeOnboarding: vi.fn(async () => undefined),
+  finalSetupFailure: vi.fn(),
   routerReplace: vi.fn(),
   capture: vi.fn(),
   useRealLoginGate: false,
@@ -155,10 +156,10 @@ vi.mock("@/components/onboarding/plan-selection-step", () => ({
   ),
 }));
 vi.mock("@/components/onboarding/final-setup-step", () => ({
-  default: ({ handleNextSlide }: { handleNextSlide: () => void }) => (
+  default: ({ handleNextSlide }: { handleNextSlide: () => void | Promise<void> }) => (
     <div>
       <span>recommended setup</span>
-      <button onClick={handleNextSlide}>finish recommended setup</button>
+      <button onClick={() => { void Promise.resolve(handleNextSlide()).catch(mocks.finalSetupFailure); }}>finish recommended setup</button>
     </div>
   ),
 }));
@@ -764,6 +765,7 @@ describe("enterprise onboarding authentication", () => {
       expect(mocks.setOnboardingStep).toHaveBeenCalledTimes(2),
     );
     expect(mocks.completeOnboarding).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.finalSetupFailure).toHaveBeenCalledWith(expect.objectContaining({ message: "store busy" })));
 
     fireEvent.click(finish);
     await waitFor(() => expect(mocks.completeOnboarding).toHaveBeenCalled());

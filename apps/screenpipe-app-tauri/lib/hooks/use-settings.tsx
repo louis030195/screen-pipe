@@ -311,6 +311,8 @@ export type Settings = SettingsStore & {
 	activitiesAiPresetId?: string;
 	/** Next native Activity generation run as an ISO timestamp. */
 	activitiesNextRunAt?: string;
+	/** Native account allowance backoff; null clears it for an explicit retry. */
+	activitiesQuotaPause?: { context: string; code: string; retry_at: string | null } | null;
 	/** Goal used to prioritize the Home cards. Persisted in store.bin. */
 	userGoalCategory?: UserGoalCategory;
 	/** Where the user says they found screenpipe, answered once during setup.

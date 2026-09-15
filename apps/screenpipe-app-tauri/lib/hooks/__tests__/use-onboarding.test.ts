@@ -63,9 +63,13 @@ describe("useOnboarding measurement", () => {
     });
   });
 
-  it("records completion only after the persisted command succeeds", async () => {
+  it("records intent before native completion closes the webview", async () => {
     localStorage.setItem("screenpipe:pipes-collapsed", "true");
-    mocks.completeOnboarding.mockResolvedValue({ status: "ok", data: null });
+    mocks.completeOnboarding.mockImplementationOnce(async () => {
+      expect(mocks.capture).toHaveBeenCalledWith("onboarding_completion_requested", expect.anything(), { send_instantly: true });
+      expect(mocks.capture.mock.calls.some(([event]) => event === "onboarding_completed")).toBe(false);
+      return { status: "ok", data: null };
+    });
 
     await useOnboarding.getState().completeOnboarding({
       method: "pipes_installed",
@@ -74,14 +78,13 @@ describe("useOnboarding measurement", () => {
     });
 
     expect(mocks.capture).toHaveBeenCalledWith(
-      "onboarding_completed",
+      "onboarding_completion_requested",
       {
         completion_method: "pipes_installed",
         pipe_count: 2,
         customized: false,
       },
-      // Unbatched: setup's webview is torn down immediately after this, so a
-      // queued event never flushes.
+      // Intent must leave before the native command can destroy this webview.
       { send_instantly: true },
     );
     expect(useOnboarding.getState().onboardingData.isCompleted).toBe(true);
@@ -151,7 +154,7 @@ describe("useOnboarding measurement", () => {
     });
     expect(mocks.emit).not.toHaveBeenCalledWith("first-run-guide-pending");
     expect(mocks.capture).toHaveBeenCalledWith(
-      "onboarding_completed",
+      "onboarding_completion_requested",
       {
         completion_method: "live_view_created",
         pipe_count: 2,
@@ -179,7 +182,7 @@ describe("useOnboarding measurement", () => {
       url: "screenpipe://home?section=connections",
     });
     expect(mocks.capture).toHaveBeenCalledWith(
-      "onboarding_completed",
+      "onboarding_completion_requested",
       {
         completion_method: "ai_connections_selected",
         pipe_count: undefined,

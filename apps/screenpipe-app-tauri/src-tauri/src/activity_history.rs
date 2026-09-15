@@ -7,6 +7,10 @@
 //! The native app owns both the schedule and generation lifecycle. React only
 //! reads the persisted projection or asks the backend for an immediate run.
 
+mod quota;
+use quota::QuotaPause;
+use sha2::{Digest, Sha256};
+
 use crate::pi::{self, AcpAgentConfig, PiBackend, PiProviderConfig, PiState};
 use crate::recording::{local_api_context_from_app, RecordingState};
 use crate::store::{self, AIProviderType, SettingsStore};
@@ -24,6 +28,7 @@ use tracing::{error, info, warn};
 
 const STORE_KEY: &str = "activityHistory:activity-history-pi-v9";
 const DEFAULT_INTERVAL_MINUTES: u64 = 15;
+const QUOTA_PAUSE_KEY: &str = "activitiesQuotaPause";
 const COVERAGE_SLOP_MS: i64 = 1_000;
 const OBSERVED_WINDOW_MINUTES: i64 = 30;
 const MIN_OBSERVED_OVERLAP_MINUTES: i64 = 2;
@@ -1337,6 +1342,10 @@ async fn generate(
         generation_event_properties(&run_id, source, start, end, started_at.elapsed()),
     );
 
+    let allowance_context = SettingsStore::get(app)
+        .ok()
+        .flatten()
+        .map(|s| quota_context(&s));
     match generate_inner(app, state, start, end, source).await {
         Ok(result) => {
             let ActivityGenerationResult {
@@ -1345,7 +1354,19 @@ async fn generate(
                 generated_activity_count,
             } = result;
             let activity_count = history.entries.len();
+            if degraded_error.is_none() {
+                if let Some(context) = allowance_context.as_deref() {
+                    if let Err(error) = clear_quota_pause(app, context) {
+                        warn!(%error, "could not clear activity allowance pause after success");
+                    }
+                }
+            }
             if let Some(error_message) = degraded_error {
+                if let Some(context) = allowance_context.as_deref() {
+                    if let Err(error) = pause_after_quota_error(app, &error_message, context) {
+                        warn!(%error, "could not persist activity allowance pause after partial recovery");
+                    }
+                }
                 track_generation_event(
                     app,
                     "activity_generation_run_degraded",
@@ -1389,6 +1410,11 @@ async fn generate(
             Ok(history)
         }
         Err(error_message) => {
+            if let Some(context) = allowance_context.as_deref() {
+                if let Err(error) = pause_after_quota_error(app, &error_message, context) {
+                    warn!(%error, "could not persist activity allowance pause");
+                }
+            }
             let skipped = error_message.starts_with("activity_no_data:");
             let mut properties =
                 generation_event_properties(&run_id, source, start, end, started_at.elapsed());
@@ -1695,6 +1721,86 @@ fn setting_u64(settings: &SettingsStore, key: &str) -> Option<u64> {
     settings.extra.get(key).and_then(Value::as_u64)
 }
 
+// Do not include rotating auth tokens or entitlement checked_at: routine
+// refreshes must not reset a pause. Hash the selected preset and meaningful
+// account state so credentials and customer identity never enter telemetry.
+fn quota_context(settings: &SettingsStore) -> String {
+    let selected = settings
+        .extra
+        .get("activitiesAiPresetId")
+        .and_then(Value::as_str);
+    let preset = settings
+        .ai_presets
+        .iter()
+        .find(|p| selected == Some(p.id.as_str()))
+        .or_else(|| settings.ai_presets.iter().find(|p| p.default_preset))
+        .or_else(|| settings.ai_presets.first());
+    let entitlement = settings.user.entitlement.as_ref();
+    let context = json!({
+        "preset": preset,
+        "account": settings.user.id,
+        "clerk_account": settings.user.clerk_id,
+        "plan": settings.user.subscription_plan,
+        "app_entitled": settings.user.app_entitled,
+        "credits_balance": settings.user.credits_balance,
+        "entitlement_plan": entitlement.and_then(|e| e.get("plan")),
+        "entitlement_active": entitlement.and_then(|e| e.get("active")),
+        "entitlement_source": entitlement.and_then(|e| e.get("source")),
+    });
+    format!("{:x}", Sha256::digest(context.to_string().as_bytes()))
+}
+
+fn write_quota_pause(app: &AppHandle, pause: Option<&QuotaPause>) -> Result<(), String> {
+    let mut settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
+    let value = pause
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if settings.extra.get(QUOTA_PAUSE_KEY) == value.as_ref() {
+        return Ok(());
+    }
+    match value {
+        Some(value) => {
+            settings.extra.insert(QUOTA_PAUSE_KEY.to_string(), value);
+        }
+        None => {
+            settings.extra.remove(QUOTA_PAUSE_KEY);
+        }
+    }
+    let store = store::get_store(app, None).map_err(|e| e.to_string())?;
+    store.set("settings", json!(settings));
+    store.save().map_err(|e| e.to_string())?;
+    store::reencrypt_store_file(app);
+    Ok(())
+}
+
+fn clear_quota_pause(app: &AppHandle, context: &str) -> Result<(), String> {
+    let settings = SettingsStore::get(app)?.ok_or("Settings are not available")?;
+    let pause = settings
+        .extra
+        .get(QUOTA_PAUSE_KEY)
+        .and_then(|value| serde_json::from_value::<QuotaPause>(value.clone()).ok());
+    if pause.is_some_and(|pause| pause.context == context) {
+        write_quota_pause(app, None)?;
+    }
+    Ok(())
+}
+
+fn pause_after_quota_error(app: &AppHandle, error: &str, context: &str) -> Result<(), String> {
+    if let Some(pause) = QuotaPause::from_error(error, context.to_string(), Utc::now()) {
+        write_quota_pause(app, Some(&pause))?;
+        track_generation_event(
+            app,
+            "activity_generation_paused",
+            json!({
+                "reason": pause.code, "retry_at": pause.retry_at,
+                "telemetry_schema_version": 1,
+            }),
+        );
+    }
+    Ok(())
+}
+
 fn configured_interval_minutes(settings: &SettingsStore) -> u64 {
     setting_u64(settings, "activitiesIntervalMinutes")
         .unwrap_or(DEFAULT_INTERVAL_MINUTES)
@@ -1774,6 +1880,22 @@ pub fn start(app: AppHandle) {
                 continue;
             }
             let now = Utc::now();
+            let pause = settings
+                .extra
+                .get(QUOTA_PAUSE_KEY)
+                .and_then(|value| serde_json::from_value::<QuotaPause>(value.clone()).ok());
+            let quota_resumed = if let Some(pause) = pause {
+                if pause.blocks(&quota_context(&settings), now) {
+                    continue;
+                }
+                if let Err(error) = write_quota_pause(&app, None) {
+                    warn!(%error, "could not clear expired activity allowance pause");
+                    continue;
+                }
+                true
+            } else {
+                false
+            };
             let interval_minutes = configured_interval_minutes(&settings);
             let next_run = setting_time(&settings, "activitiesNextRunAt")
                 .unwrap_or_else(|| now + chrono::Duration::minutes(interval_minutes as i64));
@@ -1781,7 +1903,7 @@ pub fn start(app: AppHandle) {
                 let _ = set_next_run(&app, next_run);
                 continue;
             }
-            if now < next_run {
+            if now < next_run && !quota_resumed {
                 continue;
             }
             if !local_server_is_available(&app).await {
@@ -1815,6 +1937,23 @@ pub fn start(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allowance_context_ignores_token_refresh_but_detects_provider_and_plan_changes() {
+        let mut settings = SettingsStore::default();
+        settings.user.id = Some("account-a".into());
+        settings.user.entitlement =
+            Some(json!({"plan": "free", "active": true, "checked_at": "old"}));
+        let context = quota_context(&settings);
+        settings.user.token = Some("rotated-auth-token".into());
+        settings.user.entitlement.as_mut().unwrap()["checked_at"] = json!("new");
+        assert_eq!(quota_context(&settings), context);
+        settings.ai_presets[0].model = "another-model".into();
+        assert_ne!(quota_context(&settings), context);
+        let changed_provider = quota_context(&settings);
+        settings.user.entitlement.as_mut().unwrap()["plan"] = json!("pro");
+        assert_ne!(quota_context(&settings), changed_provider);
+    }
 
     #[test]
     fn duplicate_selected_interval_is_a_noop_until_the_original_finishes() {

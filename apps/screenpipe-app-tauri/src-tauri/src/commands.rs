@@ -2773,22 +2773,70 @@ pub async fn get_onboarding_status(
     OnboardingStore::get(&app_handle).map(|o| o.unwrap_or_default())
 }
 
+// Preserve receipt identity on retry. The store cache may already contain
+// completion after a failed disk save, so emit after every successful save;
+// consumers can deduplicate retries by completion_id. Completion means saved
+// setup, not that the destination window opened successfully.
+fn mark_onboarding_completed(onboarding: &mut OnboardingStore) -> serde_json::Value {
+    if !onboarding.is_completed || onboarding.completed_at.is_none() {
+        onboarding.complete();
+    }
+    serde_json::json!({
+        "telemetry_schema_version": 2,
+        "owner": "native",
+        "completion_id": onboarding.completed_at,
+    })
+}
+
+#[cfg(test)]
+mod onboarding_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_a_failed_save_preserves_completion_time_and_receipt_identity() {
+        let mut onboarding = OnboardingStore::default();
+        let receipt = mark_onboarding_completed(&mut onboarding);
+        assert!(onboarding.is_completed);
+        let completed_at = onboarding.completed_at.clone();
+        assert_eq!(receipt["completion_id"], serde_json::json!(completed_at));
+        assert_eq!(mark_onboarding_completed(&mut onboarding), receipt);
+        assert_eq!(onboarding.completed_at, completed_at);
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn complete_onboarding(app_handle: tauri::AppHandle) -> Result<(), String> {
-    // Update the persistent store
+    let mut receipt = None;
+    let mut persisted = None;
     OnboardingStore::update(&app_handle, |onboarding| {
-        onboarding.complete();
+        receipt = Some(mark_onboarding_completed(onboarding));
+        persisted = Some(onboarding.clone());
     })
     .map_err(|e| e.to_string())?;
 
-    // Update the managed state in memory
-    if let Some(managed_store) = app_handle.try_state::<OnboardingStore>() {
-        // Get the current state and create an updated version
-        let mut updated_store = managed_store.inner().clone();
-        updated_store.complete();
-        // Replace the managed state with the updated version
-        app_handle.manage(updated_store);
+    if let Some(persisted) = persisted {
+        app_handle.manage(persisted);
+    }
+    // Capture only after persistence succeeds. The task belongs to the native
+    // process and survives the onboarding webview being destroyed below.
+    if let (Some(properties), Some(analytics)) = (
+        receipt,
+        app_handle.try_state::<std::sync::Arc<AnalyticsManager>>(),
+    ) {
+        let analytics = std::sync::Arc::clone(&analytics);
+        tauri::async_runtime::spawn(async move {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                analytics.send_event("onboarding_completed", Some(properties)),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "onboarding completion receipt failed"),
+                Err(_) => tracing::warn!("onboarding completion receipt timed out"),
+            }
+        });
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
