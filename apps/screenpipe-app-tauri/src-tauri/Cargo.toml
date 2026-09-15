@@ -31,7 +31,7 @@ cc = "1"
 [dependencies]
 fs2 = "0.4"
 tauri-helper = { git = "https://github.com/screenpipe/tauri-helper", rev = "e25ff1d2c5026189305a0251a1e06788efe1d2b3" }
-tauri = { version = "=2.11.2", features = [
+tauri = { version = "=2.11.5", features = [
   "protocol-asset",
   "macos-private-api",
   "tray-icon",
@@ -54,7 +54,7 @@ tauri-plugin-dialog = "=2.6.0"
 tauri-plugin-os = "=2.3.2"
 tauri-plugin-process = "=2.3.1"
 tauri-plugin-autostart = "=2.5.1"
-tauri-plugin-shell = "=2.3.5"
+tauri-plugin-shell = "=2.3.6"
 tauri-plugin-store = "=2.4.4"
 tauri-plugin-http = "=2.5.7"
 tauri-plugin-permission-flow = { git = "https://github.com/EzraEllette/permission-flow", rev = "d0a4b78a0599b926bfc59e7e272b742aa07fcebb", package = "tauri-plugin-permission-flow" }
@@ -102,7 +102,7 @@ sha2 = "0.10"
 # 0.2.189 sizes vm_statistics64 for macOS 27. sysinfo 0.29 forwards that
 # 104-word size to macOS 26, whose libsystem maximum is 62, on every memory
 # refresh. Keep the pre-macOS-27 layout until the caller is version-aware.
-libc = "=0.2.186"
+libc = "=0.2.189"
 anyhow = "1.0.71"
 arboard = "3.4"
 
@@ -118,7 +118,7 @@ axum = "0.6.0" # or your current version
 
 
 dirs = "6.0.0"
-tauri-plugin-deep-link = "=2.4.9"
+tauri-plugin-deep-link = "=2.4.10"
 
 once_cell = "1.20.0"
 tauri-plugin-sentry = "0.5.0"
@@ -339,7 +339,7 @@ serial_test = "3"
 tower = { version = "0.4", features = ["util"] }
 # MockRuntime for store.rs recovery tests that must exercise the real
 # tauri-plugin-store registry (state + resources table).
-tauri = { version = "=2.11.2", features = ["test"] }
+tauri = { version = "=2.11.5", features = ["test"] }
 # staged_update tests: sign fake update archives with a throwaway key
 minisign = "0.7"
 
