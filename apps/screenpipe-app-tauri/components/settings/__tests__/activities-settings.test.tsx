@@ -52,4 +52,19 @@ describe("ActivitiesSettings", () => {
       activitiesIntervalMinutes: 30,
     });
   });
+  it("explains exhausted allowances and allows an explicit retry without changing quotas", () => {
+    mocks.settings = { activitiesEnabled: true, activitiesQuotaPause: { context: "hash", code: "trial_cost_limit_exceeded", retry_at: null } };
+    render(<ActivitiesSettings />);
+    expect(screen.getByRole("status")).toHaveTextContent("your AI allowance is used up");
+    expect(screen.getByRole("status")).toHaveTextContent("Change your AI provider or plan");
+    fireEvent.click(screen.getByRole("button", { name: "Retry summaries" }));
+    expect(mocks.updateSettings).toHaveBeenCalledWith({ activitiesQuotaPause: null, activitiesNextRunAt: expect.any(String) });
+  });
+
+  it("shows the next bounded check for a resetting allowance", () => {
+    mocks.settings = { activitiesEnabled: true, activitiesQuotaPause: { context: "hash", code: "free_chat_limit_exceeded", retry_at: "2026-09-16T12:00:00Z" } };
+    render(<ActivitiesSettings />);
+    expect(screen.getByRole("status")).toHaveTextContent("Next automatic check:");
+  });
+
 });

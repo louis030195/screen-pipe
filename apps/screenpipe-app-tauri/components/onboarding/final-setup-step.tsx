@@ -8,7 +8,7 @@ import posthog from "posthog-js";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { SetupConnections } from "./setup-connections";
-import { localFetch } from "@/lib/api";
+import { setupRequest as request, SetupRequestError, setupFailureProperties } from "@/lib/onboarding-setup-request";
 import { useSettings } from "@/lib/hooks/use-settings";
 import { publishPipeInstalledReceipt } from "@/lib/pipe-install-receipt";
 import { commands } from "@/lib/utils/tauri";
@@ -21,32 +21,9 @@ const DEFAULTS = [
 ];
 
 
-async function request(path: string, signal: AbortSignal, body?: unknown, timeout = 10_000) {
-  signal.throwIfAborted();
-  const bounded = new AbortController();
-  const cancel = () => bounded.abort();
-  signal.addEventListener("abort", cancel, { once: true });
-  const timer = setTimeout(cancel, timeout);
-  try {
-    const response = await localFetch(path, {
-      signal: bounded.signal,
-      ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
-    });
-    bounded.signal.throwIfAborted();
-    const data = await response.json();
-    signal.throwIfAborted();
-    if (body === undefined && (response.status === 404 || typeof data.error === "string" && data.error.includes("not found"))) return null;
-    if (!response.ok || data.error || data.success === false) throw new Error("setup unavailable");
-    return data;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", cancel);
-  }
-}
-
 async function readPipe(slug: string, signal: AbortSignal) {
   const data = await request(`/pipes/${slug}`, signal);
-  if (data !== null && typeof data?.data?.config?.enabled !== "boolean") throw new Error("pipe status unavailable");
+  if (data !== null && typeof data?.data?.config?.enabled !== "boolean") throw new SetupRequestError("read", "invalid_response");
   return data;
 }
 
@@ -72,11 +49,11 @@ async function setupPipe(task: typeof DEFAULTS[number], preset: string | undefin
     if (current?.data?.config?.enabled) {
       await request(`/pipes/${task.slug}/enable`, signal, { enabled: false });
       const verified = await readPipe(task.slug, signal);
-      if (verified?.data?.config?.enabled !== false) throw new Error("pause could not be verified");
+      if (verified?.data?.config?.enabled !== false) throw new SetupRequestError("verify", "verification_failed");
     }
     return;
   }
-  if (!preset) throw new Error("model unavailable");
+  if (!preset) throw new SetupRequestError("model", "model_unavailable");
   // Returning to onboarding must not replace an already running task's model.
   if (current?.data?.config?.enabled) return;
   if (current === null) {
@@ -87,7 +64,7 @@ async function setupPipe(task: typeof DEFAULTS[number], preset: string | undefin
   await request(`/pipes/${task.slug}/config`, signal, { agent: "pi", preset: [preset], cloud_agent: null });
   await request(`/pipes/${task.slug}/enable`, signal, { enabled: true });
   const verified = await readPipe(task.slug, signal);
-  if (verified?.data?.config?.enabled !== true) throw new Error("setup could not be verified");
+  if (verified?.data?.config?.enabled !== true) throw new SetupRequestError("verify", "verification_failed");
 }
 
 export default function FinalSetupStep({ userToken, handleNextSlide }: {
@@ -118,9 +95,10 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
     const controller = new AbortController();
     operation.current = controller;
     const tasks = DEFAULTS;
+    const attemptId = crypto.randomUUID();
     let taskSlug = "engine";
     let stage = "engine";
-    posthog.capture("onboarding_defaults_start_clicked", { setup_version: 2, selected_steps: DEFAULTS.filter(task => selected[task.slug]).map(task => task.slug) });
+    posthog.capture("onboarding_defaults_start_clicked", { setup_version: 3, attempt_id: attemptId, selected_steps: DEFAULTS.filter(task => selected[task.slug]).map(task => task.slug) });
     try {
       setPhase("Starting Screenpipe");
       const health = await request("/health", controller.signal, undefined, 3_000).catch(() => null);
@@ -135,19 +113,19 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
         if (task.slug === "daily-email-summary" && selected[task.slug] && !gmailConnected) continue;
         taskSlug = task.slug; stage = "setup";
         setPhase(`${selected[task.slug] ? "Setting up" : "Turning off"} ${task.label.toLowerCase()}`);
-        posthog.capture("onboarding_default_setup_attempted", { step: task.slug, enabled: selected[task.slug], setup_version: 2 });
+        posthog.capture("onboarding_default_setup_attempted", { step: task.slug, enabled: selected[task.slug], setup_version: 3, attempt_id: attemptId });
         await setupPipe(task, preset?.id, selected[task.slug], controller.signal);
         setCompleted(previous => previous.includes(task.slug) ? previous : [...previous, task.slug]);
         // A distinct contract keeps automatic defaults out of historic opt-in metrics.
-        posthog.capture("onboarding_default_setup_completed", { step: task.slug, enabled: selected[task.slug], setup_version: 2 });
+        posthog.capture("onboarding_default_setup_completed", { step: task.slug, enabled: selected[task.slug], setup_version: 3, attempt_id: attemptId });
       }
       stage = "continue";
       setPhase("Opening Screenpipe");
-      posthog.capture("onboarding_defaults_completed", { setup_version: 2, selected_steps: DEFAULTS.filter(task => selected[task.slug]).map(task => task.slug) });
+      posthog.capture("onboarding_defaults_completed", { setup_version: 3, attempt_id: attemptId, selected_steps: DEFAULTS.filter(task => selected[task.slug]).map(task => task.slug) }, { send_instantly: true });
       await handleNextSlide();
     } catch (failure) {
       if (controller.signal.aborted) return;
-      posthog.capture("onboarding_default_setup_failed", { step: taskSlug, stage, setup_version: 2 });
+      posthog.capture("onboarding_default_setup_failed", { step: taskSlug, stage, setup_version: 3, attempt_id: attemptId, ...setupFailureProperties(failure) });
       setError(stage === "continue" ? "Your setup is saved. Screenpipe couldn't open. Try again." : "Screenpipe couldn't finish setup. Completed tasks are saved; retry or finish later in Scheduled Tasks.");
     } finally {
       if (!controller.signal.aborted) { setBusy(false); setPhase(""); }
@@ -158,7 +136,7 @@ export default function FinalSetupStep({ userToken, handleNextSlide }: {
   async function finishLater() {
     if (running.current) return;
     running.current = true; setBusy(true);
-    posthog.capture("onboarding_defaults_deferred", { setup_version: 2, completed_steps: completed });
+    posthog.capture("onboarding_defaults_deferred", { setup_version: 3, completed_steps: completed });
     try { await handleNextSlide(); }
     catch { setError("Screenpipe couldn't open. Try again."); }
     finally { running.current = false; setBusy(false); }

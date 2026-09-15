@@ -5,6 +5,7 @@
 
 import { Clock3, ListChecks } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useSettings } from "@/lib/hooks/use-settings";
 import type { SettingsField } from "./settings-search";
@@ -18,6 +19,7 @@ export const searchIndex: SettingsField[] = [
 
 export function ActivitiesSettings() {
   const { settings, updateSettings } = useSettings();
+  const pause = settings.activitiesQuotaPause;
   const enabled = settings.activitiesEnabled ?? false;
   const intervalMinutes = settings.activitiesIntervalMinutes ?? DEFAULT_INTERVAL_MINUTES;
 
@@ -26,6 +28,19 @@ export function ActivitiesSettings() {
       <p className="text-sm text-muted-foreground">
         Control automatic activity summaries.
       </p>
+
+      {enabled && pause && (
+        <div role="status" className="space-y-2 border border-border p-4 text-xs text-muted-foreground">
+          <p>Automatic summaries are paused because your AI allowance is used up.</p>
+          <p>{pause.retry_at
+            ? `Next automatic check: ${new Date(pause.retry_at).toLocaleString()}.`
+            : "Change your AI provider or plan, then retry."}</p>
+          <Button variant="outline" size="sm" onClick={() => updateSettings({
+            activitiesQuotaPause: null,
+            activitiesNextRunAt: new Date().toISOString(),
+          })}>Retry summaries</Button>
+        </div>
+      )}
 
       <div className="border border-border bg-card">
         <div className="flex items-center justify-between gap-6 px-4 py-3">
