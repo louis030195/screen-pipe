@@ -825,10 +825,17 @@ unsafe impl VTabCursor for Cursor {
                     _ => (),
                 }
                 let (path, hash) = self.archive_location.as_ref().unwrap();
-                full = self
-                    .storage
-                    .bulk_frame_records(path, hash, row.frame, archive)
-                    .map_err(|_| failure("element archive unavailable"))?;
+                // A history scan visits many frames in the same file. Decode
+                // that bounded file once instead of decompressing its pages
+                // again for each frame. Point/frame reads keep their selective
+                // projection; metadata-only scans still use the index above.
+                full = if self.frame.is_some() || self.lower == self.upper {
+                    self.storage
+                        .bulk_frame_records(path, hash, row.frame, archive)
+                } else {
+                    self.storage.bulk_records(path, hash, 0)
+                }
+                .map_err(|_| failure("element archive unavailable"))?;
                 let position = full
                     .binary_search_by_key(&row.id, |r| r.id)
                     .map_err(|_| failure("element row is absent"))?;
